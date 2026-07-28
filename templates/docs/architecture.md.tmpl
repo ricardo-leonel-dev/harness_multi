@@ -1,0 +1,30 @@
+# Architecture — What does "doing a good job" mean here?
+
+> This document defines the quality bar for this project. The reviewer agent
+> evaluates code against this file. If it's not here, it's not a requirement.
+> Fill in every TODO before an implementer starts work.
+
+## Principles
+
+1. **Layers.** TODO: list this project's layers/modules and what belongs in
+   each (e.g. "storage — persistence", "domain — business logic", "cli/api —
+   the user-facing interface"). Don't let implementers introduce additional
+   layers without updating this file first.
+2. **Dependencies.** TODO: state the dependency policy — stdlib-only?
+   an approved allowlist? anything goes? Be explicit; "obviously fine" isn't
+   obvious to an agent that hasn't seen this project before.
+3. **Error handling.** TODO: how do failures surface — exceptions, error
+   returns, exit codes? What's forbidden (e.g. silent failure, printing and
+   continuing)?
+4. **State/mutability.** TODO: any invariants about mutability, immutability,
+   or shared state that matter for this codebase.
+
+## Data Flow
+
+TODO: a short diagram or description of how data/control moves through the
+system (e.g. `input -> validation -> domain logic -> persistence`).
+
+## What NOT to do
+
+TODO: list the anti-patterns specific to this project that an agent might
+otherwise reach for by default.

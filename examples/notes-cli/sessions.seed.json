@@ -1,0 +1,81 @@
+[
+  {
+    "feature_name": null,
+    "agent": "human (Martin)",
+    "plan": ["Set up the initial harness structure"],
+    "changes": ["AGENTS.md", "init.sh", "feature_list.json", "docs/"],
+    "verification": "./init.sh green.",
+    "closure": "environment ready.",
+    "started_at": "2026-04-20T00:00:00.000Z",
+    "closed_at": "2026-04-20T00:00:00.000Z"
+  },
+  {
+    "feature_name": "storage_layer",
+    "agent": "implementer #1",
+    "plan": ["Create src/storage.py with atomic load() / save() and tests."],
+    "changes": ["src/storage.py", "tests/test_storage.py"],
+    "verification": "./init.sh green, 3 tests pass.",
+    "closure": "Feature 1 marked done.",
+    "started_at": "2026-04-22T00:00:00.000Z",
+    "closed_at": "2026-04-22T00:00:00.000Z"
+  },
+  {
+    "feature_name": "note_model",
+    "agent": "Implementer #2",
+    "plan": ["Dataclass Note with Note.new(title, body) and dict serialization."],
+    "changes": ["src/notes.py", "tests/test_notes.py"],
+    "verification": "./init.sh green.",
+    "closure": "Feature 2 marked done.",
+    "started_at": "2026-04-23T00:00:00.000Z",
+    "closed_at": "2026-04-23T00:00:00.000Z"
+  },
+  {
+    "feature_name": "cli_add_list",
+    "agent": "Implementer #3, reviewed by reviewer-agent",
+    "plan": ["src/cli.py with argparse, add and list commands."],
+    "changes": ["src/cli.py", "tests/test_cli.py"],
+    "verification": "./init.sh is green, 7 tests pass.",
+    "closure": "Feature 3 marked done. Next: Feature 4 (show/delete).",
+    "started_at": "2026-04-25T00:00:00.000Z",
+    "closed_at": "2026-04-25T00:00:00.000Z"
+  },
+  {
+    "feature_name": "cli_show_delete",
+    "agent": "Claude Opus 4.7",
+    "plan": ["Add cmd_show and cmd_delete to src/cli.py with NoteNotFound handling (stderr + exit 1)."],
+    "changes": [
+      "src/cli.py (subcommands show/delete and capture of NoteError in main)",
+      "tests/test_cli.py (4 new tests: success and failure for each command, capture of stderr)"
+    ],
+    "verification": "./init.sh green, 14 tests pass.",
+    "closure": "Feature 4 marked done. Next: Feature 5 (search).",
+    "started_at": "2026-04-27T00:00:00.000Z",
+    "closed_at": "2026-04-27T00:00:00.000Z"
+  },
+  {
+    "feature_name": "cli_search",
+    "agent": "Claude Opus 4.6",
+    "plan": ["Add cmd_search to src/cli.py with case-insensitive search in title and body. No matches -> NoteNotFound (stderr + exit 1)."],
+    "changes": [
+      "src/cli.py (subcommand search with cmd_search)",
+      "tests/test_cli.py (3 new tests: match, non-match, case-insensitivity)"
+    ],
+    "verification": "./init.sh is green, 17 tests passed.",
+    "closure": "Feature 5 marked done. All features completed.",
+    "started_at": "2026-04-27T00:00:00.000Z",
+    "closed_at": "2026-04-27T00:00:00.000Z"
+  },
+  {
+    "feature_name": "cli_edit",
+    "agent": "Claude Opus 4.7 (leader) -> implementer -> reviewer",
+    "plan": ["Add cmd_edit to src/cli.py with optional --title and --body; no flags -> NoteError; non-existent id -> NoteNotFound."],
+    "changes": [
+      "src/cli.py (subcommand edit and cmd_edit that builds a new Note instance preserving id/created_at)",
+      "tests/test_cli.py (5 tests: each flag, both together, non-existent id, absence of flags)"
+    ],
+    "verification": "./init.sh green, 22 tests pass. Reviewer APPROVED (progress/review_cli_edit.md).",
+    "closure": "feature 6 marked done. All project features completed.",
+    "started_at": "2026-04-29T00:00:00.000Z",
+    "closed_at": "2026-04-29T00:00:00.000Z"
+  }
+]

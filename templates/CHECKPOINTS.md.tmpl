@@ -1,0 +1,40 @@
+# CHECKPOINTS — Final State Evaluation
+
+> In multi-agent systems, the path isn't evaluated; the destination is.
+> These are the objective checkpoints a judge (human or AI) uses to decide
+> if the project is healthy.
+
+## C1 — The harness is set up
+
+- [ ] `.harness.json` and `harness.db` exist.
+- [ ] `docs/architecture.md`, `docs/conventions.md`, `docs/verification.md`, `CHECKPOINTS.md` have their TODOs filled in (not left as template placeholders).
+- [ ] `./init.sh` exits 0.
+
+## C2 — The state is consistent
+
+- [ ] At most one feature is `in_progress` (enforced by a DB constraint — this should never actually fail).
+- [ ] Every `done` feature has passing tests.
+- [ ] The open session (if any) reflects real, current work — not stale leftovers from a previous session.
+
+## C3 — The code respects the architecture
+
+- [ ] `src/` (or this project's equivalent) only contains what's described in `docs/architecture.md`.
+- [ ] The dependency policy in `docs/architecture.md` is honored.
+- [ ] No loose debug `print`/`console.log` statements or TODOs without context.
+
+## C4 — The verification is real
+
+- [ ] Tests exist for the code that changed.
+- [ ] Tests exercise real behavior, not mocks of the thing under test.
+- [ ] `{{VERIFY_COMMAND}}` returns green.
+
+## C5 — The session closed successfully
+
+- [ ] No stray untracked/temporary files.
+- [ ] The session was logged out via `scripts/harness.sh log-out` (not left open).
+- [ ] The last feature worked on reflects its correct status.
+
+---
+
+**How to use this file:** the `reviewer` agent (`.claude/agents/reviewer.md`) iterates through each checkbox, marks
+`[x]` or `[ ]`, and rejects the session closure if any box in C1–C5 is empty.

@@ -1,0 +1,38 @@
+# Verification — How to prove a feature works
+
+> Golden rule: the agent doesn't say "it works," it proves it. Every feature
+> ends with executable evidence, not just claims. Fill in every TODO before
+> an implementer starts work.
+
+## Verification Levels
+
+### Level 1 — Unit Tests (mandatory)
+
+TODO: the exact command to run this project's unit test suite. This should
+match `.harness.json`'s `verify_command` — `init.sh` runs it before allowing
+a session to close.
+
+### Level 2 — Integration Test (if this project has a user-facing surface)
+
+TODO: how to exercise the project's actual entry point (CLI, API, UI) against
+a throwaway/temporary environment, with a concrete example.
+
+### Level 3 — Manual Smoke Test (optional but recommended)
+
+TODO: a short manual end-to-end flow worth running before closing a session.
+
+## Anti-patterns (do not do)
+
+- "I added the feature, it should work." → missing executable proof.
+- A test that only checks "it didn't throw" → check the actual result.
+- Mocking the thing under test instead of exercising it for real.
+- Marking a feature `done` without `init.sh` passing.
+
+## Final Check Before Closing
+
+```bash
+./init.sh   # must end with [OK] Environment ready
+```
+
+If `init.sh` is red, do not close the session as `done` — record the blocker
+and set the feature's status to `blocked` instead.

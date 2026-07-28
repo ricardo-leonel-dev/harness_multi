@@ -1,0 +1,11 @@
+{
+  "harness_version": "0.1.0",
+  "db_path": "harness.db",
+  "snapshot_path": "state",
+  "project_slug": "notes-cli",
+  "verify_command": "python3 -m unittest discover -s tests -v",
+  "supabase_url_env": "SUPABASE_URL",
+  "supabase_key_env": "SUPABASE_ANON_KEY",
+  "supabase_rest_path": "",
+  "notion_database_id": ""
+}

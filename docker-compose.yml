@@ -1,0 +1,58 @@
+# Local Postgres + PostgREST stack for the Postgres/Supabase mirror.
+#
+# This is the "minimal hand-rolled compose" alternative mentioned in the
+# README — a lighter footprint than `supabase start` (no Studio/Auth/Storage,
+# just Postgres and the REST API in front of it). Either works; use whichever
+# you already have installed.
+#
+# Usage:
+#   docker compose up -d
+#   source <(bash scripts/dev_jwt.sh)   # exports SUPABASE_URL / SUPABASE_ANON_KEY
+#   bash scripts/harness.sh sync        # (from an installed project)
+#
+# db/schema.postgres.sql and db/rpc/*.sql are applied automatically the
+# first time the postgres container initializes its data volume. To re-apply
+# after a schema change, `docker compose down -v` first (destroys local data).
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: harness-dev
+      POSTGRES_DB: postgres
+    ports:
+      - "54329:5432"
+    volumes:
+      - harness_pg_data:/var/lib/postgresql/data
+      - ./db/schema.postgres.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/rpc/bootstrap_project.sql:/docker-entrypoint-initdb.d/02_bootstrap_project.sql:ro
+      - ./db/rpc/upsert_feature.sql:/docker-entrypoint-initdb.d/03_upsert_feature.sql:ro
+      - ./db/rpc/upsert_session.sql:/docker-entrypoint-initdb.d/04_upsert_session.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  postgrest:
+    image: postgrest/postgrest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://postgres:harness-dev@postgres:5432/postgres
+      PGRST_DB_SCHEMA: public
+      # Local dev only: skip proper anon/authenticated role separation and
+      # RLS (deferred per the plan — see README) by mapping anon straight to
+      # the postgres role. Do not reuse this setup as-is against real data.
+      PGRST_DB_ANON_ROLE: postgres
+      # Bare PostgREST requires a JWT secret to accept any Authorization
+      # header at all (see scripts/dev_jwt.sh, which signs with this exact
+      # value) — without it every request 500s with "Server lacks JWT secret".
+      PGRST_JWT_SECRET: harness-local-dev-jwt-secret-at-least-32-chars
+
+    ports:
+      - "3001:3000"
+
+volumes:
+  harness_pg_data:

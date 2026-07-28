@@ -1,0 +1,95 @@
+[
+  {
+    "feature_number": 1,
+    "name": "storage_layer",
+    "title": "Capa de almacenamiento JSON",
+    "description": "Lectura/escritura atómica de notas en un archivo JSON. Crea el archivo si no existe.",
+    "acceptance": [
+      "Existe src/storage.py con funciones load() y save(notes)",
+      "save() es atómico (escritura a archivo temporal + rename)",
+      "load() devuelve [] si el archivo no existe",
+      "tests/test_storage.py cubre los 3 casos anteriores"
+    ],
+    "status": "done"
+  },
+  {
+    "feature_number": 2,
+    "name": "note_model",
+    "title": "Modelo de Nota",
+    "description": "Estructura inmutable que representa una nota con id, title, body, created_at.",
+    "acceptance": [
+      "Existe src/notes.py con la clase/dataclass Note",
+      "Note.new(title, body) genera id incremental y created_at en ISO 8601",
+      "tests/test_notes.py valida creación y serialización"
+    ],
+    "status": "done"
+  },
+  {
+    "feature_number": 3,
+    "name": "cli_add_list",
+    "title": "Comandos add y list en el CLI",
+    "description": "Permite añadir una nota y listar todas las notas existentes.",
+    "acceptance": [
+      "`python -m src.cli add 'titulo' --body 'texto'` imprime el id creado",
+      "`python -m src.cli list` imprime una línea por nota: `<id>  <created_at>  <title>`",
+      "tests/test_cli.py cubre ambos comandos con un archivo temporal"
+    ],
+    "status": "done"
+  },
+  {
+    "feature_number": 4,
+    "name": "cli_show_delete",
+    "title": "Comandos show y delete en el CLI",
+    "description": "Permite ver y eliminar notas por id.",
+    "acceptance": [
+      "`python -m src.cli show <id>` imprime título, fecha y cuerpo",
+      "`python -m src.cli delete <id>` elimina y confirma con un mensaje",
+      "Ambos comandos devuelven exit code != 0 si el id no existe",
+      "tests/test_cli.py cubre éxito y fallo"
+    ],
+    "status": "done"
+  },
+  {
+    "feature_number": 5,
+    "name": "cli_search",
+    "title": "Comando search",
+    "description": "Búsqueda por substring en título o cuerpo (case-insensitive).",
+    "acceptance": [
+      "`python -m src.cli search 'palabra'` lista las notas que contienen la palabra",
+      "Si no hay coincidencias, exit code 1 y mensaje claro",
+      "tests/test_cli.py cubre coincidencia, no-coincidencia y case-insensitivity"
+    ],
+    "status": "done"
+  },
+  {
+    "feature_number": 6,
+    "name": "cli_edit",
+    "title": "Comando edit",
+    "description": "Permite modificar el título y/o cuerpo de una nota existente por id.",
+    "acceptance": [
+      "`python -m src.cli edit <id> --title 'nuevo'` actualiza solo el título",
+      "`python -m src.cli edit <id> --body 'nuevo'` actualiza solo el cuerpo",
+      "Pasar ambos flags actualiza ambos campos en la misma llamada",
+      "Si no se pasa ningún flag, exit code != 0 y mensaje claro",
+      "Si el id no existe, exit code != 0 y mensaje en stderr",
+      "tests/test_cli.py cubre éxito (cada flag y combinado), id inexistente y ausencia de flags"
+    ],
+    "status": "done"
+  },
+  {
+    "feature_number": 7,
+    "name": "cli_recent",
+    "title": "Comando recent",
+    "description": "Lista las N notas más recientes, ordenadas por created_at descendente.",
+    "acceptance": [
+      "`python -m src.cli recent` lista las 5 notas más recientes por defecto",
+      "`python -m src.cli recent --limit 10` permite cambiar el número",
+      "El orden es por `created_at` de más reciente a más antigua",
+      "Cada línea sigue el formato `<id>\\t<created_at>\\t<title>` (mismo que `list`)",
+      "Si no hay notas, exit code 0 y no imprime nada (consistente con `list`)",
+      "Si `--limit` es <= 0, exit code != 0 y mensaje claro en stderr",
+      "tests/test_cli.py cubre: orden por defecto, límite custom, archivo vacío, límite inválido"
+    ],
+    "status": "pending"
+  }
+]
