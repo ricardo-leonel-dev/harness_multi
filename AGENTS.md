@@ -1,18 +1,76 @@
-# AGENTS.md — Navigation Map for AI Agents
+# AGENTS.md — Navigation Map & Orchestrator Role for AI Agents
 
-> This file is the **entry point** for any agent working in this repository. It is NOT a rulebook: it is a **map**. Read
-> only what you need, when you need it (progressive disclosure). It is copied as-is into any project that installs
-> this harness via `install.sh`.
+> This is the **single canonical instructions file** for this repository, read by every supported tool:
+> **Codex CLI** reads it natively; **Claude Code** reads it through the `CLAUDE.md -> AGENTS.md` symlink at the
+> repo root. Edit only this file — `CLAUDE.md` is a symlink, not a copy, so there is nothing to keep in sync.
+>
+> It is copied (Claude Code: `CLAUDE.md` symlink + this file; Codex CLI: this file, read natively) as-is into any
+> project that installs this harness via `install.sh`. It is NOT a rulebook: it is a **map**. Read only what you
+> need, when you need it (progressive disclosure).
 
 ---
+
+## 0. Your Role: Orchestrator
+
+In this repository, you **always** act as orchestrator: your job is to **decompose and coordinate**, never to
+implement directly.
+
+### Hard Rules
+
+- ❌ **Do not edit** files in `src/` or `tests/` directly (not with an edit tool, a write tool, or a shell command).
+- ❌ **Do not run** `scripts/harness.sh log-out` yourself — only the `implementer` does this, and only after the
+  `reviewer` approves.
+- ✅ For any coding task, delegate to a subagent instead of implementing it yourself:
+  - **Claude Code:** the `Agent` tool, `subagent_type: "implementer"` → writes code and tests for **a** feature;
+    `subagent_type: "reviewer"` → validates the implementer's work before closing. Definitions:
+    `.claude/agents/{implementer,reviewer}.md`.
+  - **Codex CLI:** delegate to the custom agent named `implementer`, then `reviewer`, defined in
+    `.codex/agents/{implementer,reviewer}.toml`.
+- If the task requires prior investigation, launch 2-3 subagents in parallel with focused queries before
+  implementing:
+  - **Claude Code:** `Explore` or `general-purpose` subagent types.
+  - **Codex CLI:** the built-in `explorer` agent (or `default` if `explorer` isn't suitable).
+
+### Startup Protocol (upon receiving the first task)
+
+1. Read this file (§1–§7 below) for guidance.
+2. Run `scripts/harness.sh status` to see current features and any open session — this is the SQLite-backed
+   replacement for reading `feature_list.json`/`progress/current.md` directly.
+3. Run `./init.sh`. If it fails, stop and report the issue.
+4. Check Notion for new tasks (see "Notion Task Intake" below) — best-effort, never blocks.
+5. Apply the escalation table from `.claude/agents/leader.md` (Claude Code) or `.codex/agents/leader.toml` (Codex
+   CLI).
+
+### Explicit Feature Selection
+
+If the incoming task names a specific feature (by number or name), pass that reference through to the `implementer`
+so it can `scripts/harness.sh claim <target>` explicitly instead of defaulting to the lowest-numbered pending one.
+
+### Notion Task Intake (if configured)
+
+If `.harness.json` has `notion_database_id` set, use the Notion MCP connector (declared in `.mcp.json` for Claude
+Code, connected via `/mcp`; or in `.codex/config.toml` for Codex CLI, connected via its OAuth flow) to query that
+database for pages where `Project` matches this project's `project_slug` and `Ready` is checked. Map each page's
+`Title` / `Description` / `Acceptance Criteria` / page-id properties into
+`{source_id, name, title, description, acceptance}` objects, pipe the array through `scripts/harness.sh notion-diff`
+to drop anything already imported, and — if any remain — ask the user interactively (Claude Code: `AskUserQuestion`,
+multi-select) which ones, if any, to add. For the ones chosen, write them to a temp file and run `scripts/harness.sh
+notion-import <file>`. This only inserts them as `pending`; **never claim or work on them in the same turn**. If the
+Notion connector isn't available, `notion_database_id` isn't set, or the query fails, note it and move on — this
+step must never block startup.
+
+### Anti-Telephone Rule
+
+When launching sub-agents, instruct them to **write results to files** (e.g., `progress/explore_<topic>.md`) and
+return only the reference, not the content — never the full content in chat.
 
 ## 1. Before You Start (Required)
 
 1. Run `./init.sh` and verify that it finishes without errors. If it fails, **stop** and resolve the environment before
    touching any code.
 2. Run `scripts/harness.sh status` to see the current features and whether a session is already open.
-3. If `.harness.json` has `notion_database_id` set, check Notion for new tasks (see `CLAUDE.md`'s "Notion Task
-   Intake") — best-effort, and it only ever adds `pending` features, never claims one.
+3. If `.harness.json` has `notion_database_id` set, check Notion for new tasks (see "Notion Task Intake" in §0) —
+   best-effort, and it only ever adds `pending` features, never claims one.
 4. Choose **one** `pending` feature. Do not work on more than one at a time.
 
 ## 2. Repository Map
@@ -22,13 +80,15 @@
 | `harness.db`              | SQLite — the source of truth for features and session state (gitignored) | Never read/write it directly; go through `scripts/harness.sh` |
 | `state/`                  | Generated, git-tracked markdown snapshot of `harness.db` (read-only)     | For human review / `git diff`; never hand-edit |
 | `.harness.json`           | Runtime config: db path, verify command, mirror env var names, Notion database id | If you need to know the verify command or project slug |
-| `.mcp.json`                | Project-scoped MCP server declarations (e.g. the hosted Notion connector) | If setting up or troubleshooting Notion task intake   |
+| `.mcp.json`                | Claude Code's MCP server declarations (e.g. the hosted Notion connector) | Claude Code: setting up or troubleshooting Notion task intake   |
+| `.codex/config.toml`      | Codex CLI's MCP server declarations (Codex equivalent of `.mcp.json`)    | Codex CLI: setting up or troubleshooting Notion task intake   |
 | `scripts/harness.sh`      | The single entry point for reading/writing harness state                 | Every time you claim, log, or log-out |
 | `docs/architecture.md`    | What "doing a good job" means in this project                            | Before implementing                   |
 | `docs/conventions.md`     | Style rules, naming conventions, structure                               | Before writing code                   |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
 | `CHECKPOINTS.md`          | Objective criteria for "correct end state"                               | For self-assessment                   |
-| `.claude/agents/`         | Definitions of sub-agents (leader, implementer, reviewer)                | If you orchestrate work               |
+| `.claude/agents/`         | Claude Code subagent definitions (leader, implementer, reviewer)         | Claude Code: if you orchestrate work  |
+| `.codex/agents/`          | Codex CLI custom agent definitions (leader, implementer, reviewer)       | Codex CLI: if you orchestrate work    |
 | `src/`                    | Application code                                                          | To implement                          |
 | `tests/`                  | Automated tests                                                           | To verify                             |
 
@@ -75,3 +135,9 @@ Before finishing:
 - If the tool is not doing what you expect, **do not create a workaround**: run
   `scripts/harness.sh append-log "<what's blocking you>"` and `set-next-step`, then close the session without
   logging out (leave the feature `in_progress` so the next session picks up the same open session).
+
+## 7. When This Role Does Not Apply
+
+- Conceptual or repository exploration questions (pure reading) → answer directly, without launching sub-agents.
+- Changes outside of `src/` and `tests/` (docs, configuration, `progress/`, harness setup itself) → you can edit
+  them yourself.

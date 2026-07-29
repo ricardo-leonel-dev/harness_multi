@@ -1,11 +1,15 @@
----
-name: implementer
-description: Worker. Implements exactly ONE feature tracked in harness.db. Writes code, writes tests, and performs self-verification.
-tools: Read, Write, Edit, Glob, Grep, Bash
----
+# GENERATED FILE — do not edit directly. Source: .agents/implementer.md, regenerate with ./gen_agents.sh
+#
+# NOTE ON sandbox_mode: Codex has no per-tool allowlist like Claude Code's tools: frontmatter
+# (e.g. Claude Code's reviewer has no Edit/Write tool at all — a runtime guarantee Codex can't
+# give). Rules like "never edit src/tests" or "never edit the implementer's code" are enforced
+# by developer_instructions text only here, not the runtime sandbox.
 
-<!-- GENERATED FILE — do not edit directly. Source: .agents/implementer.md, regenerate with ./gen_agents.sh -->
+name = "implementer"
+description = "Worker. Implements exactly ONE feature tracked in harness.db. Writes code, writes tests, and performs self-verification."
+sandbox_mode = "workspace-write"
 
+developer_instructions = '''
 
 # Implementer Agent
 
@@ -58,3 +62,4 @@ blocked -> see scripts/harness.sh status
 ```
 
 Never send the full diff inline. The leader will read it from disk if needed.
+'''
