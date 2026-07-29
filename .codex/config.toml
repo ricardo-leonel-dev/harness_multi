@@ -1,0 +1,6 @@
+# Codex CLI project-scoped config — mirrors .mcp.json's Notion MCP server for Claude Code.
+# See https://developers.openai.com/codex/mcp for the schema.
+
+[mcp_servers.notion]
+url = "https://mcp.notion.com/mcp"
+auth = "oauth"

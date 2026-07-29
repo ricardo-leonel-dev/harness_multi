@@ -1,15 +1,42 @@
 # Harness Engineering Toolkit
 
-A portable Claude Code harness: a `leader` → `implementer` → `reviewer` agent
+A portable, multi-tool agent harness: a `leader` → `implementer` → `reviewer`
 workflow, backed by a local SQLite database (the source of truth for feature
 tracking and session history) with an optional, best-effort Postgres/Supabase
 mirror for cross-project queries and dashboards.
 
 It's project-agnostic — install it into any project, any language, any stack.
 
+## Works with Claude Code and Codex CLI
+
+`AGENTS.md` is the single canonical instructions file. `CLAUDE.md` is a real
+symlink to it (`CLAUDE.md -> AGENTS.md`) — Claude Code auto-loads `CLAUDE.md`
+and gets the same content; Codex CLI reads `AGENTS.md` natively. There is
+nothing to keep in sync by hand: edit `AGENTS.md` and both tools pick it up.
+
+The `leader` → `implementer` → `reviewer` subagent workflow is defined once
+per agent in `.agents/*.md` (the canonical source — YAML frontmatter carries
+fields for both targets, e.g. `tools:` for Claude Code and `sandbox_mode:` for
+Codex CLI) and generated into each tool's native format by `./gen_agents.sh`:
+`.claude/agents/*.md` (Claude Code's `Agent` tool) and `.codex/agents/*.toml`
+(Codex CLI's own custom-agent-definition mechanism) — those two are generated
+files, not hand-edited; re-run `gen_agents.sh` after changing anything in
+`.agents/`. Same idea for MCP server config: `.mcp.json` (Claude Code) and
+`.codex/config.toml` (Codex CLI) both declare the same Notion connector (these
+two are small enough to stay hand-maintained). `install.sh` scaffolds both
+trees into target projects.
+
+Known caveat: on a Windows checkout without symlink support enabled, git may
+check `CLAUDE.md` out as a plain text file containing the literal string
+`AGENTS.md` instead of a real symlink. If that happens, replace it with
+`@AGENTS.md` on the first line of a real `CLAUDE.md` file instead (Claude
+Code's documented import syntax) as a fallback.
+
 ## What's in here
 
-- `CLAUDE.md`, `AGENTS.md`, `.claude/agents/*.md` — the agent workflow itself.
+- `AGENTS.md` (+ `CLAUDE.md` symlink) — the shared orchestrator/navigation instructions.
+- `.agents/*.md` — canonical source for the `leader`/`implementer`/`reviewer` subagents; `./gen_agents.sh`
+  generates `.claude/agents/*.md` and `.codex/agents/*.toml` from it (don't hand-edit those two).
 - `init.sh` — environment/verification check, run at the start of every session.
 - `install.sh` — bootstraps this toolkit into a target project.
 - `db/schema.sqlite.sql` — the local primary schema (applied to each installed project's `harness.db`).
@@ -102,21 +129,28 @@ interactive Claude Code session.
    bash install.sh --slug your-project --notion-database-id <database-id-from-its-url> ...
    ```
    This writes `notion_database_id` into `.harness.json` and declares the
-   connector in a project-scoped `.mcp.json`:
+   connector in a project-scoped `.mcp.json` (Claude Code):
    ```json
    { "mcpServers": { "notion": { "type": "http", "url": "https://mcp.notion.com/mcp" } } }
    ```
-   (`install.sh` merges this in without clobbering any other MCP servers
+   and in `.codex/config.toml` (Codex CLI):
+   ```toml
+   [mcp_servers.notion]
+   url = "https://mcp.notion.com/mcp"
+   auth = "oauth"
+   ```
+   (`install.sh` merges these in without clobbering any other MCP servers
    already declared in the project.)
-3. Open Claude Code in the project and run `/mcp` to complete the one-time
-   OAuth login, granting access to the specific database when prompted.
+3. Open Claude Code and run `/mcp`, or start a Codex CLI session, to complete
+   the one-time OAuth login, granting access to the specific database when
+   prompted.
 
 One Notion database can back multiple projects — just filter by `Project`.
 From then on, at the start of every session the `leader` checks that
 database for `Ready`-checked pages tagged with this project's slug that
 aren't imported yet (tracked via `features.source_id`, so it's idempotent),
 and asks you which ones, if any, to add via `scripts/harness.sh notion-import`.
-See `CLAUDE.md`'s "Notion Task Intake" section for the exact flow.
+See `AGENTS.md`'s "Notion Task Intake" section for the exact flow.
 
 ## Try it yourself
 

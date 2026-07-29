@@ -6,10 +6,11 @@
 #   bash /path/to/personal_harness/install.sh --slug my-project \
 #     --verify-command "npm test"
 #
-# Harness-core files (CLAUDE.md, AGENTS.md, .claude/agents/*.md, init.sh,
-# scripts/*.sh) are copied unconditionally — re-running install.sh refreshes
-# them. docs/*.md and CHECKPOINTS.md are scaffolded from templates only if
-# they don't already exist — never clobbers project-owned content.
+# Harness-core files (AGENTS.md + a CLAUDE.md symlink to it, .claude/agents/*.md,
+# .codex/agents/*.toml, init.sh, scripts/*.sh) are copied/relinked unconditionally
+# — re-running install.sh refreshes them. docs/*.md and CHECKPOINTS.md are
+# scaffolded from templates only if they don't already exist — never clobbers
+# project-owned content.
 
 set -u
 TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,15 +80,17 @@ sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 
 echo "── 1. Copying harness-core files ───────────────────────"
 
-cp "$TOOLKIT_DIR/CLAUDE.md" "$TARGET_DIR/CLAUDE.md"
 cp "$TOOLKIT_DIR/AGENTS.md" "$TARGET_DIR/AGENTS.md"
+ln -sf AGENTS.md "$TARGET_DIR/CLAUDE.md"
 mkdir -p "$TARGET_DIR/.claude/agents"
 cp "$TOOLKIT_DIR"/.claude/agents/*.md "$TARGET_DIR/.claude/agents/"
+mkdir -p "$TARGET_DIR/.codex/agents"
+cp "$TOOLKIT_DIR"/.codex/agents/*.toml "$TARGET_DIR/.codex/agents/"
 cp "$TOOLKIT_DIR/init.sh" "$TARGET_DIR/init.sh"
 mkdir -p "$TARGET_DIR/scripts"
 cp "$TOOLKIT_DIR"/scripts/*.sh "$TARGET_DIR/scripts/"
 chmod +x "$TARGET_DIR/init.sh" "$TARGET_DIR"/scripts/*.sh
-ok "copied CLAUDE.md, AGENTS.md, .claude/agents/*.md, init.sh, scripts/*.sh"
+ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*.toml, init.sh, scripts/*.sh"
 
 echo ""
 echo "── 2. Creating harness.db ───────────────────────────────"
@@ -155,6 +158,18 @@ EXISTING_MCP="$([ -s "$MCP_FILE" ] && cat "$MCP_FILE" || echo '{}')"
 echo "$EXISTING_MCP" | jq '.mcpServers = ((.mcpServers // {}) + {notion: {type: "http", url: "https://mcp.notion.com/mcp"}})' \
   > "$MCP_FILE"
 ok "declared notion MCP server in .mcp.json — run '/mcp' in Claude Code to complete the one-time OAuth login"
+
+CODEX_CONFIG="$TARGET_DIR/.codex/config.toml"
+mkdir -p "$TARGET_DIR/.codex"
+if [ ! -f "$CODEX_CONFIG" ]; then
+  cp "$TOOLKIT_DIR/.codex/config.toml" "$CODEX_CONFIG"
+  ok "declared notion MCP server in .codex/config.toml"
+elif ! grep -qF '[mcp_servers.notion]' "$CODEX_CONFIG"; then
+  printf '\n[mcp_servers.notion]\nurl = "https://mcp.notion.com/mcp"\nauth = "oauth"\n' >> "$CODEX_CONFIG"
+  ok "appended notion MCP server to existing .codex/config.toml"
+else
+  warn ".codex/config.toml already declares [mcp_servers.notion] — leaving as-is"
+fi
 
 echo ""
 echo "── 6. Importing features (if provided) ──────────────────"
