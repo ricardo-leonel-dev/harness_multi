@@ -21,10 +21,7 @@ Codex CLI) and generated into each tool's native format by `./gen_agents.sh`:
 `.claude/agents/*.md` (Claude Code's `Agent` tool) and `.codex/agents/*.toml`
 (Codex CLI's own custom-agent-definition mechanism) — those two are generated
 files, not hand-edited; re-run `gen_agents.sh` after changing anything in
-`.agents/`. Same idea for MCP server config: `.mcp.json` (Claude Code) and
-`.codex/config.toml` (Codex CLI) both declare the same Notion connector (these
-two are small enough to stay hand-maintained). `install.sh` scaffolds both
-trees into target projects.
+`.agents/`. `install.sh` scaffolds both trees into target projects.
 
 Known caveat: on a Windows checkout without symlink support enabled, git may
 check `CLAUDE.md` out as a plain text file containing the literal string
@@ -42,7 +39,7 @@ Code's documented import syntax) as a fallback.
 - `db/schema.sqlite.sql` — the local primary schema (applied to each installed project's `harness.db`).
 - `db/schema.postgres.sql` + `db/rpc/*.sql` — the optional Postgres/Supabase mirror schema and RPC functions.
 - `templates/` — scaffolds for a new project's `docs/*.md`, `CHECKPOINTS.md`, and `features.seed.json`.
-- `scripts/harness.sh` — the single entry point agents use to read/write harness state (claim, log, log-out, snapshot, sync, notion-diff, notion-import).
+- `scripts/harness.sh` — the single entry point agents use to read/write harness state (claim, log, log-out, snapshot, sync, notion-check, notion-diff, notion-import).
 - `examples/notes-cli/` — a fully worked reference installation (see below).
 
 ## Installing into a project
@@ -109,48 +106,68 @@ once the env vars are set.
 
 If your task tickets (Jira, etc.) tend to lack the detail you actually need,
 you can keep an enriched copy in a Notion database and have the harness
-notice new ones every time you open Claude Code — it only ever *proposes*
+notice new ones every time you open a session — it only ever *proposes*
 adding them as `pending` features; it never claims or works one itself.
 
-This uses Notion's official hosted MCP server (OAuth login, no integration
-token to create or store), since the check only ever needs to run inside an
-interactive Claude Code session.
+This queries the Notion API directly via `scripts/notion_check.sh`
+(curl+jq, plain REST — not the Notion MCP connector). That's deliberate: a
+plain script filters the response server- and client-side and only ever
+returns the trimmed `{source_id, name, title, description, acceptance}`
+array, so Notion's raw, verbose JSON never has to enter the model's context.
+It requires a static **internal integration token**, not OAuth.
 
 **One-time setup:**
 
-1. Create a Notion database (e.g. "Backlog") with these properties:
-   - `Title` (title)
+1. Create a Notion database (e.g. "Backlog") as a **board** with these
+   properties:
+   - `Name` (title, Notion's native title property — don't rename it)
    - `Project` (select) — value must match the installed project's `project_slug`
    - `Description` (rich text)
    - `Acceptance Criteria` (rich text — one criterion per line)
-   - `Ready` (checkbox) — leave unchecked while still drafting a ticket's detail
-2. Install (or re-run) with the database id:
+   - `Status` (the board's status/select property) — a card counts as ready
+     for intake once it's in the `Ready` column
+2. Create a Notion **internal integration** at `notion.so/my-integrations`.
+   Read content capability is enough for task intake; also enable **Update
+   content** if you want the status push-back described below. Then share
+   the database with it (`···` menu on the database → `Connections` →
+   your integration).
+3. Export its token in your shell profile (never commit it to a tracked
+   file — it's a real secret):
+   ```bash
+   export NOTION_API_TOKEN=secret_...
+   ```
+4. Install (or re-run) with the database id:
    ```bash
    bash install.sh --slug your-project --notion-database-id <database-id-from-its-url> ...
    ```
-   This writes `notion_database_id` into `.harness.json` and declares the
-   connector in a project-scoped `.mcp.json` (Claude Code):
-   ```json
-   { "mcpServers": { "notion": { "type": "http", "url": "https://mcp.notion.com/mcp" } } }
-   ```
-   and in `.codex/config.toml` (Codex CLI):
-   ```toml
-   [mcp_servers.notion]
-   url = "https://mcp.notion.com/mcp"
-   auth = "oauth"
-   ```
-   (`install.sh` merges these in without clobbering any other MCP servers
-   already declared in the project.)
-3. Open Claude Code and run `/mcp`, or start a Codex CLI session, to complete
-   the one-time OAuth login, granting access to the specific database when
-   prompted.
+   This writes `notion_database_id` and `notion_token_env` (default
+   `NOTION_API_TOKEN`; override with `--notion-token-env` if you use a
+   different variable name) into `.harness.json`.
 
 One Notion database can back multiple projects — just filter by `Project`.
-From then on, at the start of every session the `leader` checks that
-database for `Ready`-checked pages tagged with this project's slug that
-aren't imported yet (tracked via `features.source_id`, so it's idempotent),
-and asks you which ones, if any, to add via `scripts/harness.sh notion-import`.
-See `AGENTS.md`'s "Notion Task Intake" section for the exact flow.
+From then on, at the start of every session the `leader` runs
+`scripts/harness.sh notion-check` for pages tagged with this project's slug
+and sitting in the `Ready` column that aren't imported yet (tracked via
+`features.source_id`, so it's idempotent), and asks you which ones, if any,
+to add via `scripts/harness.sh notion-import`. See `AGENTS.md`'s "Notion
+Task Intake" section for the exact flow.
+
+### Status push-back (optional, automatic once the token can write)
+
+Once a feature has a `source_id` (imported from Notion), `scripts/harness.sh
+claim` and `log-out` each best-effort push a status update to that feature's
+Notion page — `claim` sets it to `notion_status_in_progress` (default `In
+Progress`), `log-out` sets it to `notion_status_done` (default `Done`).
+Override either with `--notion-status-in-progress`/`--notion-status-done` at
+install time. This needs the integration's **Update content** capability
+(step 2 above); without it, pushes just fail as a `[WARN]` and everything
+else keeps working. See `scripts/notion_set_status.sh`.
+
+If you'd rather have the model reason about Notion interactively (search,
+edit pages, etc.) instead of this fixed one-shot check, you can separately
+declare Notion's hosted MCP server in `.mcp.json` (Claude Code) or
+`.codex/config.toml` (Codex CLI) and authorize it via OAuth — `install.sh`
+doesn't do this for you, so add it by hand if and when you actually need it.
 
 ## Try it yourself
 

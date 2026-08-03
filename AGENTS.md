@@ -48,16 +48,29 @@ so it can `scripts/harness.sh claim <target>` explicitly instead of defaulting t
 
 ### Notion Task Intake (if configured)
 
-If `.harness.json` has `notion_database_id` set, use the Notion MCP connector (declared in `.mcp.json` for Claude
-Code, connected via `/mcp`; or in `.codex/config.toml` for Codex CLI, connected via its OAuth flow) to query that
-database for pages where `Project` matches this project's `project_slug` and `Ready` is checked. Map each page's
-`Title` / `Description` / `Acceptance Criteria` / page-id properties into
-`{source_id, name, title, description, acceptance}` objects, pipe the array through `scripts/harness.sh notion-diff`
-to drop anything already imported, and — if any remain — ask the user interactively (Claude Code: `AskUserQuestion`,
+If `.harness.json` has `notion_database_id` set, run `scripts/harness.sh notion-check`. This is a curl+jq script
+(`scripts/notion_check.sh`) that queries the Notion API directly for pages in that database where `Project` matches
+this project's `project_slug` and `Status` is `Ready` (the board column), and prints them already mapped to
+`{source_id, name, title, description, acceptance}` JSON — exactly the shape `notion-diff` expects. This is
+deliberate: unlike the Notion MCP connector, it never puts Notion's raw, verbose API response into your context —
+only the filtered/trimmed result reaches you. Pipe that output through `scripts/harness.sh notion-diff` to drop
+anything already imported, and — if any remain — ask the user interactively (Claude Code: `AskUserQuestion`,
 multi-select) which ones, if any, to add. For the ones chosen, write them to a temp file and run `scripts/harness.sh
-notion-import <file>`. This only inserts them as `pending`; **never claim or work on them in the same turn**. If the
-Notion connector isn't available, `notion_database_id` isn't set, or the query fails, note it and move on — this
-step must never block startup.
+notion-import <file>`. This only inserts them as `pending`; **never claim or work on them in the same turn**. It
+requires a Notion internal integration token in the env var named by `notion_token_env` (default `NOTION_API_TOKEN`)
+— see `scripts/notion_check.sh`'s header comment for the one-time setup. If the token isn't set, `notion_database_id`
+isn't set, or the query fails, `notion-check` prints `[]` and a warning to stderr; note it and move on — this step
+must never block startup.
+
+### Notion Status Push-back (automatic, if configured)
+
+`scripts/harness.sh claim` and `scripts/harness.sh log-out` each best-effort push a status update back to a
+feature's source Notion page (only if it has a `source_id`, i.e. it came in via `notion-import`): `claim` sets
+`Status` to `.harness.json`'s `notion_status_in_progress` (default `In Progress`), `log-out` sets it to
+`notion_status_done` (default `Done`). This is automatic — you never call `scripts/notion_set_status.sh` directly.
+It requires the Notion integration to have **"Update content"** capability, not just read (the intake check above
+only ever needs read). Same best-effort philosophy as everything else Notion-related here: any failure is a
+`[WARN]`, never blocks `claim`/`log-out`.
 
 ### Anti-Telephone Rule
 
@@ -79,10 +92,10 @@ return only the reference, not the content — never the full content in chat.
 | ------------------------- | --------------------------------------------------------------------------- | ---------------------------------------- |
 | `harness.db`              | SQLite — the source of truth for features and session state (gitignored) | Never read/write it directly; go through `scripts/harness.sh` |
 | `state/`                  | Generated, git-tracked markdown snapshot of `harness.db` (read-only)     | For human review / `git diff`; never hand-edit |
-| `.harness.json`           | Runtime config: db path, verify command, mirror env var names, Notion database id | If you need to know the verify command or project slug |
-| `.mcp.json`                | Claude Code's MCP server declarations (e.g. the hosted Notion connector) | Claude Code: setting up or troubleshooting Notion task intake   |
-| `.codex/config.toml`      | Codex CLI's MCP server declarations (Codex equivalent of `.mcp.json`)    | Codex CLI: setting up or troubleshooting Notion task intake   |
+| `.harness.json`           | Runtime config: db path, verify command, mirror env var names, Notion database id + token env var | If you need to know the verify command or project slug |
 | `scripts/harness.sh`      | The single entry point for reading/writing harness state                 | Every time you claim, log, or log-out |
+| `scripts/notion_check.sh` | Best-effort curl+jq Notion task check (see "Notion Task Intake" above)   | Setting up or troubleshooting Notion task intake      |
+| `scripts/notion_set_status.sh` | Best-effort curl+jq Notion status push-back, called by `claim`/`log-out` | Setting up or troubleshooting Notion status push-back |
 | `docs/architecture.md`    | What "doing a good job" means in this project                            | Before implementing                   |
 | `docs/conventions.md`     | Style rules, naming conventions, structure                               | Before writing code                   |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |

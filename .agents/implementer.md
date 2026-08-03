@@ -32,6 +32,9 @@ You are an implementer. Your job is to execute **a single** feature from start t
 
 This closes the session and marks the feature `done` in one step.
 
+Note: `claim` and `log-out` each best-effort push a status update to the feature's source Notion page, if it has
+one — a `[WARN]` about Notion in their output is non-fatal and never blocks the feature from being claimed/closed.
+
 ## Hard Rules
 
 - Only one feature per session. If you discover that your change affects another feature, stop and report it as a

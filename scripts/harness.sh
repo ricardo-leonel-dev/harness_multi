@@ -12,15 +12,20 @@
 #   notion-diff                               (stdin: JSON array of {source_id,...}) prints only entries not yet imported
 #   notion-import <file.json>                 import entries as pending features, auto-numbered, source_id stored
 #   claim [--agent NAME] [TARGET]             claim TARGET (number or name), or lowest pending if omitted
+#                                              (best-effort: also pushes notion_status_in_progress to the
+#                                              feature's source Notion page, if it has a source_id)
 #   append-log <entry> [--agent NAME]         append a line to the current open session's log
 #   set-plan <item> [item...]                 replace the current open session's plan
 #   set-next-step <item> [item...]            replace the current open session's next_step
 #   log-out --changes <item...> --verification <text> --closure <text>
 #                                              close the open session and mark its feature done
+#                                              (best-effort: also pushes notion_status_done to the
+#                                              feature's source Notion page, if it has a source_id)
 #   delete-feature <TARGET>                   soft-delete a feature (sets deleted_at)
 #   status                                     print current project/feature/session state
 #   snapshot                                   regenerate state/*.md from harness.db
 #   sync                                       best-effort push to the Postgres mirror
+#   notion-check                               best-effort curl+jq query for new Notion tasks (prints notion-diff-ready JSON)
 
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -153,7 +158,7 @@ WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND 
   # one pending row or fail cleanly" is done as UPDATE ... RETURNING: if it
   # returns no row, nothing matched and there's nothing to roll back.
   local updated
-  updated=$(sqlite3 -json "$DB_PATH" "$update_sql RETURNING id, feature_number, name, title;" 2>&1)
+  updated=$(sqlite3 -json "$DB_PATH" "$update_sql RETURNING id, feature_number, name, title, source_id;" 2>&1)
   if [ $? -ne 0 ]; then
     fail "claim failed: $updated"
     exit 1
@@ -167,6 +172,11 @@ WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND 
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
 VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
   ok "claimed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
+
+  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$updated")
+  if [ -n "$source_id" ]; then
+    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_in_progress' 'In Progress')"
+  fi
 }
 
 current_session_id() {
@@ -222,6 +232,11 @@ UPDATE features SET status='done', updated_at='$now'
 COMMIT;
 SQL
   ok "session $sid logged out"
+
+  local source_id; source_id=$(db "SELECT source_id FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")
+  if [ -n "$source_id" ]; then
+    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_done' 'Done')"
+  fi
 }
 
 cmd_status() {
@@ -257,6 +272,10 @@ cmd_sync() {
   bash "$SCRIPT_DIR/sync_postgres.sh"
 }
 
+cmd_notion_check() {
+  bash "$SCRIPT_DIR/notion_check.sh"
+}
+
 main() {
   local sub="${1:-}"; shift || true
   case "$sub" in
@@ -273,8 +292,9 @@ main() {
     status) cmd_status ;;
     snapshot) cmd_snapshot ;;
     sync) cmd_sync ;;
+    notion-check) cmd_notion_check ;;
     *)
-      echo "usage: harness.sh <import-features|import-sessions|notion-diff|notion-import|claim|append-log|set-plan|set-next-step|log-out|status|snapshot|sync> [args...]" >&2
+      echo "usage: harness.sh <import-features|import-sessions|notion-diff|notion-import|claim|append-log|set-plan|set-next-step|log-out|status|snapshot|sync|notion-check> [args...]" >&2
       exit 1
       ;;
   esac
