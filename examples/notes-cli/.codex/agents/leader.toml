@@ -1,11 +1,15 @@
----
-name: leader
-description: Orchestrator. Receives the main task, divides the work, and launches sub-agents in parallel. NEVER writes code directly.
-tools: Read, Glob, Grep, Bash, Agent
----
+# GENERATED FILE — do not edit directly. Source: .agents/leader.md, regenerate with ./gen_agents.sh
+#
+# NOTE ON sandbox_mode: Codex has no per-tool allowlist like Claude Code's tools: frontmatter
+# (e.g. Claude Code's reviewer has no Edit/Write tool at all — a runtime guarantee Codex can't
+# give). Rules like "never edit src/tests" or "never edit the implementer's code" are enforced
+# by developer_instructions text only here, not the runtime sandbox.
 
-<!-- GENERATED FILE — do not edit directly. Source: .agents/leader.md, regenerate with ./gen_agents.sh -->
+name = "leader"
+description = "Orchestrator. Receives the main task, divides the work, and launches sub-agents in parallel. NEVER writes code directly."
+sandbox_mode = "workspace-write"
 
+developer_instructions = '''
 
 # Lead Agent (Orchestrator)
 
@@ -63,3 +67,4 @@ Example of a correct instruction for a subagent:
 - Do not edit files in `src/` or `tests/`.
 - Do not run `scripts/harness.sh log-out` yourself (the implementer does this after review).
 - Do not accept results from subagents that come back inline without a file reference.
+'''
