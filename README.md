@@ -163,6 +163,20 @@ install time. This needs the integration's **Update content** capability
 (step 2 above); without it, pushes just fail as a `[WARN]` and everything
 else keeps working. See `scripts/notion_set_status.sh`.
 
+### Cross-project dependencies (optional)
+
+If one project's feature needs work done in a *sibling* project that also has this harness
+installed, `scripts/harness.sh notion-create-feature` creates a new card directly (Project=the
+target project's slug, Status defaults to `Backlog`) instead of a human copy-pasting it by hand,
+and `block`/`unblock`/`check-blockers` track the requesting feature as blocked until the target
+project's own existing intake/push-back flow (above, unchanged) marks it `done`. See `AGENTS.md`'s
+"Cross-Project Dependencies" section for the full flow.
+
+This needs the integration's **Insert content** capability (`notion.so/my-integrations` → your
+integration → Capabilities), in addition to Read/Update content above — it's the one capability
+tier nothing else in this harness needs, since everything else only reads or updates pages that
+already exist.
+
 If you'd rather have the model reason about Notion interactively (search,
 edit pages, etc.) instead of this fixed one-shot check, you can separately
 declare Notion's hosted MCP server in `.mcp.json` (Claude Code) or

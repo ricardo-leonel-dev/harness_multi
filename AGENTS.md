@@ -33,12 +33,14 @@ implement directly.
 
 ### Startup Protocol (upon receiving the first task)
 
-1. Read this file (§1–§7 below) for guidance.
+1. Read this file (§1–§8 below) for guidance.
 2. Run `scripts/harness.sh status` to see current features and any open session — this is the SQLite-backed
    replacement for reading `feature_list.json`/`progress/current.md` directly.
 3. Run `./init.sh`. If it fails, stop and report the issue.
 4. Check Notion for new tasks (see "Notion Task Intake" below) — best-effort, never blocks.
-5. Apply the escalation table from `.claude/agents/leader.md` (Claude Code) or `.codex/agents/leader.toml` (Codex
+5. If `status` shows any `blocked` feature, run `scripts/harness.sh check-blockers` (best-effort, never blocks
+   startup) — see "Cross-Project Dependencies" (§8) for what this does and when a `blocked` feature can resume.
+6. Apply the escalation table from `.claude/agents/leader.md` (Claude Code) or `.codex/agents/leader.toml` (Codex
    CLI).
 
 ### Explicit Feature Selection
@@ -96,6 +98,7 @@ return only the reference, not the content — never the full content in chat.
 | `scripts/harness.sh`      | The single entry point for reading/writing harness state                 | Every time you claim, log, or log-out |
 | `scripts/notion_check.sh` | Best-effort curl+jq Notion task check (see "Notion Task Intake" above)   | Setting up or troubleshooting Notion task intake      |
 | `scripts/notion_set_status.sh` | Best-effort curl+jq Notion status push-back, called by `claim`/`log-out` | Setting up or troubleshooting Notion status push-back |
+| `scripts/notion_create_feature.sh` | Creates a new Notion page (feature card) — used for cross-project dependency requests (§8) | Setting up or troubleshooting cross-project requests |
 | `docs/architecture.md`    | What "doing a good job" means in this project                            | Before implementing                   |
 | `docs/conventions.md`     | Style rules, naming conventions, structure                               | Before writing code                   |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
@@ -154,3 +157,48 @@ Before finishing:
 - Conceptual or repository exploration questions (pure reading) → answer directly, without launching sub-agents.
 - Changes outside of `src/` and `tests/` (docs, configuration, `progress/`, harness setup itself) → you can edit
   them yourself.
+
+## 8. Cross-Project Dependencies (Notion-mediated)
+
+Sometimes a feature in this project needs work done in a *different* sibling project (e.g. a backend feature that
+needs a new table/stored procedure in a separate database-schema project). This project's harness has no built-in
+mechanism to reach into another project's `harness.db` and start work there directly — instead, the dependency is
+routed through Notion, the same shared task board `notion-check`/`notion-import` already read from:
+
+1. **Propose before creating anything.** When you determine a feature needs work in a sibling project, do not create
+   a Notion card or block anything silently — ask the user first (Claude Code: `AskUserQuestion`) proposing the
+   target project's slug, a title, a description, and acceptance criteria. Creating content in an external system
+   and blocking your own work on it is a visible action, not something to do autonomously.
+2. **On confirmation**, create the card:
+   ```
+   scripts/harness.sh notion-create-feature --project <target-project-slug> --title "<title>" \
+     --description "<description>" --acceptance "<acceptance>"
+   ```
+   This prints `{"page_id": ..., "url": ..., "predicted_name": ...}` — `predicted_name` is the `name` the feature
+   will get once the target project imports this card via its own `notion-import` (same title-normalization
+   `notion_check.sh` already applies). Unlike `notion-check`/`notion_set_status.sh`, this is **not** a silent
+   `[WARN]`-and-continue: if it fails, the card was not created and you must not proceed to block anything on it.
+   Requires the Notion integration's **"Insert content"** capability (in addition to Read/Update).
+3. **Block the current feature**, recording a machine-parseable note `check-blockers` (§ below) can find later:
+   ```
+   scripts/harness.sh block <current-feature> "waiting on <target-project-slug>: BLOCKED_ON: path=<absolute path \
+     to the target project's directory> feature=<predicted_name> notion_page=<url>"
+   ```
+   This sets the feature's status to `blocked` (a real status the schema has always supported, just newly wired
+   up) and leaves the session open — same "leave it for the next session" idiom as §6, just with `blocked` instead
+   of `in_progress`.
+4. Report to the user what was created and that the feature is now blocked, then end the session.
+5. The user flips the Notion card to `Ready` whenever they want work to start there — **nothing changes** on the
+   target project's side: its own `notion-check`/`notion-import`/`claim`/`log-out` flow (§0's "Notion Task Intake"
+   and "Notion Status Push-back") picks it up and works it exactly as it already does for any other Notion-sourced
+   feature, pushing `Status=Done` back automatically on `log-out`.
+6. **Resuming happens on your next session in *this* project** (Startup Protocol step 5): `check-blockers` reads
+   every `blocked` feature's `BLOCKED_ON` note and queries the target project's `harness.db` *directly* (not
+   Notion — faster, and doesn't depend on that project's own Notion push-back having succeeded). If the dependency
+   is `done`, run `scripts/harness.sh unblock <feature>` and continue it; if not, report its current status and
+   work on something else pending instead.
+
+There is deliberately no background polling or scheduled agent here — resuming is tied to opening a session in
+this project again, consistent with how every other best-effort integration in this harness works (session-based,
+never a daemon). If instant background resume is ever wanted, that's a scheduled-agent extension on top of this,
+not a change to it.
