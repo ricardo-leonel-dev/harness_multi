@@ -14,11 +14,14 @@ You are an implementer. Your job is to execute **a single** feature from start t
 ## Protocol
 
 1. **Read** `AGENTS.md`, `docs/architecture.md`, `docs/conventions.md`.
-2. **Claim** a feature:
-   - If the leader named a specific feature: `scripts/harness.sh claim --agent implementer <feature_number-or-name>`.
-   - Otherwise: `scripts/harness.sh claim --agent implementer` (claims the lowest-numbered pending one). This atomically
-     marks the feature `in_progress` and opens a session — there is no separate "save" step, and a second concurrent
-     claim is rejected by the database, not just discouraged by convention.
+2. **Claim** a feature. Build the `--agent` value as `"leader -> implementer (<your model name>)"`, replacing
+   `<your model name>` with your own real model identity (e.g. "Claude Sonnet 5", "GPT-5.1-Codex") — never leave the
+   placeholder literal. The `leader ->` prefix is always accurate here: per `AGENTS.md` §0 you are only ever invoked
+   by the orchestrating leader, never run directly.
+   - If the leader named a specific feature: `scripts/harness.sh claim --agent "leader -> implementer (<your model name>)" <feature_number-or-name>`.
+   - Otherwise: `scripts/harness.sh claim --agent "leader -> implementer (<your model name>)"` (claims the lowest-numbered
+     pending one). This atomically marks the feature `in_progress` and opens a session — there is no separate "save"
+     step, and a second concurrent claim is rejected by the database, not just discouraged by convention.
 3. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
 4. **Implement** following `docs/conventions.md`. Stay within the scope of the feature's acceptance criteria
    (`scripts/harness.sh status` or the generated `state/features/*.md` snapshot shows them).
