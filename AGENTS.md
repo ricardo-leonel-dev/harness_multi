@@ -87,7 +87,7 @@ autonomously. **This is scoped to the feature being created right now** — it d
 On confirmation:
 ```
 scripts/harness.sh add-feature --name <slug> --title "<title>" --description "<description>" --acceptance "<item...>"
-scripts/harness.sh notion-create-feature --project <this-project-slug> --title "<title>" \
+scripts/harness.sh notion-create-feature --project-path . --title "<title>" \
   --description "<description>" --acceptance "<acceptance>" --status Ready
 scripts/harness.sh link-notion <slug> <page_id-from-the-previous-command's-output>
 ```
@@ -190,13 +190,19 @@ routed through Notion, the same shared task board `notion-check`/`notion-import`
 
 1. **Propose before creating anything.** When you determine a feature needs work in a sibling project, do not create
    a Notion card or block anything silently — ask the user first (Claude Code: `AskUserQuestion`) proposing the
-   target project's slug, a title, a description, and acceptance criteria. Creating content in an external system
-   and blocking your own work on it is a visible action, not something to do autonomously.
+   target project's directory, a title, a description, and acceptance criteria. Creating content in an external
+   system and blocking your own work on it is a visible action, not something to do autonomously.
 2. **On confirmation**, create the card:
    ```
-   scripts/harness.sh notion-create-feature --project <target-project-slug> --title "<title>" \
-     --description "<description>" --acceptance "<acceptance>"
+   scripts/harness.sh notion-create-feature --project-path <absolute path to the target project's directory> \
+     --title "<title>" --description "<description>" --acceptance "<acceptance>"
    ```
+   **Always use `--project-path`, never a hand-typed `--project <slug>`.** `--project-path` reads the target
+   project's actual `project_slug` straight out of its own `.harness.json` — a typed/guessed slug (e.g.
+   "rushr-web-display-database" instead of the real "rushr-web-display-db") produces a card that *looks* fine but
+   the target project's own `notion-check` will never match, since that filters on an exact Project-property value —
+   the mismatch stays invisible until someone manually inspects Notion. You already need this same absolute path for
+   step 3's `BLOCKED_ON` note, so this doesn't cost you anything extra to have on hand.
    This prints `{"page_id": ..., "url": ..., "predicted_name": ...}` — `predicted_name` is the `name` the feature
    will get once the target project imports this card via its own `notion-import` (same title-normalization
    `notion_check.sh` already applies). Unlike `notion-check`/`notion_set_status.sh`, this is **not** a silent

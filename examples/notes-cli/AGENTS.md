@@ -74,6 +74,29 @@ It requires the Notion integration to have **"Update content"** capability, not 
 only ever needs read). Same best-effort philosophy as everything else Notion-related here: any failure is a
 `[WARN]`, never blocks `claim`/`log-out`.
 
+### Ad-hoc Task → Notion (if configured, with confirmation)
+
+Sometimes a task arrives directly (not via Notion intake) with no `pending` feature that matches it. When that
+happens and you need to create a feature on the spot for it, and `.harness.json` has `notion_database_id` set: before
+creating the local feature, propose to the user (Claude Code: `AskUserQuestion`; Codex CLI: ask directly) the
+title/description/acceptance criteria for a Notion card to track it — same "propose before creating" pattern as §8's
+cross-project dependency flow, since writing to an external system is a visible action, not something to do
+autonomously. **This is scoped to the feature being created right now** — it does not retroactively apply to
+`pending` features that already existed without a Notion link.
+
+On confirmation:
+```
+scripts/harness.sh add-feature --name <slug> --title "<title>" --description "<description>" --acceptance "<item...>"
+scripts/harness.sh notion-create-feature --project-path . --title "<title>" \
+  --description "<description>" --acceptance "<acceptance>" --status Ready
+scripts/harness.sh link-notion <slug> <page_id-from-the-previous-command's-output>
+```
+`link-notion` stamps the feature's `source_id`, so the existing automatic push-back (above) starts applying to it
+immediately: the very next `claim` on this feature pushes `Status` to `notion_status_in_progress`, and `log-out`
+later pushes `notion_status_done` — no extra code, same mechanism as any Notion-sourced feature. If the user declines
+the Notion card, create the local feature anyway (`add-feature` without the two Notion steps) — this never blocks
+the work itself.
+
 ### Anti-Telephone Rule
 
 When launching sub-agents, instruct them to **write results to files** (e.g., `progress/explore_<topic>.md`) and
@@ -167,13 +190,19 @@ routed through Notion, the same shared task board `notion-check`/`notion-import`
 
 1. **Propose before creating anything.** When you determine a feature needs work in a sibling project, do not create
    a Notion card or block anything silently — ask the user first (Claude Code: `AskUserQuestion`) proposing the
-   target project's slug, a title, a description, and acceptance criteria. Creating content in an external system
-   and blocking your own work on it is a visible action, not something to do autonomously.
+   target project's directory, a title, a description, and acceptance criteria. Creating content in an external
+   system and blocking your own work on it is a visible action, not something to do autonomously.
 2. **On confirmation**, create the card:
    ```
-   scripts/harness.sh notion-create-feature --project <target-project-slug> --title "<title>" \
-     --description "<description>" --acceptance "<acceptance>"
+   scripts/harness.sh notion-create-feature --project-path <absolute path to the target project's directory> \
+     --title "<title>" --description "<description>" --acceptance "<acceptance>"
    ```
+   **Always use `--project-path`, never a hand-typed `--project <slug>`.** `--project-path` reads the target
+   project's actual `project_slug` straight out of its own `.harness.json` — a typed/guessed slug (e.g.
+   "rushr-web-display-database" instead of the real "rushr-web-display-db") produces a card that *looks* fine but
+   the target project's own `notion-check` will never match, since that filters on an exact Project-property value —
+   the mismatch stays invisible until someone manually inspects Notion. You already need this same absolute path for
+   step 3's `BLOCKED_ON` note, so this doesn't cost you anything extra to have on hand.
    This prints `{"page_id": ..., "url": ..., "predicted_name": ...}` — `predicted_name` is the `name` the feature
    will get once the target project imports this card via its own `notion-import` (same title-normalization
    `notion_check.sh` already applies). Unlike `notion-check`/`notion_set_status.sh`, this is **not** a silent

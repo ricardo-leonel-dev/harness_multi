@@ -20,8 +20,17 @@
 # a [FAIL] on stderr) on any failure instead of degrading to `[]`/no-op.
 #
 # Usage:
-#   notion_create_feature.sh --project <slug> --title <text> --description <text>
-#                             [--acceptance <text>] [--status <value, default "Backlog">]
+#   notion_create_feature.sh (--project <slug> | --project-path <dir>) --title <text> \
+#                             --description <text> [--acceptance <text>] [--status <value, default "Backlog">]
+#
+# --project-path <dir> reads <dir>/.harness.json's project_slug directly instead of
+# trusting a hand-typed/guessed slug — use this whenever the target project's directory
+# is known (which AGENTS.md's cross-project dependency flow always requires anyway, for
+# the BLOCKED_ON note). A guessed slug (e.g. "rushr-web-display-database" instead of the
+# real "rushr-web-display-db") silently produces a card the target project's own
+# notion-check never matches, since that filters on an exact Project-property match —
+# reading the slug from the actual config file makes that class of mismatch impossible.
+# --project <slug> still exists for callers that don't have a directory to point at.
 #
 # On success, prints {"page_id": "...", "url": "...", "predicted_name": "..."}
 # to stdout. predicted_name applies the exact same title normalization
@@ -36,6 +45,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 TARGET_PROJECT=""
+TARGET_PROJECT_PATH=""
 TITLE=""
 DESCRIPTION=""
 ACCEPTANCE=""
@@ -44,6 +54,7 @@ STATUS_VALUE="Backlog"
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) TARGET_PROJECT="$2"; shift 2 ;;
+    --project-path) TARGET_PROJECT_PATH="$2"; shift 2 ;;
     --title) TITLE="$2"; shift 2 ;;
     --description) DESCRIPTION="$2"; shift 2 ;;
     --acceptance) ACCEPTANCE="$2"; shift 2 ;;
@@ -52,8 +63,25 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ -n "$TARGET_PROJECT_PATH" ]; then
+  if [ -n "$TARGET_PROJECT" ]; then
+    echo "[FAIL] pass either --project or --project-path, not both" >&2
+    exit 1
+  fi
+  target_config="$TARGET_PROJECT_PATH/.harness.json"
+  if [ ! -f "$target_config" ]; then
+    echo "[FAIL] $target_config not found -- is --project-path correct?" >&2
+    exit 1
+  fi
+  TARGET_PROJECT="$(jq -r '.project_slug // empty' "$target_config")"
+  if [ -z "$TARGET_PROJECT" ]; then
+    echo "[FAIL] $target_config has no project_slug" >&2
+    exit 1
+  fi
+fi
+
 if [ -z "$TARGET_PROJECT" ] || [ -z "$TITLE" ] || [ -z "$DESCRIPTION" ]; then
-  echo "[FAIL] usage: notion_create_feature.sh --project <slug> --title <text> --description <text> [--acceptance <text>] [--status <value>]" >&2
+  echo "[FAIL] usage: notion_create_feature.sh (--project <slug> | --project-path <dir>) --title <text> --description <text> [--acceptance <text>] [--status <value>]" >&2
   exit 1
 fi
 
