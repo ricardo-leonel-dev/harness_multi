@@ -32,7 +32,7 @@ if [ -z "$DATABASE_ID" ]; then
   exit 0
 fi
 
-TOKEN="${!TOKEN_ENV:-}"
+TOKEN="$(resolve_indirect "$TOKEN_ENV")"
 if [ -z "$TOKEN" ]; then
   warn "\$$TOKEN_ENV not set — skipping Notion status update"
   exit 0

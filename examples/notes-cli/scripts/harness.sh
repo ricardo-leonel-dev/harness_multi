@@ -8,6 +8,14 @@
 #
 # Usage: scripts/harness.sh <subcommand> [args...]
 #   import-features <seed.json>              bulk-load features (status defaults to pending)
+#   add-feature --name <slug> --title <t> [--description <d>] [--acceptance <item...>]
+#                                              create a single pending feature directly (no seed file) — for
+#                                              ad-hoc tasks the leader creates on the spot, no matching pending
+#                                              feature existed
+#   link-notion <feature_number|name> <notion_page_id>
+#                                              stamp a feature's source_id so claim/log-out's existing best-effort
+#                                              Notion push-back starts applying to it (pairs with notion-create-feature
+#                                              for the ad-hoc-task-to-Notion flow — see AGENTS.md)
 #   import-sessions <seed.json>               bulk-load historical (closed) sessions
 #   notion-diff                               (stdin: JSON array of {source_id,...}) prints only entries not yet imported
 #   notion-import <file.json>                 import entries as pending features, auto-numbered, source_id stored
@@ -64,6 +72,72 @@ cmd_import_features() {
 VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', '$(sql_escape "$status")', '$now', '$now');"
   done
   ok "imported features from $seed_file"
+}
+
+cmd_add_feature() {
+  local name="" title="" desc="" accept_items=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      --title) title="$2"; shift 2 ;;
+      --description) desc="$2"; shift 2 ;;
+      --acceptance)
+        shift
+        while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+          accept_items+=("$1"); shift
+        done
+        ;;
+      *) fail "unknown argument: $1"; exit 1 ;;
+    esac
+  done
+  if [ -z "$name" ] || [ -z "$title" ]; then
+    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--acceptance <item...>]"
+    exit 1
+  fi
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local next_number
+  next_number=$(db "SELECT COALESCE(MAX(feature_number), 0) + 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL;")
+  local accept; accept="$(json_array "${accept_items[@]:-}")"
+  local now; now="$(now_iso)"
+
+  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, status, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', 'pending', '$now', '$now');"
+  ok "added feature $next_number: $name (pending)"
+}
+
+cmd_link_notion() {
+  local target="${1:?usage: link-notion <feature_number|name> <notion_page_id>}"
+  local page_id="${2:?usage: link-notion <feature_number|name> <notion_page_id>}"
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local now; now="$(now_iso)"
+
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+
+  # No status/session-state check here (unlike claim/block/unblock) — linking a
+  # source_id is valid at any feature status, since it's purely metadata used by
+  # claim/log-out's existing best-effort Notion push-back, not a lifecycle step.
+  local updated
+  updated=$(sqlite3 -json "$DB_PATH" "UPDATE features SET source_id='$(sql_escape "$page_id")', updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where
+RETURNING id, feature_number, name, source_id;" 2>&1)
+  if [ $? -ne 0 ]; then
+    fail "link-notion failed: $updated"
+    exit 1
+  fi
+  if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
+    fail "not linkable: no matching feature $target"
+    exit 1
+  fi
+  ok "linked feature $target to Notion page $page_id"
 }
 
 cmd_import_sessions() {
@@ -436,6 +510,8 @@ main() {
   local sub="${1:-}"; shift || true
   case "$sub" in
     import-features) cmd_import_features "$@" ;;
+    add-feature) cmd_add_feature "$@" ;;
+    link-notion) cmd_link_notion "$@" ;;
     import-sessions) cmd_import_sessions "$@" ;;
     notion-diff) cmd_notion_diff "$@" ;;
     notion-import) cmd_notion_import "$@" ;;
@@ -454,7 +530,7 @@ main() {
     unblock) cmd_unblock "$@" ;;
     check-blockers) cmd_check_blockers ;;
     *)
-      echo "usage: harness.sh <import-features|import-sessions|notion-diff|notion-import|claim|append-log|set-plan|set-next-step|log-out|status|snapshot|sync|notion-check|notion-create-feature|block|unblock|check-blockers> [args...]" >&2
+      echo "usage: harness.sh <import-features|add-feature|link-notion|import-sessions|notion-diff|notion-import|claim|append-log|set-plan|set-next-step|log-out|status|snapshot|sync|notion-check|notion-create-feature|block|unblock|check-blockers> [args...]" >&2
       exit 1
       ;;
   esac

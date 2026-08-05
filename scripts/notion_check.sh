@@ -22,7 +22,7 @@ if [ -z "$DATABASE_ID" ]; then
   exit 0
 fi
 
-TOKEN="${!TOKEN_ENV:-}"
+TOKEN="$(resolve_indirect "$TOKEN_ENV")"
 if [ -z "$TOKEN" ]; then
   warn "\$$TOKEN_ENV not set — skipping Notion check (create a Notion internal integration, share the database with it, and export its token as \$$TOKEN_ENV)"
   echo '[]'

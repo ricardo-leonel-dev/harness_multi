@@ -65,7 +65,7 @@ if [ -z "$DATABASE_ID" ]; then
   exit 1
 fi
 
-TOKEN="${!TOKEN_ENV:-}"
+TOKEN="$(resolve_indirect "$TOKEN_ENV")"
 if [ -z "$TOKEN" ]; then
   echo "[FAIL] \$$TOKEN_ENV not set (create a Notion internal integration, share the database with it, and export its token as \$$TOKEN_ENV)" >&2
   exit 1

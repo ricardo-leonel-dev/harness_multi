@@ -24,6 +24,35 @@ config() {
   jq -r --arg d "$default" "($path) // \$d" "$HARNESS_CONFIG" 2>/dev/null
 }
 
+# resolve_indirect <env-var-name>
+# Given the NAME of an env var (already resolved from .harness.json, e.g. via
+# `config '.notion_token_env' 'NOTION_API_TOKEN'`), returns its value — tried in order:
+#   1. already exported in this process — always wins, never overridden.
+#   2. `set -gx/-x/-Ux <name> <value>` in ~/.config/fish/config.fish, if present — fish
+#      is this machine's primary interactive shell, so it's treated as the live source
+#      of truth (a narrow regex for this one line shape, not a general fish parser).
+#   3. ~/.harness_env (`export NAME=value`, plain bash), if present — portable fallback
+#      for machines without fish, or a single place to override 1/2.
+# This matters for unattended agents (e.g. Codex running claim/log-out/init.sh on its
+# own, not typed by the user) whose exec environment may not mirror an interactive
+# shell 1:1 — callers shouldn't have to rely on however that environment got inherited.
+resolve_indirect() {
+  local name="$1"
+  [ -n "$name" ] || return 0
+  local val="${!name:-}"
+
+  if [ -z "$val" ] && [ -f "$HOME/.config/fish/config.fish" ]; then
+    val="$(sed -n -E "s/^set[[:space:]]+-[A-Za-z]*x[A-Za-z]*[[:space:]]+${name}[[:space:]]+(.*)\$/\1/p" \
+      "$HOME/.config/fish/config.fish" 2>/dev/null | tail -n1 | sed -E "s/^['\"]//; s/['\"]\$//")"
+  fi
+
+  if [ -z "$val" ] && [ -f "$HOME/.harness_env" ]; then
+    val="$( (set -a; source "$HOME/.harness_env" >/dev/null 2>&1; printf '%s' "${!name:-}") )"
+  fi
+
+  printf '%s' "$val"
+}
+
 require_config
 DB_PATH="$(config '.db_path' 'harness.db')"
 SNAPSHOT_PATH="$(config '.snapshot_path' 'state')"
