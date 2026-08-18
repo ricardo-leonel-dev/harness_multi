@@ -33,12 +33,14 @@ implement directly.
 
 ### Startup Protocol (upon receiving the first task)
 
-1. Read this file (§1–§7 below) for guidance.
+1. Read this file (§1–§8 below) for guidance.
 2. Run `scripts/harness.sh status` to see current features and any open session — this is the SQLite-backed
    replacement for reading `feature_list.json`/`progress/current.md` directly.
 3. Run `./init.sh`. If it fails, stop and report the issue.
 4. Check Notion for new tasks (see "Notion Task Intake" below) — best-effort, never blocks.
-5. Apply the escalation table from `.claude/agents/leader.md` (Claude Code) or `.codex/agents/leader.toml` (Codex
+5. If `status` shows any `blocked` feature, run `scripts/harness.sh check-blockers` (best-effort, never blocks
+   startup) — see "Cross-Project Dependencies" (§8) for what this does and when a `blocked` feature can resume.
+6. Apply the escalation table from `.claude/agents/leader.md` (Claude Code) or `.codex/agents/leader.toml` (Codex
    CLI).
 
 ### Explicit Feature Selection
@@ -48,16 +50,52 @@ so it can `scripts/harness.sh claim <target>` explicitly instead of defaulting t
 
 ### Notion Task Intake (if configured)
 
-If `.harness.json` has `notion_database_id` set, use the Notion MCP connector (declared in `.mcp.json` for Claude
-Code, connected via `/mcp`; or in `.codex/config.toml` for Codex CLI, connected via its OAuth flow) to query that
-database for pages where `Project` matches this project's `project_slug` and `Ready` is checked. Map each page's
-`Title` / `Description` / `Acceptance Criteria` / page-id properties into
-`{source_id, name, title, description, acceptance}` objects, pipe the array through `scripts/harness.sh notion-diff`
-to drop anything already imported, and — if any remain — ask the user interactively (Claude Code: `AskUserQuestion`,
+If `.harness.json` has `notion_database_id` set, run `scripts/harness.sh notion-check`. This is a curl+jq script
+(`scripts/notion_check.sh`) that queries the Notion API directly for pages in that database where `Project` matches
+this project's `project_slug` and `Status` is `Ready` (the board column), and prints them already mapped to
+`{source_id, name, title, description, acceptance}` JSON — exactly the shape `notion-diff` expects. This is
+deliberate: unlike the Notion MCP connector, it never puts Notion's raw, verbose API response into your context —
+only the filtered/trimmed result reaches you. Pipe that output through `scripts/harness.sh notion-diff` to drop
+anything already imported, and — if any remain — ask the user interactively (Claude Code: `AskUserQuestion`,
 multi-select) which ones, if any, to add. For the ones chosen, write them to a temp file and run `scripts/harness.sh
-notion-import <file>`. This only inserts them as `pending`; **never claim or work on them in the same turn**. If the
-Notion connector isn't available, `notion_database_id` isn't set, or the query fails, note it and move on — this
-step must never block startup.
+notion-import <file>`. This only inserts them as `pending`; **never claim or work on them in the same turn**. It
+requires a Notion internal integration token in the env var named by `notion_token_env` (default `NOTION_API_TOKEN`)
+— see `scripts/notion_check.sh`'s header comment for the one-time setup. If the token isn't set, `notion_database_id`
+isn't set, or the query fails, `notion-check` prints `[]` and a warning to stderr; note it and move on — this step
+must never block startup.
+
+### Notion Status Push-back (automatic, if configured)
+
+`scripts/harness.sh claim` and `scripts/harness.sh log-out` each best-effort push a status update back to a
+feature's source Notion page (only if it has a `source_id`, i.e. it came in via `notion-import`): `claim` sets
+`Status` to `.harness.json`'s `notion_status_in_progress` (default `In Progress`), `log-out` sets it to
+`notion_status_done` (default `Done`). This is automatic — you never call `scripts/notion_set_status.sh` directly.
+It requires the Notion integration to have **"Update content"** capability, not just read (the intake check above
+only ever needs read). Same best-effort philosophy as everything else Notion-related here: any failure is a
+`[WARN]`, never blocks `claim`/`log-out`.
+
+### Ad-hoc Task → Notion (if configured, with confirmation)
+
+Sometimes a task arrives directly (not via Notion intake) with no `pending` feature that matches it. When that
+happens and you need to create a feature on the spot for it, and `.harness.json` has `notion_database_id` set: before
+creating the local feature, propose to the user (Claude Code: `AskUserQuestion`; Codex CLI: ask directly) the
+title/description/acceptance criteria for a Notion card to track it — same "propose before creating" pattern as §8's
+cross-project dependency flow, since writing to an external system is a visible action, not something to do
+autonomously. **This is scoped to the feature being created right now** — it does not retroactively apply to
+`pending` features that already existed without a Notion link.
+
+On confirmation:
+```
+scripts/harness.sh add-feature --name <slug> --title "<title>" --description "<description>" --acceptance "<item...>"
+scripts/harness.sh notion-create-feature --project-path . --title "<title>" \
+  --description "<description>" --acceptance "<acceptance>" --status Ready
+scripts/harness.sh link-notion <slug> <page_id-from-the-previous-command's-output>
+```
+`link-notion` stamps the feature's `source_id`, so the existing automatic push-back (above) starts applying to it
+immediately: the very next `claim` on this feature pushes `Status` to `notion_status_in_progress`, and `log-out`
+later pushes `notion_status_done` — no extra code, same mechanism as any Notion-sourced feature. If the user declines
+the Notion card, create the local feature anyway (`add-feature` without the two Notion steps) — this never blocks
+the work itself.
 
 ### Anti-Telephone Rule
 
@@ -79,10 +117,11 @@ return only the reference, not the content — never the full content in chat.
 | ------------------------- | --------------------------------------------------------------------------- | ---------------------------------------- |
 | `harness.db`              | SQLite — the source of truth for features and session state (gitignored) | Never read/write it directly; go through `scripts/harness.sh` |
 | `state/`                  | Generated, git-tracked markdown snapshot of `harness.db` (read-only)     | For human review / `git diff`; never hand-edit |
-| `.harness.json`           | Runtime config: db path, verify command, mirror env var names, Notion database id | If you need to know the verify command or project slug |
-| `.mcp.json`                | Claude Code's MCP server declarations (e.g. the hosted Notion connector) | Claude Code: setting up or troubleshooting Notion task intake   |
-| `.codex/config.toml`      | Codex CLI's MCP server declarations (Codex equivalent of `.mcp.json`)    | Codex CLI: setting up or troubleshooting Notion task intake   |
+| `.harness.json`           | Runtime config: db path, verify command, mirror env var names, Notion database id + token env var | If you need to know the verify command or project slug |
 | `scripts/harness.sh`      | The single entry point for reading/writing harness state                 | Every time you claim, log, or log-out |
+| `scripts/notion_check.sh` | Best-effort curl+jq Notion task check (see "Notion Task Intake" above)   | Setting up or troubleshooting Notion task intake      |
+| `scripts/notion_set_status.sh` | Best-effort curl+jq Notion status push-back, called by `claim`/`log-out` | Setting up or troubleshooting Notion status push-back |
+| `scripts/notion_create_feature.sh` | Creates a new Notion page (feature card) — used for cross-project dependency requests (§8) | Setting up or troubleshooting cross-project requests |
 | `docs/architecture.md`    | What "doing a good job" means in this project                            | Before implementing                   |
 | `docs/conventions.md`     | Style rules, naming conventions, structure                               | Before writing code                   |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
@@ -141,3 +180,54 @@ Before finishing:
 - Conceptual or repository exploration questions (pure reading) → answer directly, without launching sub-agents.
 - Changes outside of `src/` and `tests/` (docs, configuration, `progress/`, harness setup itself) → you can edit
   them yourself.
+
+## 8. Cross-Project Dependencies (Notion-mediated)
+
+Sometimes a feature in this project needs work done in a *different* sibling project (e.g. a backend feature that
+needs a new table/stored procedure in a separate database-schema project). This project's harness has no built-in
+mechanism to reach into another project's `harness.db` and start work there directly — instead, the dependency is
+routed through Notion, the same shared task board `notion-check`/`notion-import` already read from:
+
+1. **Propose before creating anything.** When you determine a feature needs work in a sibling project, do not create
+   a Notion card or block anything silently — ask the user first (Claude Code: `AskUserQuestion`) proposing the
+   target project's directory, a title, a description, and acceptance criteria. Creating content in an external
+   system and blocking your own work on it is a visible action, not something to do autonomously.
+2. **On confirmation**, create the card:
+   ```
+   scripts/harness.sh notion-create-feature --project-path <absolute path to the target project's directory> \
+     --title "<title>" --description "<description>" --acceptance "<acceptance>"
+   ```
+   **Always use `--project-path`, never a hand-typed `--project <slug>`.** `--project-path` reads the target
+   project's actual `project_slug` straight out of its own `.harness.json` — a typed/guessed slug (e.g.
+   "rushr-web-display-database" instead of the real "rushr-web-display-db") produces a card that *looks* fine but
+   the target project's own `notion-check` will never match, since that filters on an exact Project-property value —
+   the mismatch stays invisible until someone manually inspects Notion. You already need this same absolute path for
+   step 3's `BLOCKED_ON` note, so this doesn't cost you anything extra to have on hand.
+   This prints `{"page_id": ..., "url": ..., "predicted_name": ...}` — `predicted_name` is the `name` the feature
+   will get once the target project imports this card via its own `notion-import` (same title-normalization
+   `notion_check.sh` already applies). Unlike `notion-check`/`notion_set_status.sh`, this is **not** a silent
+   `[WARN]`-and-continue: if it fails, the card was not created and you must not proceed to block anything on it.
+   Requires the Notion integration's **"Insert content"** capability (in addition to Read/Update).
+3. **Block the current feature**, recording a machine-parseable note `check-blockers` (§ below) can find later:
+   ```
+   scripts/harness.sh block <current-feature> "waiting on <target-project-slug>: BLOCKED_ON: path=<absolute path \
+     to the target project's directory> feature=<predicted_name> notion_page=<url>"
+   ```
+   This sets the feature's status to `blocked` (a real status the schema has always supported, just newly wired
+   up) and leaves the session open — same "leave it for the next session" idiom as §6, just with `blocked` instead
+   of `in_progress`.
+4. Report to the user what was created and that the feature is now blocked, then end the session.
+5. The user flips the Notion card to `Ready` whenever they want work to start there — **nothing changes** on the
+   target project's side: its own `notion-check`/`notion-import`/`claim`/`log-out` flow (§0's "Notion Task Intake"
+   and "Notion Status Push-back") picks it up and works it exactly as it already does for any other Notion-sourced
+   feature, pushing `Status=Done` back automatically on `log-out`.
+6. **Resuming happens on your next session in *this* project** (Startup Protocol step 5): `check-blockers` reads
+   every `blocked` feature's `BLOCKED_ON` note and queries the target project's `harness.db` *directly* (not
+   Notion — faster, and doesn't depend on that project's own Notion push-back having succeeded). If the dependency
+   is `done`, run `scripts/harness.sh unblock <feature>` and continue it; if not, report its current status and
+   work on something else pending instead.
+
+There is deliberately no background polling or scheduled agent here — resuming is tied to opening a session in
+this project again, consistent with how every other best-effort integration in this harness works (session-based,
+never a daemon). If instant background resume is ever wanted, that's a scheduled-agent extension on top of this,
+not a change to it.

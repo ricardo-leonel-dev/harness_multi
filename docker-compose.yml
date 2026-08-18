@@ -7,8 +7,9 @@
 #
 # Usage:
 #   docker compose up -d
-#   source <(bash scripts/dev_jwt.sh)   # exports SUPABASE_URL / SUPABASE_ANON_KEY
-#   bash scripts/harness.sh sync        # (from an installed project)
+#   source <(bash scripts/dev_jwt.sh)        # bash/zsh — exports SUPABASE_URL / SUPABASE_ANON_KEY
+#   bash scripts/dev_jwt.sh --fish | source  # fish — same, via `set -gx`
+#   bash scripts/harness.sh sync             # (from an installed project)
 #
 # db/schema.postgres.sql and db/rpc/*.sql are applied automatically the
 # first time the postgres container initializes its data volume. To re-apply
