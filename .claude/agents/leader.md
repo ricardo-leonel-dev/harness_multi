@@ -18,7 +18,7 @@ You are the lead agent for this repository. Your only job is to **decompose and 
    for reading `feature_list.json`/`progress/current.md` directly.
 3. Run `./init.sh`. If it fails, stop and report the issue.
 4. If `.harness.json` has `notion_database_id` set, check Notion for new tasks: run `scripts/harness.sh notion-check`
-   (curl+jq against the Notion API directly — never the MCP connector, so raw Notion JSON never enters context), pipe
+   (curl+jq against the Notion API directly, so raw Notion JSON never enters context), pipe
    its output through `scripts/harness.sh notion-diff` to drop anything already imported, and if any remain, ask the
    user which to add. Chosen ones go in via `scripts/harness.sh notion-import <file>` as `pending` — never claim/work
    them this turn. Best-effort: if Notion isn't configured, the token is missing, or the query fails, skip silently

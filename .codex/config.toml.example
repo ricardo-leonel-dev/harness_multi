@@ -1,0 +1,32 @@
+# .codex/config.toml.example — copy to `.codex/config.toml` in a project that
+# has this harness installed, if you want Codex CLI's `leader`/`implementer`
+# subagents to reach Notion/Supabase over the network.
+#
+# Why this is opt-in and not scaffolded by install.sh: enabling network access
+# widens what a sandboxed session can do, so it's a decision for you to make
+# per project, not something the toolkit should silently turn on.
+#
+# Requirement: Codex only loads a project-level .codex/config.toml when the
+# project is marked trusted in YOUR OWN ~/.codex/config.toml:
+#
+#   [projects."/absolute/path/to/this/project"]
+#   trust_level = "trusted"
+#
+# Without that, this file is silently ignored and the sandbox stays at
+# Codex's default (workspace-write, no network) — which is fine: every
+# script this unblocks (scripts/notion_check.sh, notion_set_status.sh,
+# notion_create_feature.sh, sync_postgres.sh) is written to fail as a
+# [WARN], never a [FAIL], so the harness works either way.
+
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+# Lets curl reach api.notion.com and your Postgres/Supabase REST endpoint.
+# Filesystem writes stay scoped to the workspace either way — this only
+# affects network egress.
+network_access = true
+
+# Alternative if you'd rather approve each network-needing command by hand
+# instead of a blanket grant (safer, but breaks unattended runs since the
+# leader/implementer would block on your approval at every claim/log-out):
+# approval_policy = "on-request"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # notion_check.sh — best-effort, token-efficient check for new tasks in a Notion
-# database. Queries the Notion API directly via curl+jq (not the MCP connector) so
+# database. Queries the Notion API directly via curl+jq so
 # the raw, verbose Notion JSON never enters the model's context — only the
 # filtered/trimmed {source_id, name, title, description, acceptance} array does.
 # That output is already exactly the shape scripts/harness.sh notion-diff expects.

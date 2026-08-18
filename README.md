@@ -29,6 +29,17 @@ check `CLAUDE.md` out as a plain text file containing the literal string
 `@AGENTS.md` on the first line of a real `CLAUDE.md` file instead (Claude
 Code's documented import syntax) as a fallback.
 
+Codex CLI's `workspace-write` sandbox blocks outbound network by default, so
+the curl-based sync scripts (`scripts/notion_check.sh`,
+`scripts/notion_set_status.sh`, `scripts/notion_create_feature.sh`,
+`scripts/sync_postgres.sh`) can't reach Notion/Supabase from a Codex session
+out of the box — they just fail as a `[WARN]` and the harness keeps working
+without the sync. To let them through, copy `.codex/config.toml.example` to
+`.codex/config.toml` in the target project and mark that project `trusted` in
+your own `~/.codex/config.toml`; see the comments in the example file for the
+exact keys and a lower-blast-radius alternative (per-command approval instead
+of a blanket network grant).
+
 ## What's in here
 
 - `AGENTS.md` (+ `CLAUDE.md` symlink) — the shared orchestrator/navigation instructions.
@@ -40,6 +51,7 @@ Code's documented import syntax) as a fallback.
 - `db/schema.postgres.sql` + `db/rpc/*.sql` — the optional Postgres/Supabase mirror schema and RPC functions.
 - `templates/` — scaffolds for a new project's `docs/*.md`, `CHECKPOINTS.md`, and `features.seed.json`.
 - `scripts/harness.sh` — the single entry point agents use to read/write harness state (claim, log, log-out, snapshot, sync, notion-check, notion-diff, notion-import).
+- `.codex/config.toml.example` — optional, hand-copy-only template for enabling Codex CLI network access (see above).
 - `examples/notes-cli/` — a fully worked reference installation (see below).
 
 ## Installing into a project
@@ -110,7 +122,7 @@ notice new ones every time you open a session — it only ever *proposes*
 adding them as `pending` features; it never claims or works one itself.
 
 This queries the Notion API directly via `scripts/notion_check.sh`
-(curl+jq, plain REST — not the Notion MCP connector). That's deliberate: a
+(curl+jq, plain REST). That's deliberate: a
 plain script filters the response server- and client-side and only ever
 returns the trimmed `{source_id, name, title, description, acceptance}`
 array, so Notion's raw, verbose JSON never has to enter the model's context.
@@ -176,12 +188,6 @@ This needs the integration's **Insert content** capability (`notion.so/my-integr
 integration → Capabilities), in addition to Read/Update content above — it's the one capability
 tier nothing else in this harness needs, since everything else only reads or updates pages that
 already exist.
-
-If you'd rather have the model reason about Notion interactively (search,
-edit pages, etc.) instead of this fixed one-shot check, you can separately
-declare Notion's hosted MCP server in `.mcp.json` (Claude Code) or
-`.codex/config.toml` (Codex CLI) and authorize it via OAuth — `install.sh`
-doesn't do this for you, so add it by hand if and when you actually need it.
 
 ## Try it yourself
 

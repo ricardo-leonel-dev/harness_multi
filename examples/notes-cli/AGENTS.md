@@ -54,7 +54,7 @@ If `.harness.json` has `notion_database_id` set, run `scripts/harness.sh notion-
 (`scripts/notion_check.sh`) that queries the Notion API directly for pages in that database where `Project` matches
 this project's `project_slug` and `Status` is `Ready` (the board column), and prints them already mapped to
 `{source_id, name, title, description, acceptance}` JSON — exactly the shape `notion-diff` expects. This is
-deliberate: unlike the Notion MCP connector, it never puts Notion's raw, verbose API response into your context —
+deliberate: it never puts Notion's raw, verbose API response into your context —
 only the filtered/trimmed result reaches you. Pipe that output through `scripts/harness.sh notion-diff` to drop
 anything already imported, and — if any remain — ask the user interactively (Claude Code: `AskUserQuestion`,
 multi-select) which ones, if any, to add. For the ones chosen, write them to a temp file and run `scripts/harness.sh
