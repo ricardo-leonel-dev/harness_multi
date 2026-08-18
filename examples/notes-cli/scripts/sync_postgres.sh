@@ -17,8 +17,8 @@ if [ -z "$URL_ENV" ] || [ -z "$KEY_ENV" ]; then
   exit 0
 fi
 
-SUPABASE_URL="${!URL_ENV:-}"
-SUPABASE_KEY="${!KEY_ENV:-}"
+SUPABASE_URL="$(resolve_indirect "$URL_ENV")"
+SUPABASE_KEY="$(resolve_indirect "$KEY_ENV")"
 
 if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
   warn "\$$URL_ENV / \$$KEY_ENV not set — skipping mirror sync"

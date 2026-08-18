@@ -2,10 +2,8 @@
 name: leader
 description: Orchestrator. Receives the main task, divides the work, and launches sub-agents in parallel. NEVER writes code directly.
 tools: Read, Glob, Grep, Bash, Agent
+sandbox_mode: workspace-write
 ---
-
-<!-- GENERATED FILE — do not edit directly. Source: .agents/leader.md, regenerate with ./gen_agents.sh -->
-
 
 # Lead Agent (Orchestrator)
 

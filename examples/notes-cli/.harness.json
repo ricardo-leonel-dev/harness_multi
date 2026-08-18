@@ -7,5 +7,8 @@
   "supabase_url_env": "SUPABASE_URL",
   "supabase_key_env": "SUPABASE_ANON_KEY",
   "supabase_rest_path": "",
-  "notion_database_id": ""
+  "notion_database_id": "",
+  "notion_token_env": "NOTION_API_TOKEN",
+  "notion_status_in_progress": "In Progress",
+  "notion_status_done": "Done"
 }

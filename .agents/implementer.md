@@ -2,10 +2,8 @@
 name: implementer
 description: Worker. Implements exactly ONE feature tracked in harness.db. Writes code, writes tests, and performs self-verification.
 tools: Read, Write, Edit, Glob, Grep, Bash
+sandbox_mode: workspace-write
 ---
-
-<!-- GENERATED FILE — do not edit directly. Source: .agents/implementer.md, regenerate with ./gen_agents.sh -->
-
 
 # Implementer Agent
 

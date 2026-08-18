@@ -6,10 +6,11 @@
 #   bash /path/to/personal_harness/install.sh --slug my-project \
 #     --verify-command "npm test"
 #
-# Harness-core files (CLAUDE.md, AGENTS.md, .claude/agents/*.md, init.sh,
-# scripts/*.sh) are copied unconditionally — re-running install.sh refreshes
-# them. docs/*.md and CHECKPOINTS.md are scaffolded from templates only if
-# they don't already exist — never clobbers project-owned content.
+# Harness-core files (AGENTS.md + a CLAUDE.md symlink to it, .claude/agents/*.md,
+# .codex/agents/*.toml, init.sh, scripts/*.sh) are copied/relinked unconditionally
+# — re-running install.sh refreshes them. docs/*.md and CHECKPOINTS.md are
+# scaffolded from templates only if they don't already exist — never clobbers
+# project-owned content.
 
 set -u
 TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +28,9 @@ SUPABASE_KEY_ENV="SUPABASE_ANON_KEY"
 SUPABASE_REST_PATH="/rest/v1"
 FEATURES_SEED=""
 NOTION_DATABASE_ID=""
+NOTION_TOKEN_ENV="NOTION_API_TOKEN"
+NOTION_STATUS_IN_PROGRESS="In Progress"
+NOTION_STATUS_DONE="Done"
 
 usage() {
   cat <<EOF
@@ -39,6 +43,9 @@ Usage: install.sh --slug SLUG [options]
   --supabase-rest-path PATH    REST path suffix on the URL (default: /rest/v1; use "" for a bare PostgREST instance)
   --features-seed FILE         optional features.seed.json to import on install
   --notion-database-id ID      Notion database id to check for new tasks (see README's Notion Task Intake section)
+  --notion-token-env VAR       env var holding the Notion internal integration token (default: NOTION_API_TOKEN)
+  --notion-status-in-progress VAL  Status value to push to Notion when a feature is claimed (default: "In Progress")
+  --notion-status-done VAL         Status value to push to Notion when a feature is logged out (default: "Done")
 EOF
 }
 
@@ -52,6 +59,9 @@ while [ $# -gt 0 ]; do
     --supabase-rest-path) SUPABASE_REST_PATH="$2"; shift 2 ;;
     --features-seed) FEATURES_SEED="$2"; shift 2 ;;
     --notion-database-id) NOTION_DATABASE_ID="$2"; shift 2 ;;
+    --notion-token-env) NOTION_TOKEN_ENV="$2"; shift 2 ;;
+    --notion-status-in-progress) NOTION_STATUS_IN_PROGRESS="$2"; shift 2 ;;
+    --notion-status-done) NOTION_STATUS_DONE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1"; usage; exit 1 ;;
   esac
@@ -79,15 +89,17 @@ sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 
 echo "── 1. Copying harness-core files ───────────────────────"
 
-cp "$TOOLKIT_DIR/CLAUDE.md" "$TARGET_DIR/CLAUDE.md"
 cp "$TOOLKIT_DIR/AGENTS.md" "$TARGET_DIR/AGENTS.md"
+ln -sf AGENTS.md "$TARGET_DIR/CLAUDE.md"
 mkdir -p "$TARGET_DIR/.claude/agents"
 cp "$TOOLKIT_DIR"/.claude/agents/*.md "$TARGET_DIR/.claude/agents/"
+mkdir -p "$TARGET_DIR/.codex/agents"
+cp "$TOOLKIT_DIR"/.codex/agents/*.toml "$TARGET_DIR/.codex/agents/"
 cp "$TOOLKIT_DIR/init.sh" "$TARGET_DIR/init.sh"
 mkdir -p "$TARGET_DIR/scripts"
 cp "$TOOLKIT_DIR"/scripts/*.sh "$TARGET_DIR/scripts/"
 chmod +x "$TARGET_DIR/init.sh" "$TARGET_DIR"/scripts/*.sh
-ok "copied CLAUDE.md, AGENTS.md, .claude/agents/*.md, init.sh, scripts/*.sh"
+ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*.toml, init.sh, scripts/*.sh"
 
 echo ""
 echo "── 2. Creating harness.db ───────────────────────────────"
@@ -136,10 +148,14 @@ jq -n \
   --arg key_env "$SUPABASE_KEY_ENV" \
   --arg rest_path "$SUPABASE_REST_PATH" \
   --arg notion_db "$NOTION_DATABASE_ID" \
+  --arg notion_token_env "$NOTION_TOKEN_ENV" \
+  --arg notion_status_in_progress "$NOTION_STATUS_IN_PROGRESS" \
+  --arg notion_status_done "$NOTION_STATUS_DONE" \
   '{harness_version: $version, db_path: "harness.db", snapshot_path: "state",
     project_slug: $slug, verify_command: $verify,
     supabase_url_env: $url_env, supabase_key_env: $key_env, supabase_rest_path: $rest_path,
-    notion_database_id: $notion_db}' \
+    notion_database_id: $notion_db, notion_token_env: $notion_token_env,
+    notion_status_in_progress: $notion_status_in_progress, notion_status_done: $notion_status_done}' \
   > "$TARGET_DIR/.harness.json"
 ok "wrote .harness.json"
 
@@ -148,16 +164,7 @@ grep -qxF 'harness.db' "$TARGET_DIR/.gitignore" || echo 'harness.db' >> "$TARGET
 ok "harness.db added to .gitignore"
 
 echo ""
-echo "── 5. Declaring Notion MCP connector ────────────────────"
-
-MCP_FILE="$TARGET_DIR/.mcp.json"
-EXISTING_MCP="$([ -s "$MCP_FILE" ] && cat "$MCP_FILE" || echo '{}')"
-echo "$EXISTING_MCP" | jq '.mcpServers = ((.mcpServers // {}) + {notion: {type: "http", url: "https://mcp.notion.com/mcp"}})' \
-  > "$MCP_FILE"
-ok "declared notion MCP server in .mcp.json — run '/mcp' in Claude Code to complete the one-time OAuth login"
-
-echo ""
-echo "── 6. Importing features (if provided) ──────────────────"
+echo "── 5. Importing features (if provided) ──────────────────"
 
 cd "$TARGET_DIR" || exit 1
 if [ -n "$FEATURES_SEED" ]; then
@@ -167,7 +174,7 @@ else
 fi
 
 echo ""
-echo "── 7. Generating initial snapshot + mirror sync ─────────"
+echo "── 6. Generating initial snapshot + mirror sync ─────────"
 
 bash scripts/harness.sh snapshot
 bash scripts/harness.sh sync
