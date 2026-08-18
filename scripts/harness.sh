@@ -41,6 +41,9 @@
 #                                              actually created
 #   block <TARGET> <reason...>                mark an in_progress feature blocked (leaves its session open)
 #   unblock <TARGET>                          mark a blocked feature in_progress again, resuming its open session
+#   reopen <TARGET> <reason...>               mark a done feature in_progress again, opening a fresh session
+#                                              (e.g. it was closed without meeting a checkpoint) — logs a
+#                                              REOPENED: <reason> entry on the new session for the audit trail
 #   check-blockers                            best-effort: for every blocked feature with a BLOCKED_ON note,
 #                                              check the referenced sibling project's harness.db directly
 
@@ -396,6 +399,55 @@ RETURNING id, feature_number, name, title;" 2>&1)
   ok "unblocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 }
 
+cmd_reopen() {
+  local target="${1:?usage: reopen <feature_number|name> <reason...>}"; shift
+  local reason="$*"
+  [ -n "$reason" ] || { fail "usage: reopen <feature_number|name> <reason...>"; exit 1; }
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local now; now="$(now_iso)"
+
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+
+  # Same "UPDATE ... RETURNING or fail cleanly" shape as cmd_claim/cmd_unblock — only a
+  # done feature can be reopened, and the same one_in_progress_per_project unique index
+  # applies (surfaced as the same "is another feature already in_progress?" hint).
+  local updated
+  updated=$(sqlite3 -json "$DB_PATH" "UPDATE features SET status='in_progress', updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND status='done' AND deleted_at IS NULL AND $where
+RETURNING id, feature_number, name, title, source_id;" 2>&1)
+  if [ $? -ne 0 ]; then
+    fail "reopen failed (is another feature already in_progress?): $updated"
+    exit 1
+  fi
+  if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
+    fail "not reopenable: no matching done feature"
+    exit 1
+  fi
+  local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
+
+  # Opens a fresh session (the one from the original log-out is already
+  # closed_at-stamped) — mirrors cmd_claim's session INSERT.
+  local agent="${HARNESS_AGENT:-unknown}"
+  db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
+VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
+  local sid; sid="$(current_session_id)"
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "REOPENED: $reason")', '$now');"
+
+  ok "reopened: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
+
+  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$updated")
+  if [ -n "$source_id" ]; then
+    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_in_progress' 'In Progress')"
+  fi
+}
+
 cmd_notion_create_feature() {
   bash "$SCRIPT_DIR/notion_create_feature.sh" "$@"
 }
@@ -528,9 +580,10 @@ main() {
     notion-create-feature) cmd_notion_create_feature "$@" ;;
     block) cmd_block "$@" ;;
     unblock) cmd_unblock "$@" ;;
+    reopen) cmd_reopen "$@" ;;
     check-blockers) cmd_check_blockers ;;
     *)
-      echo "usage: harness.sh <import-features|add-feature|link-notion|import-sessions|notion-diff|notion-import|claim|append-log|set-plan|set-next-step|log-out|status|snapshot|sync|notion-check|notion-create-feature|block|unblock|check-blockers> [args...]" >&2
+      echo "usage: harness.sh <import-features|add-feature|link-notion|import-sessions|notion-diff|notion-import|claim|append-log|set-plan|set-next-step|log-out|status|snapshot|sync|notion-check|notion-create-feature|block|unblock|reopen|check-blockers> [args...]" >&2
       exit 1
       ;;
   esac
