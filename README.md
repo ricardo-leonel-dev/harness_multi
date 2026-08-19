@@ -114,6 +114,15 @@ no `--supabase-rest-path ""` override needed here.
 `init.sh` and `scripts/harness.sh sync` pick up either option automatically
 once the env vars are set.
 
+**Already applied `db/schema.postgres.sql` before SDD support existed?** Run
+`db/migrations/0001_sdd.sql` once (Supabase SQL editor or `psql -f`, as
+top-level statements — not wrapped in an explicit transaction; it ends with
+`NOTIFY pgrst, 'reload schema'` so PostgREST picks up the new function/table
+without a restart), then re-apply `db/rpc/upsert_feature.sql` (updated) and
+the new `db/rpc/upsert_spec.sql`. Local `docker compose` stacks don't need
+this — `docker compose down -v && docker compose up -d` re-applies
+everything from the current, already-updated `db/schema.postgres.sql`.
+
 ## Notion task intake (optional)
 
 If your task tickets (Jira, etc.) tend to lack the detail you actually need,

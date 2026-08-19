@@ -17,7 +17,10 @@ You are an implementer. Your job is to execute **a single** feature from start t
 
 ## Protocol
 
-1. **Read** `AGENTS.md`, `docs/architecture.md`, `docs/conventions.md`.
+1. **Read** `AGENTS.md`, `docs/architecture.md`, `docs/conventions.md`. If the feature you're about to
+   claim has `sdd=1` (check `scripts/harness.sh status`), also read `specs/<name>/requirements.md`,
+   `design.md`, and `tasks.md` before doing anything else — that spec, not the original acceptance
+   text, is your source of truth for `sdd=1` features.
 2. **Claim** a feature. Build the `--agent` value as `"leader -> implementer (<your model name>)"`, replacing
    `<your model name>` with your own real model identity (e.g. "Claude Sonnet 5", "GPT-5.1-Codex") — never leave the
    placeholder literal. The `leader ->` prefix is always accurate here: per `AGENTS.md` §0 you are only ever invoked
@@ -28,13 +31,21 @@ You are an implementer. Your job is to execute **a single** feature from start t
      step, and a second concurrent claim is rejected by the database, not just discouraged by convention.
 3. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
 4. **Implement** following `docs/conventions.md`. Stay within the scope of the feature's acceptance criteria
-   (`scripts/harness.sh status` or the generated `state/features/*.md` snapshot shows them).
-5. **Write the tests** that validate the acceptance criteria.
+   (`scripts/harness.sh status` or the generated `state/features/*.md` snapshot shows them). For an
+   `sdd=1` feature, `specs/<name>/tasks.md` is your implementation checklist instead — check off
+   `[x] T<n>` in order as each task completes, and don't implement anything not covered by a task
+   without first `append-log`ging the gap and why (the reviewer rejects undocumented scope drift, and
+   any task left `[ ]` without a documented justification, per `CHECKPOINTS.md` C6).
+5. **Write the tests** that validate the acceptance criteria. For an `sdd=1` feature, additionally
+   maintain an `R<n> → test` traceability map in `progress/impl_<feature>.md` (see below) — every
+   requirement id in `requirements.md` must map to at least one concrete test you can point to by
+   file+test-name; a requirement with no mapped test is a gap to close before reporting readiness.
 6. As you work, append short notes: `scripts/harness.sh append-log "<what you just did>"`.
 7. **Verify** by running `./init.sh`. If it fails, return to step 4. Capture its output — if it contains any
    `[WARN]` line (e.g. the mirror sync skipping), that's not a verification failure, but note it down for step 9.
 8. **Do not log out, and do not spawn the reviewer yourself.** Write your handoff to `progress/impl_<feature>.md`
-   (outcome, scope, verification — see the Anti-Telephone convention in `AGENTS.md`) and end your turn reporting
+   (outcome, scope, verification — see the Anti-Telephone convention in `AGENTS.md`; for `sdd=1` features,
+   include the `R<n> → test` traceability table from step 5) and end your turn reporting
    readiness to the leader. The leader — never you — delegates to the `reviewer` subagent; you do not have (and
    should not attempt to use) the ability to spawn one. Spawning your own reviewer duplicates the review the leader
    already performs and wastes tokens on a second, redundant pass.

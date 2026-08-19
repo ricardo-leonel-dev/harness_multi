@@ -26,8 +26,9 @@ CREATE TABLE features (
   title TEXT NOT NULL,
   description TEXT,
   acceptance TEXT NOT NULL DEFAULT '[]',      -- JSON array; SQLite has no native array type
+  sdd INTEGER NOT NULL DEFAULT 0,             -- opt-in: does this feature require an approved spec first?
   status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'in_progress', 'done', 'blocked')),
+    CHECK (status IN ('pending', 'spec_drafting', 'spec_ready', 'in_progress', 'done', 'blocked')),
   source_id TEXT,                             -- external origin id (e.g. a Notion page id), for idempotent intake
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -70,6 +71,31 @@ CREATE TABLE session_log_entries (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   deleted_at TEXT
 );
+
+-- Metadata about a feature's spec-driven-development artifacts. Content
+-- (requirements.md/design.md/tasks.md) lives as git-tracked files on disk at
+-- specs/<name>/ — this table never duplicates that prose, it only tracks the
+-- lifecycle (drafting/ready/approved) and a durable approval record, since
+-- that's the one thing a human-approval gate can't recover from files alone.
+CREATE TABLE specs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,                          -- "specs/<name>", stored explicitly so a future
+                                                -- feature rename doesn't silently orphan this row
+  status TEXT NOT NULL DEFAULT 'drafting'
+    CHECK (status IN ('drafting', 'ready', 'approved')),
+  requirements_count INTEGER,                  -- parsed at mark-spec-ready time
+  tasks_count INTEGER,
+  drafted_by TEXT,                             -- the spec_author session's agent string
+  ready_at TEXT,
+  approved_at TEXT,                            -- NULL until approve-spec runs
+  approved_by TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+
+CREATE UNIQUE INDEX specs_feature_active ON specs(feature_id) WHERE deleted_at IS NULL;
 
 CREATE INDEX idx_features_project_status ON features(project_id, status);
 CREATE INDEX idx_session_log_project_closed ON session_log(project_id, closed_at);

@@ -2,8 +2,11 @@
 # notion_check.sh — best-effort, token-efficient check for new tasks in a Notion
 # database. Queries the Notion API directly via curl+jq so
 # the raw, verbose Notion JSON never enters the model's context — only the
-# filtered/trimmed {source_id, name, title, description, acceptance} array does.
-# That output is already exactly the shape scripts/harness.sh notion-diff expects.
+# filtered/trimmed {source_id, name, title, description, acceptance, sdd} array does.
+# That output is already exactly the shape scripts/harness.sh notion-diff/notion-import
+# expects. sdd reads an optional checkbox property named "SDD" (see docs/specs.md) —
+# a database without that property simply yields sdd:false for every row, same
+# graceful-degradation shape as every other optional property here.
 #
 # Every failure here is a [WARN] + `[]` on stdout, never a [FAIL]: the harness must
 # keep working with zero Notion connectivity. Requires curl; skips cleanly without it.
@@ -107,6 +110,7 @@ echo "$body" | jq -c '
     | ($p | propval("name")) as $namep
     | ($p | propval("description")) as $descp
     | ($p | propval("acceptancecriteria")) as $accp
+    | ($p | propval("sdd")) as $sddp
     | select((($status.select.name // $status.status.name // "")) == "Ready")
     | {
         source_id: .id,
@@ -117,6 +121,7 @@ echo "$body" | jq -c '
         title: (($namep.title // []) | map(.plain_text) | join("")),
         description: (($descp.rich_text // []) | map(.plain_text) | join("")),
         acceptance: ((($accp.rich_text // []) | map(.plain_text) | join(""))
-                     | split("\n") | map(select(length > 0)))
+                     | split("\n") | map(select(length > 0))),
+        sdd: (($sddp.checkbox // false))
       }
   ]' 2>/dev/null || { warn "failed to parse Notion response — skipping"; echo '[]'; }

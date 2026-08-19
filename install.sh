@@ -8,9 +8,9 @@
 #
 # Harness-core files (AGENTS.md + a CLAUDE.md symlink to it, .claude/agents/*.md,
 # .codex/agents/*.toml, init.sh, scripts/*.sh) are copied/relinked unconditionally
-# — re-running install.sh refreshes them. docs/*.md and CHECKPOINTS.md are
-# scaffolded from templates only if they don't already exist — never clobbers
-# project-owned content.
+# — re-running install.sh refreshes them. docs/*.md (including docs/specs.md),
+# CHECKPOINTS.md, .claude/settings.json, and specs/ are scaffolded from templates
+# only if they don't already exist — never clobbers project-owned content.
 
 set -u
 TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +31,7 @@ NOTION_DATABASE_ID=""
 NOTION_TOKEN_ENV="NOTION_API_TOKEN"
 NOTION_STATUS_IN_PROGRESS="In Progress"
 NOTION_STATUS_DONE="Done"
+NOTION_STATUS_SPEC_READY="Spec Ready"
 
 usage() {
   cat <<EOF
@@ -46,6 +47,8 @@ Usage: install.sh --slug SLUG [options]
   --notion-token-env VAR       env var holding the Notion internal integration token (default: NOTION_API_TOKEN)
   --notion-status-in-progress VAL  Status value to push to Notion when a feature is claimed (default: "In Progress")
   --notion-status-done VAL         Status value to push to Notion when a feature is logged out (default: "Done")
+  --notion-status-spec-ready VAL   Status value to push to Notion when an sdd=1 feature's spec is marked ready
+                                    (default: "Spec Ready"; see docs/specs.md)
 EOF
 }
 
@@ -62,6 +65,7 @@ while [ $# -gt 0 ]; do
     --notion-token-env) NOTION_TOKEN_ENV="$2"; shift 2 ;;
     --notion-status-in-progress) NOTION_STATUS_IN_PROGRESS="$2"; shift 2 ;;
     --notion-status-done) NOTION_STATUS_DONE="$2"; shift 2 ;;
+    --notion-status-spec-ready) NOTION_STATUS_SPEC_READY="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1"; usage; exit 1 ;;
   esac
@@ -101,6 +105,28 @@ cp "$TOOLKIT_DIR"/scripts/*.sh "$TARGET_DIR/scripts/"
 chmod +x "$TARGET_DIR/init.sh" "$TARGET_DIR"/scripts/*.sh
 ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*.toml, init.sh, scripts/*.sh"
 
+mkdir -p "$TARGET_DIR/.claude"
+if [ -f "$TARGET_DIR/.claude/settings.json" ]; then
+  warn ".claude/settings.json already exists — leaving as-is (may have project-specific hooks)"
+else
+  cp "$TOOLKIT_DIR/templates/settings.json.tmpl" "$TARGET_DIR/.claude/settings.json"
+  ok "scaffolded .claude/settings.json (Claude Code hooks: verify_command after edits, init.sh on session stop — Codex CLI has no equivalent hook mechanism, see docs/specs.md)"
+fi
+
+# specs/ holds git-tracked spec content for sdd=1 features (see docs/specs.md) —
+# deliberately NOT added to .gitignore below, unlike harness.db.
+if [ -d "$TARGET_DIR/specs" ]; then
+  :
+else
+  mkdir -p "$TARGET_DIR/specs"
+  cat > "$TARGET_DIR/specs/README.md" <<'EOF'
+Spec content for features with `sdd=1` lives here, one directory per feature
+(`specs/<name>/{requirements,design,tasks}.md`), git-tracked like `src/`/`tests/`.
+See `docs/specs.md` for the format and lifecycle.
+EOF
+  ok "scaffolded specs/ (empty until an sdd=1 feature drafts one)"
+fi
+
 echo ""
 echo "── 2. Creating harness.db ───────────────────────────────"
 
@@ -119,13 +145,17 @@ echo ""
 echo "── 3. Scaffolding project docs ──────────────────────────"
 
 mkdir -p "$TARGET_DIR/docs"
-for name in architecture conventions verification; do
+for name in architecture conventions verification specs; do
   dest="$TARGET_DIR/docs/$name.md"
   if [ -f "$dest" ]; then
     warn "docs/$name.md already exists — leaving as-is"
   else
     cp "$TOOLKIT_DIR/templates/docs/$name.md.tmpl" "$dest"
-    ok "scaffolded docs/$name.md (fill in the TODOs)"
+    if [ "$name" = "specs" ]; then
+      ok "scaffolded docs/specs.md (no TODOs — same across every project, see the file itself)"
+    else
+      ok "scaffolded docs/$name.md (fill in the TODOs)"
+    fi
   fi
 done
 
@@ -151,11 +181,13 @@ jq -n \
   --arg notion_token_env "$NOTION_TOKEN_ENV" \
   --arg notion_status_in_progress "$NOTION_STATUS_IN_PROGRESS" \
   --arg notion_status_done "$NOTION_STATUS_DONE" \
+  --arg notion_status_spec_ready "$NOTION_STATUS_SPEC_READY" \
   '{harness_version: $version, db_path: "harness.db", snapshot_path: "state",
     project_slug: $slug, verify_command: $verify,
     supabase_url_env: $url_env, supabase_key_env: $key_env, supabase_rest_path: $rest_path,
     notion_database_id: $notion_db, notion_token_env: $notion_token_env,
-    notion_status_in_progress: $notion_status_in_progress, notion_status_done: $notion_status_done}' \
+    notion_status_in_progress: $notion_status_in_progress, notion_status_done: $notion_status_done,
+    notion_status_spec_ready: $notion_status_spec_ready}' \
   > "$TARGET_DIR/.harness.json"
 ok "wrote .harness.json"
 
