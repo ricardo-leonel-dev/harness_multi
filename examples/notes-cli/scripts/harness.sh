@@ -244,18 +244,34 @@ cmd_claim_spec() {
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
   local now; now="$(now_iso)"
 
+  # There is no unique index guarding open sessions (features' one_in_progress_per_project
+  # only covers status='in_progress', not 'spec_drafting'), so the "one feature at a time"
+  # rule has to be enforced here — otherwise accepting 'spec_drafting' below would let a
+  # re-claim stack a second open session on the same feature.
+  local open_sid; open_sid="$(current_session_id)"
+  if [ -n "$open_sid" ]; then
+    fail "a session is already open (id=$open_sid) — close it before claiming a spec"
+    exit 1
+  fi
+
+  # 'spec_drafting' is accepted alongside 'pending' so an interrupted drafting session is
+  # resumable: if the session was lost before mark-spec-ready ran, the feature is stranded
+  # in spec_drafting and no other command can move it (claim-spec used to require 'pending',
+  # mark-spec-ready needs an open session, reopen only takes 'done', unblock only 'blocked').
+  # Re-claiming is idempotent — the status is already spec_drafting, and mark-spec-ready
+  # already UPDATEs an existing spec row instead of inserting a duplicate.
   local update_sql
   if [ -n "$target" ]; then
     if [[ "$target" =~ ^[0-9]+$ ]]; then
       update_sql="UPDATE features SET status='spec_drafting', updated_at='$now'
-WHERE project_id='$(sql_escape "$pid")' AND status='pending' AND sdd=1 AND deleted_at IS NULL AND feature_number=$target"
+WHERE project_id='$(sql_escape "$pid")' AND status IN ('pending','spec_drafting') AND sdd=1 AND deleted_at IS NULL AND feature_number=$target"
     else
       update_sql="UPDATE features SET status='spec_drafting', updated_at='$now'
-WHERE project_id='$(sql_escape "$pid")' AND status='pending' AND sdd=1 AND deleted_at IS NULL AND name='$(sql_escape "$target")'"
+WHERE project_id='$(sql_escape "$pid")' AND status IN ('pending','spec_drafting') AND sdd=1 AND deleted_at IS NULL AND name='$(sql_escape "$target")'"
     fi
   else
     update_sql="UPDATE features SET status='spec_drafting', updated_at='$now'
-WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND status='pending' AND sdd=1 AND deleted_at IS NULL ORDER BY feature_number LIMIT 1)"
+WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND status IN ('pending','spec_drafting') AND sdd=1 AND deleted_at IS NULL ORDER BY feature_number LIMIT 1)"
   fi
 
   local updated
@@ -265,7 +281,7 @@ WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND 
     exit 1
   fi
   if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
-    fail "not claimable for spec drafting: no matching pending sdd=1 feature (already spec_drafting/spec_ready? or sdd not set — see 'add-feature --sdd')"
+    fail "not claimable for spec drafting: no matching pending/spec_drafting sdd=1 feature (already spec_ready or approved? or sdd not set — see 'add-feature --sdd')"
     exit 1
   fi
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")

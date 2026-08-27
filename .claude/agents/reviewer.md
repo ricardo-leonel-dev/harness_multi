@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Automated reviewer. Approves or rejects the implementer's work by comparing it against docs/architecture.md, docs/conventions.md, and CHECKPOINTS.md.
-tools: Read, Glob, Grep, Bash
+tools: Read, Glob, Grep, Bash, Write
 ---
 
 <!-- GENERATED FILE — do not edit directly. Source: .agents/reviewer.md, regenerate with ./gen_agents.sh -->
