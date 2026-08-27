@@ -73,7 +73,7 @@ payload=$(jq -n --arg slug "$PROJECT_SLUG" --arg desc "$desc" \
   '{p_slug:$slug, p_description:$desc, p_one_feature_at_a_time:$one_at_a_time, p_require_tests_to_close:$require_tests}')
 out=$(rpc bootstrap_project "$payload") || { warn "bootstrap_project sync failed: $out"; exit 0; }
 
-sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, acceptance, status, deleted_at
+sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, acceptance, sdd, status, deleted_at
   FROM features WHERE project_id='$(sql_escape "$pid")';" | jq -c '.[]' | while IFS= read -r row; do
   payload=$(jq -n --arg slug "$PROJECT_SLUG" \
     --argjson local_id "$(jq '.id' <<<"$row")" \
@@ -82,12 +82,39 @@ sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, a
     --arg title "$(jq -r '.title' <<<"$row")" \
     --arg desc "$(jq -r '.description // ""' <<<"$row")" \
     --argjson acceptance "$(jq -c '.acceptance | fromjson' <<<"$row")" \
+    --argjson sdd "$([ "$(jq -r '.sdd' <<<"$row")" = "1" ] && echo true || echo false)" \
     --arg status "$(jq -r '.status' <<<"$row")" \
     --arg deleted_at "$(jq -r '.deleted_at // ""' <<<"$row")" \
     '{p_project_slug:$slug, p_local_id:$local_id, p_feature_number:$number, p_name:$name, p_title:$title,
-      p_description:$desc, p_acceptance:$acceptance, p_status:$status,
+      p_description:$desc, p_acceptance:$acceptance, p_status:$status, p_sdd:$sdd,
       p_deleted_at: (if $deleted_at == "" then null else $deleted_at end)}')
   out=$(rpc upsert_feature "$payload") || warn "upsert_feature failed for local_id $(jq '.id' <<<"$row"): $out"
+done
+
+sqlite3 -json "$DB_PATH" "SELECT s.id, f.name AS feature_name, s.path, s.status, s.requirements_count,
+  s.tasks_count, s.drafted_by, s.ready_at, s.approved_at, s.approved_by, s.deleted_at
+  FROM specs s JOIN features f ON f.id = s.feature_id
+  WHERE f.project_id='$(sql_escape "$pid")';" | jq -c '.[]' | while IFS= read -r row; do
+  payload=$(jq -n --arg slug "$PROJECT_SLUG" \
+    --argjson local_id "$(jq '.id' <<<"$row")" \
+    --arg feature_name "$(jq -r '.feature_name' <<<"$row")" \
+    --arg path "$(jq -r '.path' <<<"$row")" \
+    --arg status "$(jq -r '.status' <<<"$row")" \
+    --argjson requirements_count "$(jq '.requirements_count' <<<"$row")" \
+    --argjson tasks_count "$(jq '.tasks_count' <<<"$row")" \
+    --arg drafted_by "$(jq -r '.drafted_by // ""' <<<"$row")" \
+    --arg ready_at "$(jq -r '.ready_at // ""' <<<"$row")" \
+    --arg approved_at "$(jq -r '.approved_at // ""' <<<"$row")" \
+    --arg approved_by "$(jq -r '.approved_by // ""' <<<"$row")" \
+    --arg deleted_at "$(jq -r '.deleted_at // ""' <<<"$row")" \
+    '{p_project_slug:$slug, p_local_id:$local_id, p_feature_name:$feature_name, p_path:$path, p_status:$status,
+      p_requirements_count:$requirements_count, p_tasks_count:$tasks_count,
+      p_drafted_by: (if $drafted_by == "" then null else $drafted_by end),
+      p_ready_at: (if $ready_at == "" then null else $ready_at end),
+      p_approved_at: (if $approved_at == "" then null else $approved_at end),
+      p_approved_by: (if $approved_by == "" then null else $approved_by end),
+      p_deleted_at: (if $deleted_at == "" then null else $deleted_at end)}')
+  out=$(rpc upsert_spec "$payload") || warn "upsert_spec failed for local_id $(jq '.id' <<<"$row"): $out"
 done
 
 sqlite3 -json "$DB_PATH" "SELECT sl.id, f.name AS feature_name, sl.agent, sl.plan, sl.next_step, sl.changes,

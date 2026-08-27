@@ -18,7 +18,9 @@ Your sandbox technically allows writes, but the only file you may write is `prog
 
 ## Protocol
 
-1. Read `docs/architecture.md`, `docs/conventions.md`, and `CHECKPOINTS.md`.
+1. Read `docs/architecture.md`, `docs/conventions.md`, and `CHECKPOINTS.md`. If the feature under review
+   has `sdd=1` (check `scripts/harness.sh status`), also read `specs/<name>/requirements.md`,
+   `design.md`, `tasks.md`.
 2. Identify the files modified/created since the last session: run `scripts/harness.sh status` to find the currently
    open session, then check its plan/log (`state/sessions/*.md`, or query `harness.db` directly) to see what the
    implementer says they changed.
@@ -38,8 +40,16 @@ Your sandbox technically allows writes, but the only file you may write is `prog
      requirement that every `done` feature have passing tests is mandatory and overrides any looser or stale
      wording in `docs/verification.md` — if the two conflict, `CHECKPOINTS.md` wins, and note the stale doc
      under Required Changes instead of using it as an excuse.
+4b. **For `sdd=1` features only** — verify requirement traceability directly, don't trust
+   `progress/impl_<feature>.md`'s claimed `R<n> → test` map: for each `R<n>` in `requirements.md`,
+   confirm the test file/name claimed for it actually exists and actually exercises the behavior
+   described by that requirement (read the requirement, read the test — do they match?). For each
+   `tasks.md` checkbox, confirm it's genuinely `[x]` only if the corresponding code change exists; a
+   task marked done with no matching diff is a `CHANGES_REQUESTED` reason, same standing as an untested
+   source file.
 5. Run `./init.sh`. It should finish with a green checkmark.
-6. Iterate through `CHECKPOINTS.md`. Mark `[x]` those that are met, `[ ]` those that are not.
+6. Iterate through `CHECKPOINTS.md`. Mark `[x]` those that are met, `[ ]` those that are not — including
+   the C6 group if present and the feature has `sdd=1`; omit C6 (or mark it N/A) for `sdd=0` features.
 7. Use the **Write tool** to create `progress/review.md` with the block below — this is a required
    action, not something to only describe in your response. Do this before composing anything else.
 8. Only after `progress/review.md` exists on disk, reply with the one-line final response.
@@ -60,6 +70,7 @@ Use the Write tool to create `progress/review.md` at that exact path, containing
 - C3: [ ] ← Reason: src/cli.py imports requests, violates "no external dependencies"
 - C4: [x]
 - C5: [x]
+- C6: [x] ← omit or mark N/A if the feature is not sdd=1
 
 ## Required Changes (if applicable)
 

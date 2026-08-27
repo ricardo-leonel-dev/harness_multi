@@ -12,6 +12,7 @@ create or replace function upsert_feature(
   p_description text,
   p_acceptance text[],
   p_status feature_status,
+  p_sdd boolean default false,
   p_deleted_at timestamptz default null
 ) returns features
 language plpgsql as $$
@@ -24,8 +25,8 @@ begin
     raise exception 'unknown or deleted project slug: %', p_project_slug;
   end if;
 
-  insert into features (project_id, local_id, feature_number, name, title, description, acceptance, status, deleted_at)
-    values (v_project_id, p_local_id, p_feature_number, p_name, p_title, p_description, p_acceptance, p_status, p_deleted_at)
+  insert into features (project_id, local_id, feature_number, name, title, description, acceptance, sdd, status, deleted_at)
+    values (v_project_id, p_local_id, p_feature_number, p_name, p_title, p_description, p_acceptance, p_sdd, p_status, p_deleted_at)
   on conflict (project_id, local_id)
     do update set
       feature_number = excluded.feature_number,
@@ -33,6 +34,7 @@ begin
       title = excluded.title,
       description = excluded.description,
       acceptance = excluded.acceptance,
+      sdd = excluded.sdd,
       status = excluded.status,
       deleted_at = excluded.deleted_at,
       updated_at = now()

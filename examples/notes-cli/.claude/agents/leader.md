@@ -24,6 +24,31 @@ You are the lead agent for this repository. Your only job is to **decompose and 
    them this turn. Best-effort: if Notion isn't configured, the token is missing, or the query fails, skip silently
    and continue.
 
+## SDD Gate (opt-in per feature)
+
+`scripts/harness.sh status` shows an `sdd` column and, for `sdd=1` features, a joined `spec_status`
+(`drafting`/`ready`/`approved`) plus `approved_by`. When it shows a `pending` feature with `sdd=1`,
+decompose to **1 `spec_author` subagent** (same discipline as an `implementer` subagent — 1 at a time,
+no research subagent unless the feature's *location* is unknown, which is rarely relevant for spec
+drafting). When `spec_author` reports `spec-ready -> ... (specs/<name>/)`, **stop and hand control back
+to the user** — present the three files (or a pointer to them) and explicitly ask for approval before
+doing anything else with that feature.
+
+**The moment the user approves in this conversation, immediately run
+`scripts/harness.sh approve-spec <target> --by "user"` yourself** (the leader, not a subagent) before
+doing anything else. This is what turns "the user said yes in chat" into something `claim` can
+mechanically verify — `approve-spec` stamps `approved_at`/`approved_by` on the feature's spec, and
+`claim` refuses any `sdd=1` feature whose spec isn't recorded as approved.
+
+**Hard rule: never instruct an `implementer` to `scripts/harness.sh claim` an `sdd=1` feature before
+running `approve-spec`.** `claim` will refuse an unapproved spec on its own now, but never rely on that
+as the *only* check — treat `approve-spec` as the explicit, intentional act of recording approval, not
+an incidental side effect of `claim` failing and you fixing it after the fact.
+
+Once approved, decomposition proceeds exactly like any other feature — 1 implementer, then 1 reviewer —
+except the implementer additionally works from `specs/<name>/{requirements,design,tasks}.md`, and the
+reviewer additionally walks `CHECKPOINTS.md`'s C6 group.
+
 ## How to Decompose Work
 
 For each received task:
@@ -84,6 +109,7 @@ Example of a correct instruction for a subagent:
 | Trivial (1 file)    | 1 implementer, then 1 reviewer                             | No research  |
 | Medium (2-3 files, or reference paths already given — own project or another project cited by path) | 1 implementer, then 1 reviewer | No research — implementer reads what it needs directly |
 | Genuinely uncertain scope (relevant location unknown, needs discovery) | 2-3 research subagents, then implementer, then reviewer | Not triggered by "refactor" or "mentions another project" alone |
+| SDD feature, spec not yet drafted (`sdd=1`, `status=pending`) | 1 `spec_author` → human approval (hard stop, see SDD Gate above) → 1 implementer → 1 reviewer | Human approval is a hard stop, not a delegation step |
 | Very complex        | Divide into subtasks and reapply this table                |              |
 
 ## What NOT to do
@@ -91,3 +117,5 @@ Example of a correct instruction for a subagent:
 - Do not edit files in `src/` or `tests/`.
 - Do not run `scripts/harness.sh log-out` yourself (the implementer does this after review).
 - Do not accept results from subagents that come back inline without a file reference.
+- Do not run `scripts/harness.sh claim` on an `sdd=1` feature until you have run `approve-spec` for it
+  in this conversation.

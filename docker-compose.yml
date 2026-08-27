@@ -29,6 +29,8 @@ services:
       - ./db/rpc/bootstrap_project.sql:/docker-entrypoint-initdb.d/02_bootstrap_project.sql:ro
       - ./db/rpc/upsert_feature.sql:/docker-entrypoint-initdb.d/03_upsert_feature.sql:ro
       - ./db/rpc/upsert_session.sql:/docker-entrypoint-initdb.d/04_upsert_session.sql:ro
+      - ./db/rpc/upsert_spec.sql:/docker-entrypoint-initdb.d/05_upsert_spec.sql:ro
+      - ./db/migrations/0001_sdd.sql:/docker-entrypoint-initdb.d/06_migration_0001_sdd.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
