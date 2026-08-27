@@ -7,11 +7,12 @@
 # way around. Prerequisites: sqlite3, jq; curl only if a mirror is configured.
 #
 # Usage: scripts/harness.sh <subcommand> [args...]
-#   import-features <seed.json>              bulk-load features (status defaults to pending)
-#   add-feature --name <slug> --title <t> [--description <d>] [--acceptance <item...>]
+#   import-features <seed.json>              bulk-load features (status defaults to pending; optional
+#                                              "sdd": true per item opts it into spec-driven development)
+#   add-feature --name <slug> --title <t> [--description <d>] [--acceptance <item...>] [--sdd]
 #                                              create a single pending feature directly (no seed file) — for
 #                                              ad-hoc tasks the leader creates on the spot, no matching pending
-#                                              feature existed
+#                                              feature existed; --sdd requires an approved spec before claim
 #   link-notion <feature_number|name> <notion_page_id>
 #                                              stamp a feature's source_id so claim/log-out's existing best-effort
 #                                              Notion push-back starts applying to it (pairs with notion-create-feature
@@ -19,7 +20,20 @@
 #   import-sessions <seed.json>               bulk-load historical (closed) sessions
 #   notion-diff                               (stdin: JSON array of {source_id,...}) prints only entries not yet imported
 #   notion-import <file.json>                 import entries as pending features, auto-numbered, source_id stored
-#   claim [--agent NAME] [TARGET]             claim TARGET (number or name), or lowest pending if omitted
+#                                              (optional "sdd" checkbox property carried through if present)
+#   claim-spec [--agent NAME] [TARGET]        claim an sdd=1 pending feature for spec drafting (spec_author only —
+#                                              see docs/specs.md); moves it to spec_drafting and opens a session
+#   mark-spec-ready                           close the current spec-drafting session: verifies
+#                                              specs/<name>/{requirements,design,tasks}.md exist, records
+#                                              requirement/task counts, moves the feature to spec_ready
+#                                              (best-effort: pushes notion_status_spec_ready if source_id is set)
+#   approve-spec <TARGET> [--by NAME]         record human approval of a spec_ready feature's spec (leader-only,
+#                                              run immediately after the user approves in conversation) — this is
+#                                              the actual DB-enforced precondition claim checks for sdd=1 features
+#   claim [--agent NAME] [TARGET]             claim TARGET (number or name), or lowest claimable if omitted.
+#                                              For sdd=0 features: from pending. For sdd=1 features: only from
+#                                              spec_ready with an approved spec (see approve-spec) and the 3 spec
+#                                              files still present on disk.
 #                                              (best-effort: also pushes notion_status_in_progress to the
 #                                              feature's source Notion page, if it has a source_id)
 #   append-log <entry> [--agent NAME]         append a line to the current open session's log
@@ -63,27 +77,29 @@ cmd_import_features() {
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
 
   jq -c '.[]' "$seed_file" | while IFS= read -r item; do
-    local number name title desc status accept now
+    local number name title desc status accept sdd now
     number=$(jq -r '.feature_number' <<<"$item")
     name=$(jq -r '.name' <<<"$item")
     title=$(jq -r '.title' <<<"$item")
     desc=$(jq -r '.description // ""' <<<"$item")
     status=$(jq -r '.status // "pending"' <<<"$item")
     accept=$(jq -c '.acceptance // []' <<<"$item")
+    sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
     now="$(now_iso)"
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, status, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', '$(sql_escape "$status")', '$now', '$now');"
+    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, '$(sql_escape "$status")', '$now', '$now');"
   done
   ok "imported features from $seed_file"
 }
 
 cmd_add_feature() {
-  local name="" title="" desc="" accept_items=()
+  local name="" title="" desc="" accept_items=() sdd=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
       --title) title="$2"; shift 2 ;;
       --description) desc="$2"; shift 2 ;;
+      --sdd) sdd=1; shift ;;
       --acceptance)
         shift
         while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
@@ -94,7 +110,7 @@ cmd_add_feature() {
     esac
   done
   if [ -z "$name" ] || [ -z "$title" ]; then
-    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--acceptance <item...>]"
+    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--acceptance <item...>] [--sdd]"
     exit 1
   fi
 
@@ -105,9 +121,10 @@ cmd_add_feature() {
   local accept; accept="$(json_array "${accept_items[@]:-}")"
   local now; now="$(now_iso)"
 
-  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, status, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', 'pending', '$now', '$now');"
-  ok "added feature $next_number: $name (pending)"
+  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$now', '$now');"
+  local sdd_note=""; [ "$sdd" = "1" ] && sdd_note=", sdd"
+  ok "added feature $next_number: $name (pending$sdd_note)"
 }
 
 cmd_link_notion() {
@@ -193,11 +210,12 @@ cmd_notion_import() {
   next_number=$(db "SELECT COALESCE(MAX(feature_number), 0) + 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL;")
 
   jq -c '.[]' "$seed_file" | while IFS= read -r item; do
-    local name title desc accept source_id now source_id_sql
+    local name title desc accept sdd source_id now source_id_sql
     name=$(jq -r '.name' <<<"$item")
     title=$(jq -r '.title' <<<"$item")
     desc=$(jq -r '.description // ""' <<<"$item")
     accept=$(jq -c '.acceptance // []' <<<"$item")
+    sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
     source_id=$(jq -r '.source_id // empty' <<<"$item")
     now="$(now_iso)"
     if [ -n "$source_id" ]; then
@@ -205,11 +223,168 @@ cmd_notion_import() {
     else
       source_id_sql="NULL"
     fi
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, status, source_id, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', 'pending', $source_id_sql, '$now', '$now');"
+    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, source_id, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', $source_id_sql, '$now', '$now');"
     next_number=$((next_number + 1))
   done
   ok "imported notion tasks from $seed_file"
+}
+
+cmd_claim_spec() {
+  local agent="${HARNESS_AGENT:-unknown}"
+  local target=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --agent) agent="$2"; shift 2 ;;
+      *) target="$1"; shift ;;
+    esac
+  done
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local now; now="$(now_iso)"
+
+  # There is no unique index guarding open sessions (features' one_in_progress_per_project
+  # only covers status='in_progress', not 'spec_drafting'), so the "one feature at a time"
+  # rule has to be enforced here — otherwise accepting 'spec_drafting' below would let a
+  # re-claim stack a second open session on the same feature.
+  local open_sid; open_sid="$(current_session_id)"
+  if [ -n "$open_sid" ]; then
+    fail "a session is already open (id=$open_sid) — close it before claiming a spec"
+    exit 1
+  fi
+
+  # 'spec_drafting' is accepted alongside 'pending' so an interrupted drafting session is
+  # resumable: if the session was lost before mark-spec-ready ran, the feature is stranded
+  # in spec_drafting and no other command can move it (claim-spec used to require 'pending',
+  # mark-spec-ready needs an open session, reopen only takes 'done', unblock only 'blocked').
+  # Re-claiming is idempotent — the status is already spec_drafting, and mark-spec-ready
+  # already UPDATEs an existing spec row instead of inserting a duplicate.
+  local update_sql
+  if [ -n "$target" ]; then
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+      update_sql="UPDATE features SET status='spec_drafting', updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND status IN ('pending','spec_drafting') AND sdd=1 AND deleted_at IS NULL AND feature_number=$target"
+    else
+      update_sql="UPDATE features SET status='spec_drafting', updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND status IN ('pending','spec_drafting') AND sdd=1 AND deleted_at IS NULL AND name='$(sql_escape "$target")'"
+    fi
+  else
+    update_sql="UPDATE features SET status='spec_drafting', updated_at='$now'
+WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND status IN ('pending','spec_drafting') AND sdd=1 AND deleted_at IS NULL ORDER BY feature_number LIMIT 1)"
+  fi
+
+  local updated
+  updated=$(sqlite3 -json "$DB_PATH" "$update_sql RETURNING id, feature_number, name, title;" 2>&1)
+  if [ $? -ne 0 ]; then
+    fail "claim-spec failed: $updated"
+    exit 1
+  fi
+  if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
+    fail "not claimable for spec drafting: no matching pending/spec_drafting sdd=1 feature (already spec_ready or approved? or sdd not set — see 'add-feature --sdd')"
+    exit 1
+  fi
+  local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
+
+  db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
+VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
+  ok "claimed for spec drafting: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
+}
+
+cmd_mark_spec_ready() {
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || { fail "no open session — run 'claim-spec' first"; exit 1; }
+
+  local fid name status_now
+  fid=$(db "SELECT feature_id FROM session_log WHERE id=$sid;")
+  [ -n "$fid" ] || { fail "open session has no associated feature"; exit 1; }
+  name=$(db "SELECT name FROM features WHERE id=$fid;")
+  status_now=$(db "SELECT status FROM features WHERE id=$fid;")
+  if [ "$status_now" != "spec_drafting" ]; then
+    fail "feature $name is not in spec_drafting (status=$status_now) — mark-spec-ready only applies right after claim-spec"
+    exit 1
+  fi
+
+  local spec_dir="specs/$name"
+  for f in requirements.md design.md tasks.md; do
+    [ -f "$spec_dir/$f" ] || { fail "cannot mark spec ready: missing $spec_dir/$f"; exit 1; }
+  done
+
+  local req_count task_count agent_str
+  req_count=$(grep -cE '^## R[0-9]+' "$spec_dir/requirements.md" 2>/dev/null)
+  task_count=$(grep -cE '^- \[[ xX]\] T[0-9]+' "$spec_dir/tasks.md" 2>/dev/null)
+  agent_str=$(db "SELECT agent FROM session_log WHERE id=$sid;")
+
+  local now; now="$(now_iso)"
+  local existing_spec_id
+  existing_spec_id=$(db "SELECT id FROM specs WHERE feature_id=$fid AND deleted_at IS NULL;")
+
+  local spec_write_sql
+  if [ -n "$existing_spec_id" ]; then
+    spec_write_sql="UPDATE specs SET status='ready', requirements_count=$req_count, tasks_count=$task_count,
+  drafted_by='$(sql_escape "$agent_str")', ready_at='$now', updated_at='$now' WHERE id=$existing_spec_id;"
+  else
+    spec_write_sql="INSERT INTO specs (feature_id, path, status, requirements_count, tasks_count, drafted_by, ready_at, created_at, updated_at)
+VALUES ($fid, '$(sql_escape "$spec_dir")', 'ready', $req_count, $task_count, '$(sql_escape "$agent_str")', '$now', '$now', '$now');"
+  fi
+
+  sqlite3 "$DB_PATH" <<SQL
+.bail on
+BEGIN;
+UPDATE session_log SET closed_at='$now' WHERE id=$sid;
+UPDATE features SET status='spec_ready', updated_at='$now' WHERE id=$fid;
+$spec_write_sql
+COMMIT;
+SQL
+  ok "spec ready for review: $spec_dir (feature $fid, R=$req_count, T=$task_count)"
+
+  local source_id; source_id=$(db "SELECT source_id FROM features WHERE id=$fid;")
+  if [ -n "$source_id" ]; then
+    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_spec_ready' 'Spec Ready')"
+  fi
+}
+
+cmd_approve_spec() {
+  local target="" by="user"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by) by="$2"; shift 2 ;;
+      *) target="$1"; shift ;;
+    esac
+  done
+  [ -n "$target" ] || { fail "usage: approve-spec <feature_number|name> [--by <name>]"; exit 1; }
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local now; now="$(now_iso)"
+
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+
+  local fid
+  fid=$(db "SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
+  [ -n "$fid" ] || { fail "not approvable: no matching feature $target"; exit 1; }
+
+  # UPDATE ... RETURNING against status='ready' is the actual gate here — a
+  # second approve-spec, or one run before mark-spec-ready, matches nothing
+  # and fails cleanly rather than silently re-stamping approved_at.
+  local updated
+  updated=$(sqlite3 -json "$DB_PATH" "UPDATE specs SET status='approved', approved_at='$now', approved_by='$(sql_escape "$by")', updated_at='$now'
+WHERE feature_id=$fid AND status='ready' AND deleted_at IS NULL
+RETURNING id, feature_id;" 2>&1)
+  if [ $? -ne 0 ]; then
+    fail "approve-spec failed: $updated"
+    exit 1
+  fi
+  if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
+    fail "not approvable: no 'ready' spec found for feature $target (already approved, or not yet marked ready — see 'mark-spec-ready')"
+    exit 1
+  fi
+  ok "approved spec for feature $target (by: $by)"
 }
 
 cmd_claim() {
@@ -226,18 +401,69 @@ cmd_claim() {
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
   local now; now="$(now_iso)"
 
+  # Resolve the row that would be targeted (by number/name, or lowest
+  # pending/spec_ready) BEFORE attempting the UPDATE, purely to produce an
+  # actionable error for sdd=1 features instead of a generic "not
+  # claimable" — the actual enforcement lives in update_sql's WHERE below,
+  # not here.
+  local target_where
+  if [ -n "$target" ]; then
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+      target_where="f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.feature_number=$target"
+    else
+      target_where="f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.name='$(sql_escape "$target")'"
+    fi
+  else
+    target_where="f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.status IN ('pending','spec_ready') ORDER BY f.feature_number LIMIT 1"
+  fi
+
+  local check_row
+  check_row=$(sqlite3 -json "$DB_PATH" "SELECT f.id, f.name, f.sdd, f.status, s.status AS spec_status
+FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
+WHERE $target_where;")
+
+  if [ -n "$check_row" ] && [ "$check_row" != "[]" ]; then
+    local sdd_flag status_now name_now spec_status
+    sdd_flag=$(jq -r '.[0].sdd' <<<"$check_row")
+    status_now=$(jq -r '.[0].status' <<<"$check_row")
+    name_now=$(jq -r '.[0].name' <<<"$check_row")
+    spec_status=$(jq -r '.[0].spec_status // "none"' <<<"$check_row")
+    if [ "$sdd_flag" = "1" ]; then
+      if [ "$status_now" = "pending" ] || [ "$status_now" = "spec_drafting" ]; then
+        fail "feature $name_now requires an approved spec first (status=$status_now) — run 'claim-spec' then 'mark-spec-ready', get human approval, then 'approve-spec', then 'claim' (see docs/specs.md)"
+        exit 1
+      fi
+      if [ "$status_now" = "spec_ready" ] && [ "$spec_status" != "approved" ]; then
+        fail "feature $name_now has a drafted spec but it is not yet approved (spec status=$spec_status) — after the user approves it, run 'scripts/harness.sh approve-spec $name_now --by <name>', then claim"
+        exit 1
+      fi
+      if [ "$status_now" = "spec_ready" ] && [ "$spec_status" = "approved" ]; then
+        for f in requirements.md design.md tasks.md; do
+          [ -f "specs/$name_now/$f" ] || { fail "feature $name_now's spec is approved but specs/$name_now/$f is missing on disk — cannot claim"; exit 1; }
+        done
+      fi
+    fi
+  fi
+
+  # The real enforcement: sdd=0 rows can only come from 'pending'; sdd=1 rows
+  # additionally require a specs row already flipped to 'approved' by
+  # approve-spec — encoded directly in the WHERE of the atomic UPDATE, not
+  # just in the check_row precheck above, so this can't be bypassed by a
+  # stale/missing precheck.
+  local sdd_gate="(f.sdd = 0 AND f.status = 'pending') OR (f.sdd = 1 AND f.status = 'spec_ready' AND f.id IN (SELECT feature_id FROM specs WHERE status = 'approved' AND deleted_at IS NULL))"
+
   local update_sql
   if [ -n "$target" ]; then
     if [[ "$target" =~ ^[0-9]+$ ]]; then
       update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE project_id='$(sql_escape "$pid")' AND status='pending' AND deleted_at IS NULL AND feature_number=$target"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.feature_number=$target AND ($sdd_gate))"
     else
       update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE project_id='$(sql_escape "$pid")' AND status='pending' AND deleted_at IS NULL AND name='$(sql_escape "$target")'"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.name='$(sql_escape "$target")' AND ($sdd_gate))"
     fi
   else
     update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND status='pending' AND deleted_at IS NULL ORDER BY feature_number LIMIT 1)"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND ($sdd_gate) ORDER BY f.feature_number LIMIT 1)"
   fi
 
   # SQLite has no RAISE()/control flow outside triggers, so "claim exactly
@@ -250,7 +476,7 @@ WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND 
     exit 1
   fi
   if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
-    fail "not claimable: no matching pending feature"
+    fail "not claimable: no matching pending feature (or an sdd=1 feature awaiting an approved spec — see the message above)"
     exit 1
   fi
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
@@ -525,7 +751,10 @@ cmd_status() {
   local pid; pid="$(project_id)"
   echo "project: $PROJECT_SLUG ($pid)"
   echo "--- features ---"
-  db -header -column "SELECT feature_number, name, status FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL ORDER BY feature_number;"
+  db -header -column "SELECT f.feature_number, f.name, f.status, f.sdd,
+  s.status AS spec_status, s.requirements_count AS reqs, s.tasks_count AS tasks, s.approved_by
+FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
+WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL ORDER BY f.feature_number;"
   echo "--- open session ---"
   db -header -column "SELECT id, agent, started_at FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL;"
 }
@@ -567,6 +796,9 @@ main() {
     import-sessions) cmd_import_sessions "$@" ;;
     notion-diff) cmd_notion_diff "$@" ;;
     notion-import) cmd_notion_import "$@" ;;
+    claim-spec) cmd_claim_spec "$@" ;;
+    mark-spec-ready) cmd_mark_spec_ready ;;
+    approve-spec) cmd_approve_spec "$@" ;;
     claim) cmd_claim "$@" ;;
     append-log) cmd_append_log "$@" ;;
     set-plan) cmd_set_array_field plan "$@" ;;
@@ -583,7 +815,7 @@ main() {
     reopen) cmd_reopen "$@" ;;
     check-blockers) cmd_check_blockers ;;
     *)
-      echo "usage: harness.sh <import-features|add-feature|link-notion|import-sessions|notion-diff|notion-import|claim|append-log|set-plan|set-next-step|log-out|status|snapshot|sync|notion-check|notion-create-feature|block|unblock|reopen|check-blockers> [args...]" >&2
+      echo "usage: harness.sh <import-features|add-feature|link-notion|import-sessions|notion-diff|notion-import|claim-spec|mark-spec-ready|approve-spec|claim|append-log|set-plan|set-next-step|log-out|status|snapshot|sync|notion-check|notion-create-feature|block|unblock|reopen|check-blockers> [args...]" >&2
       exit 1
       ;;
   esac

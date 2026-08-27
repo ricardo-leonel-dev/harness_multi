@@ -71,6 +71,73 @@ if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|source_id|'; 
   sqlite3 "$DB_PATH" "CREATE UNIQUE INDEX IF NOT EXISTS features_source_id_active ON features(project_id, source_id) WHERE deleted_at IS NULL AND source_id IS NOT NULL;"
 fi
 
+# Adds features.sdd + expands the status CHECK to include spec_drafting/
+# spec_ready, and creates the specs table (metadata only — spec content
+# lives as files at specs/<name>/, never in this table). SQLite has no
+# ALTER TABLE ... ALTER CHECK, so the features change requires the standard
+# 12-step rebuild; the specs table itself is a plain CREATE TABLE IF NOT
+# EXISTS, gated by the same probe so both land together on first run.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|sdd|'; then
+  sqlite3 "$DB_PATH" <<'SQL'
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+
+CREATE TABLE features_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  feature_number INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  acceptance TEXT NOT NULL DEFAULT '[]',
+  sdd INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'spec_drafting', 'spec_ready', 'in_progress', 'done', 'blocked')),
+  source_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+
+INSERT INTO features_new (id, project_id, feature_number, name, title, description, acceptance, sdd, status, source_id, created_at, updated_at, deleted_at)
+  SELECT id, project_id, feature_number, name, title, description, acceptance, 0, status, source_id, created_at, updated_at, deleted_at
+  FROM features;
+
+DROP TABLE features;
+ALTER TABLE features_new RENAME TO features;
+
+CREATE UNIQUE INDEX features_number_active ON features(project_id, feature_number) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX features_name_active ON features(project_id, name) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX features_source_id_active ON features(project_id, source_id)
+  WHERE deleted_at IS NULL AND source_id IS NOT NULL;
+CREATE UNIQUE INDEX one_in_progress_per_project ON features(project_id)
+  WHERE status = 'in_progress' AND deleted_at IS NULL;
+CREATE INDEX idx_features_project_status ON features(project_id, status);
+
+CREATE TABLE IF NOT EXISTS specs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'drafting'
+    CHECK (status IN ('drafting', 'ready', 'approved')),
+  requirements_count INTEGER,
+  tasks_count INTEGER,
+  drafted_by TEXT,
+  ready_at TEXT,
+  approved_at TEXT,
+  approved_by TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS specs_feature_active ON specs(feature_id) WHERE deleted_at IS NULL;
+
+COMMIT;
+PRAGMA foreign_key_check;
+PRAGMA foreign_keys=ON;
+SQL
+fi
+
 db() {
   sqlite3 "$DB_PATH" "$@"
 }
