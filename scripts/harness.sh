@@ -787,8 +787,32 @@ cmd_notion_check() {
   bash "$SCRIPT_DIR/notion_check.sh"
 }
 
+# Prints the "# Usage:" comment block at the top of this file verbatim (minus
+# the leading "# " marker) so `help`/`-h`/`--help` never drifts out of sync
+# with the actual subcommand list — there is exactly one copy of this text.
+print_usage() {
+  sed -n '/^# Usage:/,/^$/p' "$SCRIPT_DIR/harness.sh" | sed 's/^# \{0,1\}//'
+}
+
 main() {
-  local sub="${1:-}"; shift || true
+  local sub="${1:-}"
+  case "$sub" in
+    ""|help|-h|--help) print_usage; exit 0 ;;
+  esac
+  shift || true
+
+  # A `-h`/`--help` anywhere after the subcommand short-circuits straight to
+  # the usage block instead of reaching a subcommand's own arg parser — this
+  # is what makes e.g. `log-out --help` safe: it used to fall into
+  # cmd_log_out's catch-all, which silently discarded the unrecognized flag
+  # and ran the destructive close anyway.
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help) print_usage; exit 0 ;;
+    esac
+  done
+
   case "$sub" in
     import-features) cmd_import_features "$@" ;;
     add-feature) cmd_add_feature "$@" ;;
@@ -815,7 +839,8 @@ main() {
     reopen) cmd_reopen "$@" ;;
     check-blockers) cmd_check_blockers ;;
     *)
-      echo "usage: harness.sh <import-features|add-feature|link-notion|import-sessions|notion-diff|notion-import|claim-spec|mark-spec-ready|approve-spec|claim|append-log|set-plan|set-next-step|log-out|status|snapshot|sync|notion-check|notion-create-feature|block|unblock|reopen|check-blockers> [args...]" >&2
+      fail "unknown subcommand: $sub"
+      print_usage >&2
       exit 1
       ;;
   esac
