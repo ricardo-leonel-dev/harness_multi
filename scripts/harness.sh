@@ -525,7 +525,7 @@ cmd_log_out() {
         ;;
       --verification) verification="$2"; shift 2 ;;
       --closure) closure="$2"; shift 2 ;;
-      *) shift ;;
+      *) fail "unknown argument: $1"; exit 1 ;;
     esac
   done
 
