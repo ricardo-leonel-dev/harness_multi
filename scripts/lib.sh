@@ -138,6 +138,19 @@ PRAGMA foreign_keys=ON;
 SQL
 fi
 
+# Adds session_log.review_status/reviewed_by/reviewed_at — the mechanical
+# gate that makes log-out refuse to close a session (and mark its feature
+# done) without a recorded reviewer verdict, instead of relying on every
+# agent/prompt to remember the implementer->reviewer->implementer handoff.
+# Plain ADD COLUMN is enough here — no CHECK constraint at the DB level, so
+# no 12-step rebuild like the sdd migration above; record-review validates
+# the verdict value in bash before writing it.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(session_log);" | grep -q '|review_status|'; then
+  sqlite3 "$DB_PATH" "ALTER TABLE session_log ADD COLUMN review_status TEXT;"
+  sqlite3 "$DB_PATH" "ALTER TABLE session_log ADD COLUMN reviewed_by TEXT;"
+  sqlite3 "$DB_PATH" "ALTER TABLE session_log ADD COLUMN reviewed_at TEXT;"
+fi
+
 db() {
   sqlite3 "$DB_PATH" "$@"
 }

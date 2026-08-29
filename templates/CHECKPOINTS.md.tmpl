@@ -33,6 +33,9 @@
 - [ ] No stray untracked/temporary files.
 - [ ] The session was logged out via `scripts/harness.sh log-out` (not left open).
 - [ ] The last feature worked on reflects its correct status.
+- [ ] The closed session has a recorded `review_status='approved'` (`scripts/harness.sh status` shows it) —
+      `log-out` already refuses to close a session without this, so this box failing would mean the DB was
+      edited outside the harness, not a normal miss.
 
 ## C6 — SDD spec integrity (only evaluated for features with sdd=1)
 
