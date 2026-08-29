@@ -54,6 +54,10 @@ CREATE TABLE session_log (
   changes TEXT,                  -- JSON array, filled at log-out
   verification TEXT,
   closure TEXT,
+  review_status TEXT,            -- NULL until a reviewer records a verdict via record-review;
+                                  -- 'approved' or 'changes_requested' (validated in bash, not a DB CHECK)
+  reviewed_by TEXT,
+  reviewed_at TEXT,
   started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   closed_at TEXT,                -- NULL = "current session"; set = a "history" entry
   deleted_at TEXT
