@@ -168,7 +168,11 @@ Before finishing:
    scripts/harness.sh log-out --changes <file1> <file2> ... --verification "<summary>" --closure "<summary>"
    ```
    This closes the session and marks the feature `done` in one step — there's no manual "move current.md into
-   history.md" step; the closed session *is* the history entry.
+   history.md" step; the closed session *is* the history entry. `log-out` mechanically refuses to run unless
+   a `reviewer` subagent has already recorded `scripts/harness.sh record-review approved --by <name>` on this
+   session — a leader instructing an implementer to log out before/instead of review now hits a hard failure
+   instead of silently shipping unreviewed code (see `.claude/agents/reviewer.md` step 8 and `leader.md`'s
+   hard rule against this).
 3. Do not leave temporary files, debug `print()` commands, or TODOs without context.
 
 ## 6. If you get stuck

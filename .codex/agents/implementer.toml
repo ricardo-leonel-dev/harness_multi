@@ -58,6 +58,9 @@ You are an implementer. Your job is to execute **a single** feature from start t
      This closes the session and marks the feature `done` in one step. Capture this command's output too — if it
      (or `./init.sh` from step 7) printed any `[WARN]` line, carry it into your final report per "Communication
      with the leader" below instead of letting it disappear into scrollback the leader/user never reads.
+     `log-out` mechanically refuses to close a session that doesn't have a `record-review approved` verdict on
+     it — if it fails with that error, do not try to work around it (e.g. editing `harness.db` directly); it
+     means the reviewer's approval never actually got recorded, so stop and report that back to the leader.
    - **Changes requested** — address the required changes from `progress/review.md`, return to step 4,
      then re-verify (step 7) and re-report readiness (step 8). Do not log out until a subsequent review approves.
 

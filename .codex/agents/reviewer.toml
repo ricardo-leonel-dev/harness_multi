@@ -52,7 +52,19 @@ Your sandbox technically allows writes, but the only file you may write is `prog
    the C6 group if present and the feature has `sdd=1`; omit C6 (or mark it N/A) for `sdd=0` features.
 7. Use the **Write tool** to create `progress/review.md` with the block below — this is a required
    action, not something to only describe in your response. Do this before composing anything else.
-8. Only after `progress/review.md` exists on disk, reply with the one-line final response.
+8. **Record your verdict mechanically**, so it isn't just prose another agent could talk its way past:
+   ```
+   scripts/harness.sh record-review approved --by "<your agent string>"
+   ```
+   or
+   ```
+   scripts/harness.sh record-review changes-requested --by "<your agent string>" --notes "<one-line summary>"
+   ```
+   This is what `log-out` actually checks before it will let the session close — writing `progress/review.md`
+   documents the verdict for humans, but `record-review` is the DB-enforced gate. Run this yourself; never
+   describe the verdict to the leader and expect it (or the implementer) to record it on your behalf.
+9. Only after both `progress/review.md` exists on disk **and** `record-review` has run, reply with the
+   one-line final response.
 
 ## Verdict Format
 
@@ -98,6 +110,9 @@ CHANGES_REQUESTED -> see progress/review.md
 - ❌ Never send the one-line final response before `progress/review.md` has actually been written to
   disk via the Write tool — composing the verdict text in your reasoning/response is not the same as
   creating the file.
+- ❌ Never send the one-line final response before `record-review` has actually run — the same reasoning
+  applies: describing the verdict is not the same as recording it, and `log-out` will refuse to close the
+  session without it regardless of what `progress/review.md` says.
 - ❌ Never mark C2 or C4 as `[x]` based on prose claims (session log entries, `docs/verification.md`
   wording, the implementer's own say-so) — verify a real test file exists for the changed code and
   actually run it yourself.

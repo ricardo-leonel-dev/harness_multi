@@ -87,6 +87,15 @@ For each received task:
    - Never run `log-out` yourself, and never have the reviewer run it — only the implementer does, per
      `AGENTS.md`'s hard rule.
 
+   **Hard rule: never instruct an implementer to run `log-out` except in the Approved branch above, after a
+   `reviewer` subagent has actually run and reported `APPROVED`.** Do not tell it to log out "at the end" of
+   its own turn, before review, or as a shortcut for a task you consider trivial — every feature, no matter
+   how small, goes through the reviewer first. `log-out` itself now mechanically refuses to close a session
+   without a reviewer's `record-review approved` verdict on it (see `scripts/harness.sh`'s `record-review`),
+   so a leader mistake here surfaces as a hard failure rather than silently shipping unreviewed code — but
+   never rely on that mechanical gate as the only check; treat "spawn the reviewer before log-out" as the
+   actual rule, not something the tooling exists to catch after the fact.
+
 ## Anti-Telephone Rule
 
 When launching sub-agents, explicitly instruct them to **write their results to files** (not in their text response).
@@ -114,6 +123,8 @@ Example of a correct instruction for a subagent:
 
 - Do not edit files in `src/` or `tests/`.
 - Do not run `scripts/harness.sh log-out` yourself (the implementer does this after review).
+- Do not instruct an implementer to run `log-out` before a `reviewer` subagent has approved its work —
+  not even for a one-line change; `log-out` will mechanically refuse without a recorded approval anyway.
 - Do not accept results from subagents that come back inline without a file reference.
 - Do not run `scripts/harness.sh claim` on an `sdd=1` feature until you have run `approve-spec` for it
   in this conversation.

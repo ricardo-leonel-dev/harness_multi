@@ -39,8 +39,15 @@
 #   append-log <entry> [--agent NAME]         append a line to the current open session's log
 #   set-plan <item> [item...]                 replace the current open session's plan
 #   set-next-step <item> [item...]            replace the current open session's next_step
+#   record-review <approved|changes-requested> [--by NAME] [--notes TEXT]
+#                                              record the reviewer's verdict on the current open session
+#                                              (reviewer-only, run as the mechanical last step of its own
+#                                              protocol) — log-out refuses to close a session whose latest
+#                                              verdict isn't 'approved'; a later call overwrites the verdict,
+#                                              so a re-review after CHANGES_REQUESTED just records over it
 #   log-out --changes <item...> --verification <text> --closure <text>
-#                                              close the open session and mark its feature done
+#                                              close the open session and mark its feature done — refuses
+#                                              unless record-review has recorded 'approved' on this session
 #                                              (best-effort: also pushes notion_status_done to the
 #                                              feature's source Notion page, if it has a source_id)
 #   delete-feature <TARGET>                   soft-delete a feature (sets deleted_at)
@@ -513,6 +520,35 @@ cmd_set_array_field() {
   ok "updated $field on session $sid"
 }
 
+cmd_record_review() {
+  local verdict_raw="${1:?usage: record-review <approved|changes-requested> [--by NAME] [--notes TEXT]}"; shift
+  local verdict
+  case "$verdict_raw" in
+    approved) verdict="approved" ;;
+    changes-requested) verdict="changes_requested" ;;
+    *) fail "verdict must be 'approved' or 'changes-requested', got: $verdict_raw"; exit 1 ;;
+  esac
+
+  local by="${HARNESS_AGENT:-unknown}" notes=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by) by="$2"; shift 2 ;;
+      --notes) notes="$2"; shift 2 ;;
+      *) fail "unknown argument: $1"; exit 1 ;;
+    esac
+  done
+
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || { fail "no open session — nothing to review"; exit 1; }
+  local now; now="$(now_iso)"
+
+  db_exec "UPDATE session_log SET review_status='$(sql_escape "$verdict")', reviewed_by='$(sql_escape "$by")', reviewed_at='$now' WHERE id=$sid;"
+  if [ -n "$notes" ]; then
+    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "REVIEW ($verdict_raw): $notes")', '$now');"
+  fi
+  ok "recorded review verdict '$verdict_raw' on session $sid (by: $by)"
+}
+
 cmd_log_out() {
   local changes=() verification="" closure=""
   while [ $# -gt 0 ]; do
@@ -531,6 +567,17 @@ cmd_log_out() {
 
   local sid; sid="$(current_session_id)"
   [ -n "$sid" ] || { fail "no open session to log out"; exit 1; }
+
+  # Friendly precheck for an actionable error message — the real enforcement
+  # is the WHERE clause on the UPDATE below (same "precheck for the message,
+  # WHERE clause for the gate" split cmd_claim uses for the sdd approval
+  # check), so a stale/missing precheck can't be used to bypass this.
+  local review_status; review_status=$(db "SELECT review_status FROM session_log WHERE id=$sid;")
+  if [ "$review_status" != "approved" ]; then
+    fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved --by <name>' first; only the implementer runs log-out, and only after that approval is recorded"
+    exit 1
+  fi
+
   local changes_json; changes_json=$(json_array "${changes[@]:-}")
   local now; now="$(now_iso)"
 
@@ -538,11 +585,17 @@ cmd_log_out() {
 .bail on
 BEGIN;
 UPDATE session_log SET changes='$(sql_escape "$changes_json")', verification='$(sql_escape "$verification")',
-  closure='$(sql_escape "$closure")', closed_at='$now' WHERE id=$sid;
+  closure='$(sql_escape "$closure")', closed_at='$now' WHERE id=$sid AND review_status='approved';
 UPDATE features SET status='done', updated_at='$now'
-  WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);
+  WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid AND closed_at='$now');
 COMMIT;
 SQL
+
+  local closed_check; closed_check=$(db "SELECT closed_at FROM session_log WHERE id=$sid;")
+  if [ "$closed_check" != "$now" ]; then
+    fail "log out failed for session $sid — review approval was revoked or changed between the check and the close; re-run 'status' and try again"
+    exit 1
+  fi
   ok "session $sid logged out"
 
   local source_id; source_id=$(db "SELECT source_id FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")
@@ -756,7 +809,7 @@ cmd_status() {
 FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
 WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL ORDER BY f.feature_number;"
   echo "--- open session ---"
-  db -header -column "SELECT id, agent, started_at FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL;"
+  db -header -column "SELECT id, agent, started_at, review_status, reviewed_by FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL;"
 }
 
 cmd_delete_feature() {
@@ -824,6 +877,7 @@ main() {
     mark-spec-ready) cmd_mark_spec_ready ;;
     approve-spec) cmd_approve_spec "$@" ;;
     claim) cmd_claim "$@" ;;
+    record-review) cmd_record_review "$@" ;;
     append-log) cmd_append_log "$@" ;;
     set-plan) cmd_set_array_field plan "$@" ;;
     set-next-step) cmd_set_array_field next_step "$@" ;;
