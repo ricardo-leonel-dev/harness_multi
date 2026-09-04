@@ -87,11 +87,17 @@ autonomously. **This is scoped to the feature being created right now** — it d
 
 On confirmation:
 ```
-scripts/harness.sh add-feature --name <slug> --title "<title>" --description "<description>" --acceptance "<item...>"
+scripts/harness.sh add-feature --name <slug> --title "<title>" --description "<description>" --acceptance "<item...>" [--sdd]
 scripts/harness.sh notion-create-feature --project-path . --title "<title>" \
-  --description "<description>" --acceptance "<acceptance>" --status Ready
+  --description "<description>" --acceptance "<acceptance>" --status Ready [--sdd]
 scripts/harness.sh link-notion <slug> <page_id-from-the-previous-command's-output>
 ```
+**Pass `--sdd` to both commands together, or to neither.** `add-feature --sdd` is what actually gates `claim`
+locally (the DB-enforced spec requirement) — `notion-create-feature --sdd` only checks the database's optional
+"SDD" checkbox property so the Notion card visually matches; it has no bearing on enforcement. Passing it to
+`add-feature` but forgetting it on `notion-create-feature` leaves a spec-driven feature's card looking like a
+non-SDD one on the board, even though `claim` still correctly refuses it without an approved spec.
+
 `link-notion` stamps the feature's `source_id`, so the existing automatic push-back (above) starts applying to it
 immediately: the very next `claim` on this feature pushes `Status` to `notion_status_in_progress`, and `log-out`
 later pushes `notion_status_done` — no extra code, same mechanism as any Notion-sourced feature. If the user declines

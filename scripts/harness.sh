@@ -55,7 +55,7 @@
 #   snapshot                                   regenerate state/*.md from harness.db
 #   sync                                       best-effort push to the Postgres mirror
 #   notion-check                               best-effort curl+jq query for new Notion tasks (prints notion-diff-ready JSON)
-#   notion-create-feature --project <slug> --title <t> --description <d> [--acceptance <a>] [--status <s>]
+#   notion-create-feature --project <slug> --title <t> --description <d> [--acceptance <a>] [--status <s>] [--sdd]
 #                                              create a new Notion page (feature card) in a project — for cross-
 #                                              project dependency requests; fails loudly (not a [WARN]) since the
 #                                              caller must not proceed to block a feature on a card that wasn't
