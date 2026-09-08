@@ -204,6 +204,40 @@ Before finishing:
    hard rule against this).
 3. Do not leave temporary files, debug `print()` commands, or TODOs without context.
 
+### Reconciling Work Implemented Outside This Harness
+
+Sometimes a feature's code already exists — shipped, merged, even in production — without ever going through
+`claim`/`record-review`/`log-out` here: a different session, a different model, or a human wrote it directly and
+merged it on its own. The trigger is simple: you're told (or discover) that a feature is effectively finished, but
+`scripts/harness.sh status` shows no open session for it. `log-out`'s review gate (above) never ran, because there
+was no session for it to run *on* — a feature implemented this way has had **zero** spec-conformance checking, not
+"less than usual."
+
+Before marking it `done`, do the check that gate would have done:
+
+1. **Read the actual shipped code** — the real diff, not a self-report about it (a PR description, a commit
+   message, another session's summary). Self-reports describe intent, not necessarily what happened.
+2. **Diff it against the ground truth**: `specs/<name>/{requirements.md,design.md}` for an `sdd=1` feature, or the
+   feature's own `description`/`acceptance` for `sdd=0`. Check the actual shape of the code (input names, whether
+   something is optional vs. required, where a change is scoped to) against what was specified — not just whether
+   it "looks like it does the right thing."
+3. **Document every deviation you find**, even ones that seem harmless, in the session log (step 4 below) — a
+   deviation that looks cosmetic to you may matter to whoever approved the original spec.
+4. **If a deviation would break a dependent feature** (one that lists this feature in its `depends_on`, §4), don't
+   just note it and move on: propose a follow-up feature to the user covering the fix (the ad-hoc-task flow in §0
+   applies — propose before creating, use Notion if configured), and once created, add it as an *additional*
+   `depends_on` entry (`set-depends-on`, keeping the existing entries) on every feature that needs the fix first.
+   This is what actually protects those dependents — noting the gap in a log nobody reads before claiming does not.
+5. Only then reconcile the bookkeeping: `claim` the feature (this opens the session `log-out` needs), `append-log`
+   with what you verified and every deviation found (reference the actual commits/PR), `record-review approved`
+   attributing it to whoever is accountable for accepting the shipped state (the user, if they're the one deciding
+   to accept deviations rather than block on a fix), then `log-out` referencing the real commits/PR — not files
+   from a session that never touched this feature.
+
+This is not a substitute for the normal implementer → reviewer flow — it exists only because that flow didn't run.
+Route future work on this same feature through `claim`/`record-review`/`log-out` normally; this section is for the
+one-time reconciliation, not an alternate lifecycle.
+
 ## 6. If you get stuck
 
 - Reread the relevant section of `docs/`.
