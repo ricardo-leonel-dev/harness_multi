@@ -151,6 +151,20 @@ if ! sqlite3 "$DB_PATH" "PRAGMA table_info(session_log);" | grep -q '|review_sta
   sqlite3 "$DB_PATH" "ALTER TABLE session_log ADD COLUMN reviewed_at TEXT;"
 fi
 
+# Adds features.depends_on — a JSON array of *local* feature names (same
+# project) that must all be 'done' before this feature is claimable. This is
+# the mechanical fix for a real incident: a feature was explicitly claimed
+# and blocked before another feature in the same project that it textually
+# depended on ("Depende de X" in its own description) had even been started,
+# because nothing checked that prose. `claim` now refuses instead of
+# silently allowing out-of-order work — same "real DB constraint, not just a
+# convention" posture already used for sdd/spec approval. Plain ADD COLUMN
+# is enough (no CHECK constraint at the DB level): membership against the
+# JSON array is validated at claim time via json_each, not by SQLite itself.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|depends_on|'; then
+  sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]';"
+fi
+
 db() {
   sqlite3 "$DB_PATH" "$@"
 }

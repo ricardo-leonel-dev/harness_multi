@@ -8,11 +8,21 @@
 #
 # Usage: scripts/harness.sh <subcommand> [args...]
 #   import-features <seed.json>              bulk-load features (status defaults to pending; optional
-#                                              "sdd": true per item opts it into spec-driven development)
+#                                              "sdd": true per item opts it into spec-driven development;
+#                                              optional "depends_on": [name...] gates claim on those LOCAL
+#                                              features — same project — being 'done' first)
 #   add-feature --name <slug> --title <t> [--description <d>] [--acceptance <item...>] [--sdd]
+#               [--depends-on <name...>]
 #                                              create a single pending feature directly (no seed file) — for
 #                                              ad-hoc tasks the leader creates on the spot, no matching pending
-#                                              feature existed; --sdd requires an approved spec before claim
+#                                              feature existed; --sdd requires an approved spec before claim;
+#                                              --depends-on names other LOCAL features (same project, must
+#                                              already exist) that must be 'done' before this one is claimable
+#   set-depends-on <feature_number|name> [dep_name...]
+#                                              replace a feature's local dependency list (each dep_name must
+#                                              already exist as a feature in this project; call with no
+#                                              dep_name to clear it) — for backfilling/correcting dependencies
+#                                              after creation; works at any status, unlike claim/block/unblock
 #   link-notion <feature_number|name> <notion_page_id>
 #                                              stamp a feature's source_id so claim/log-out's existing best-effort
 #                                              Notion push-back starts applying to it (pairs with notion-create-feature
@@ -20,7 +30,9 @@
 #   import-sessions <seed.json>               bulk-load historical (closed) sessions
 #   notion-diff                               (stdin: JSON array of {source_id,...}) prints only entries not yet imported
 #   notion-import <file.json>                 import entries as pending features, auto-numbered, source_id stored
-#                                              (optional "sdd" checkbox property carried through if present)
+#                                              (optional "sdd" checkbox property carried through if present;
+#                                              optional "depends_on": [name...] also carried through — see
+#                                              import-features above)
 #   claim-spec [--agent NAME] [TARGET]        claim an sdd=1 pending feature for spec drafting (spec_author only —
 #                                              see docs/specs.md); moves it to spec_drafting and opens a session
 #   mark-spec-ready                           close the current spec-drafting session: verifies
@@ -33,7 +45,9 @@
 #   claim [--agent NAME] [TARGET]             claim TARGET (number or name), or lowest claimable if omitted.
 #                                              For sdd=0 features: from pending. For sdd=1 features: only from
 #                                              spec_ready with an approved spec (see approve-spec) and the 3 spec
-#                                              files still present on disk.
+#                                              files still present on disk. Either way, every name in the
+#                                              feature's depends_on must already be a 'done' feature in this
+#                                              project (see set-depends-on / --depends-on) — refuses otherwise.
 #                                              (best-effort: also pushes notion_status_in_progress to the
 #                                              feature's source Notion page, if it has a source_id)
 #   append-log <entry> [--agent NAME]         append a line to the current open session's log
@@ -84,7 +98,7 @@ cmd_import_features() {
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
 
   jq -c '.[]' "$seed_file" | while IFS= read -r item; do
-    local number name title desc status accept sdd now
+    local number name title desc status accept sdd depends_on now
     number=$(jq -r '.feature_number' <<<"$item")
     name=$(jq -r '.name' <<<"$item")
     title=$(jq -r '.title' <<<"$item")
@@ -92,15 +106,16 @@ cmd_import_features() {
     status=$(jq -r '.status // "pending"' <<<"$item")
     accept=$(jq -c '.acceptance // []' <<<"$item")
     sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
+    depends_on=$(jq -c '.depends_on // []' <<<"$item")
     now="$(now_iso)"
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, '$(sql_escape "$status")', '$now', '$now');"
+    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, '$(sql_escape "$status")', '$(sql_escape "$depends_on")', '$now', '$now');"
   done
   ok "imported features from $seed_file"
 }
 
 cmd_add_feature() {
-  local name="" title="" desc="" accept_items=() sdd=0
+  local name="" title="" desc="" accept_items=() sdd=0 depends_items=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
@@ -113,25 +128,53 @@ cmd_add_feature() {
           accept_items+=("$1"); shift
         done
         ;;
+      --depends-on)
+        shift
+        while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+          depends_items+=("$1"); shift
+        done
+        ;;
       *) fail "unknown argument: $1"; exit 1 ;;
     esac
   done
   if [ -z "$name" ] || [ -z "$title" ]; then
-    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--acceptance <item...>] [--sdd]"
+    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>]"
     exit 1
   fi
 
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+
+  local dep
+  for dep in "${depends_items[@]}"; do
+    if [ "$dep" = "$name" ]; then
+      fail "feature $name cannot depend on itself"
+      exit 1
+    fi
+    local exists
+    exists=$(db "SELECT 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND name='$(sql_escape "$dep")';")
+    [ -n "$exists" ] || { fail "unknown dependency '$dep' — no feature with that name exists yet in this project (add it first, or fix the typo)"; exit 1; }
+  done
+
   local next_number
   next_number=$(db "SELECT COALESCE(MAX(feature_number), 0) + 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL;")
-  local accept; accept="$(json_array "${accept_items[@]:-}")"
+  # NOTE: "${arr[@]}" (no ':-' fallback) is required here — under `set -u`,
+  # an empty array still expands to zero words this way, but
+  # "${arr[@]:-}" on an EMPTY array expands to one empty-string word, which
+  # made json_array emit [""] instead of [] (this pre-existing shape bit
+  # accept_items too, fixed alongside depends_items here). A stray [""] in
+  # depends_on isn't just cosmetic: cmd_claim's deps_gate treats "" as an
+  # unmet dependency name, so it would refuse to claim a feature with no
+  # declared dependencies at all.
+  local accept; accept="$(json_array "${accept_items[@]}")"
+  local depends_on; depends_on="$(json_array "${depends_items[@]}")"
   local now; now="$(now_iso)"
 
-  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$now', '$now');"
+  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$now', '$now');"
   local sdd_note=""; [ "$sdd" = "1" ] && sdd_note=", sdd"
-  ok "added feature $next_number: $name (pending$sdd_note)"
+  local deps_note=""; [ "$depends_on" != "[]" ] && deps_note=", depends on: $depends_on"
+  ok "added feature $next_number: $name (pending$sdd_note$deps_note)"
 }
 
 cmd_link_notion() {
@@ -165,6 +208,45 @@ RETURNING id, feature_number, name, source_id;" 2>&1)
     exit 1
   fi
   ok "linked feature $target to Notion page $page_id"
+}
+
+cmd_set_depends_on() {
+  local target="${1:?usage: set-depends-on <feature_number|name> [dep_name...]}"; shift
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local now; now="$(now_iso)"
+
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+
+  local target_name
+  target_name=$(db "SELECT name FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
+  [ -n "$target_name" ] || { fail "not updatable: no matching feature $target"; exit 1; }
+
+  local dep
+  for dep in "$@"; do
+    [ -n "$dep" ] || continue
+    if [ "$dep" = "$target_name" ]; then
+      fail "feature $target_name cannot depend on itself"
+      exit 1
+    fi
+    local exists
+    exists=$(db "SELECT 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND name='$(sql_escape "$dep")';")
+    [ -n "$exists" ] || { fail "unknown dependency '$dep' — no feature with that name exists in this project"; exit 1; }
+  done
+
+  # No status/session-state check here (unlike claim/block/unblock) —
+  # dependencies are metadata correctable at any lifecycle stage; claim is
+  # what actually enforces them.
+  local depends_on; depends_on="$(json_array "$@")"
+  db_exec "UPDATE features SET depends_on='$(sql_escape "$depends_on")', updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;"
+  ok "set depends_on for feature $target_name: $depends_on"
 }
 
 cmd_import_sessions() {
@@ -217,12 +299,13 @@ cmd_notion_import() {
   next_number=$(db "SELECT COALESCE(MAX(feature_number), 0) + 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL;")
 
   jq -c '.[]' "$seed_file" | while IFS= read -r item; do
-    local name title desc accept sdd source_id now source_id_sql
+    local name title desc accept sdd depends_on source_id now source_id_sql
     name=$(jq -r '.name' <<<"$item")
     title=$(jq -r '.title' <<<"$item")
     desc=$(jq -r '.description // ""' <<<"$item")
     accept=$(jq -c '.acceptance // []' <<<"$item")
     sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
+    depends_on=$(jq -c '.depends_on // []' <<<"$item")
     source_id=$(jq -r '.source_id // empty' <<<"$item")
     now="$(now_iso)"
     if [ -n "$source_id" ]; then
@@ -230,8 +313,8 @@ cmd_notion_import() {
     else
       source_id_sql="NULL"
     fi
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, source_id, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', $source_id_sql, '$now', '$now');"
+    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, source_id, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', $source_id_sql, '$now', '$now');"
     next_number=$((next_number + 1))
   done
   ok "imported notion tasks from $seed_file"
@@ -425,16 +508,37 @@ cmd_claim() {
   fi
 
   local check_row
-  check_row=$(sqlite3 -json "$DB_PATH" "SELECT f.id, f.name, f.sdd, f.status, s.status AS spec_status
+  check_row=$(sqlite3 -json "$DB_PATH" "SELECT f.id, f.name, f.sdd, f.status, f.depends_on, s.status AS spec_status
 FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
 WHERE $target_where;")
 
   if [ -n "$check_row" ] && [ "$check_row" != "[]" ]; then
-    local sdd_flag status_now name_now spec_status
+    local sdd_flag status_now name_now spec_status depends_on_now
     sdd_flag=$(jq -r '.[0].sdd' <<<"$check_row")
     status_now=$(jq -r '.[0].status' <<<"$check_row")
     name_now=$(jq -r '.[0].name' <<<"$check_row")
     spec_status=$(jq -r '.[0].spec_status // "none"' <<<"$check_row")
+    depends_on_now=$(jq -r '.[0].depends_on // "[]"' <<<"$check_row")
+
+    # Local (same-project) dependency gate: every name listed in depends_on
+    # must belong to a feature that is already 'done'. This is what would
+    # have caught claiming admin_institutions_cuaderno_seal before
+    # cuaderno_foundation_chapter_header_seal_breakpoint had even started —
+    # nothing previously checked a feature's own textual "Depende de X"
+    # against real feature state. Checked before the sdd checks below since
+    # it applies regardless of sdd.
+    local unmet=() dep_name dep_status
+    while IFS= read -r dep_name; do
+      [ -n "$dep_name" ] || continue
+      dep_status=$(db "SELECT status FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND name='$(sql_escape "$dep_name")';")
+      [ "$dep_status" = "done" ] || unmet+=("$dep_name (${dep_status:-not found})")
+    done < <(jq -r '.[]?' <<<"$depends_on_now" 2>/dev/null)
+    if [ "${#unmet[@]}" -gt 0 ]; then
+      local unmet_list; unmet_list=$(IFS=', '; echo "${unmet[*]}")
+      fail "feature $name_now depends on local feature(s) not yet done: $unmet_list — claim/finish those first, or fix depends_on with 'set-depends-on' if it's stale"
+      exit 1
+    fi
+
     if [ "$sdd_flag" = "1" ]; then
       if [ "$status_now" = "pending" ] || [ "$status_now" = "spec_drafting" ]; then
         fail "feature $name_now requires an approved spec first (status=$status_now) — run 'claim-spec' then 'mark-spec-ready', get human approval, then 'approve-spec', then 'claim' (see docs/specs.md)"
@@ -459,18 +563,25 @@ WHERE $target_where;")
   # stale/missing precheck.
   local sdd_gate="(f.sdd = 0 AND f.status = 'pending') OR (f.sdd = 1 AND f.status = 'spec_ready' AND f.id IN (SELECT feature_id FROM specs WHERE status = 'approved' AND deleted_at IS NULL))"
 
+  # Same posture for the local dependency gate as sdd_gate above: the real
+  # enforcement is this WHERE condition, not the friendlier precheck earlier
+  # in the function. depends_on defaults to '[]', so json_each yields no
+  # rows and the NOT EXISTS is vacuously true for features with no
+  # dependencies declared.
+  local deps_gate="NOT EXISTS (SELECT 1 FROM json_each(f.depends_on) dep WHERE dep.value NOT IN (SELECT name FROM features d2 WHERE d2.project_id = f.project_id AND d2.status = 'done' AND d2.deleted_at IS NULL))"
+
   local update_sql
   if [ -n "$target" ]; then
     if [[ "$target" =~ ^[0-9]+$ ]]; then
       update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.feature_number=$target AND ($sdd_gate))"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.feature_number=$target AND ($sdd_gate) AND ($deps_gate))"
     else
       update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.name='$(sql_escape "$target")' AND ($sdd_gate))"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.name='$(sql_escape "$target")' AND ($sdd_gate) AND ($deps_gate))"
     fi
   else
     update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND ($sdd_gate) ORDER BY f.feature_number LIMIT 1)"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND ($sdd_gate) AND ($deps_gate) ORDER BY f.feature_number LIMIT 1)"
   fi
 
   # SQLite has no RAISE()/control flow outside triggers, so "claim exactly
@@ -869,6 +980,7 @@ main() {
   case "$sub" in
     import-features) cmd_import_features "$@" ;;
     add-feature) cmd_add_feature "$@" ;;
+    set-depends-on) cmd_set_depends_on "$@" ;;
     link-notion) cmd_link_notion "$@" ;;
     import-sessions) cmd_import_sessions "$@" ;;
     notion-diff) cmd_notion_diff "$@" ;;

@@ -144,6 +144,10 @@ return only the reference, not the content — never the full content in chat.
 
 - **Only one feature at a time.** `scripts/harness.sh claim` will refuse a second concurrent claim — this is a real
   database constraint, not just a convention.
+- **Respect local feature dependencies.** If a feature's `depends_on` names other features in this same project,
+  `claim` mechanically refuses it until every one of them is `done` — see "Local Feature Dependencies" in §4. A
+  feature's free-text description saying "depends on X" is not enough on its own; record it with `--depends-on` /
+  `set-depends-on` so `claim` actually enforces it instead of relying on whoever picks the next task to notice.
 - **Don't declare a task `done` without green tests.** Run `./init.sh` and make sure the verification command passes.
 - **Document what you do** via `scripts/harness.sh append-log "<note>"` while you work, not at the end.
 - **Clean up the repository** before closing the session (see [5](#5-log-out-lifecycle)).
@@ -162,6 +166,25 @@ return only the reference, not the content — never the full content in chat.
 
 `claim` atomically marks the feature `in_progress` and opens a session — there's no separate "save" step, and no way
 to end up with two features in progress at once.
+
+### Local Feature Dependencies
+
+A feature can require one or more *other features in this same project* to be `done` first — set this with
+`add-feature ... --depends-on <name...>` at creation time, or `scripts/harness.sh set-depends-on <target>
+<name...>` afterwards (each name must already exist as a feature in this project; calling it with no names clears
+the list). `import-features`/`notion-import` also accept an optional `"depends_on": [name...]` field per item.
+
+`claim` checks this mechanically: if any named dependency isn't `done` yet, claim refuses with a message naming
+which one(s) are still outstanding — for an explicit target and for the no-target "lowest pending" default alike.
+This exists because a feature's own `description` saying "depends on X" is just prose nothing reads — before this
+gate, nothing stopped claiming (and even blocking) a feature whose own prerequisite hadn't been started, which
+could leave the *only* global open session (§3) stuck on a feature that could never legitimately finish. Prefer
+`depends_on` over writing the dependency only in prose whenever a feature genuinely can't be implemented (not just
+"is nicer after") without another one in this project landing first.
+
+This is separate from the cross-project `block`/`BLOCKED_ON`/`check-blockers` mechanism (§8) — that one is for
+dependencies on a *different* project's harness; this one is for dependencies between features inside this same
+`harness.db`.
 
 ## 5. Log Out (Lifecycle)
 
