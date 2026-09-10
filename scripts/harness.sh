@@ -33,8 +33,14 @@
 #                                              (optional "sdd" checkbox property carried through if present;
 #                                              optional "depends_on": [name...] also carried through — see
 #                                              import-features above)
-#   claim-spec [--agent NAME] [TARGET]        claim an sdd=1 pending feature for spec drafting (spec_author only —
-#                                              see docs/specs.md); moves it to spec_drafting and opens a session
+#   claim-spec [--agent NAME] [--agent-model MODEL] [TARGET]
+#                                              claim an sdd=1 pending feature for spec drafting (spec_author only —
+#                                              see docs/specs.md); moves it to spec_drafting and opens a session.
+#                                              The session's stored agent is auto-formatted as
+#                                              "Claude (<role> agent by <MODEL>)" when a model is known via
+#                                              --agent-model > $HARNESS_AGENT_MODEL > $ANTHROPIC_MODEL; pass --agent
+#                                              with a pre-formatted string (e.g. Codex's "leader -> spec_author
+#                                              (GPT-5)") to take precedence.
 #   mark-spec-ready                           close the current spec-drafting session: verifies
 #                                              specs/<name>/{requirements,design,tasks}.md exist, records
 #                                              requirement/task counts, moves the feature to spec_ready
@@ -42,23 +48,43 @@
 #   approve-spec <TARGET> [--by NAME]         record human approval of a spec_ready feature's spec (leader-only,
 #                                              run immediately after the user approves in conversation) — this is
 #                                              the actual DB-enforced precondition claim checks for sdd=1 features
-#   claim [--agent NAME] [TARGET]             claim TARGET (number or name), or lowest claimable if omitted.
+#   claim [--agent NAME] [--agent-model MODEL] [TARGET]
+#                                              claim TARGET (number or name), or lowest claimable if omitted.
 #                                              For sdd=0 features: from pending. For sdd=1 features: only from
 #                                              spec_ready with an approved spec (see approve-spec) and the 3 spec
 #                                              files still present on disk. Either way, every name in the
 #                                              feature's depends_on must already be a 'done' feature in this
 #                                              project (see set-depends-on / --depends-on) — refuses otherwise.
+#                                              The session's stored agent is auto-formatted as
+#                                              "Claude (<role> agent by <MODEL>)" when a model is known via
+#                                              --agent-model > $HARNESS_AGENT_MODEL > $ANTHROPIC_MODEL; pass --agent
+#                                              with a pre-formatted string (e.g. Codex's "leader -> implementer
+#                                              (GPT-5)") to take precedence.
 #                                              (best-effort: also pushes notion_status_in_progress to the
 #                                              feature's source Notion page, if it has a source_id)
-#   append-log <entry> [--agent NAME]         append a line to the current open session's log
+#   append-log <entry> [--agent NAME] [--agent-model MODEL]
+#                                              append a line to the current open session's log. By default
+#                                              the entry is prefixed with the standardized agent attribution
+#                                              ("Claude (<role> agent by <MODEL>)" when $ANTHROPIC_MODEL is
+#                                              set, otherwise the session's stored agent). Pass --agent to
+#                                              override the role for this entry; pass --agent-model to pin
+#                                              the model when the auto-detected one is wrong (e.g. handing
+#                                              the entry off between agents with different models).
 #   set-plan <item> [item...]                 replace the current open session's plan
 #   set-next-step <item> [item...]            replace the current open session's next_step
-#   record-review <approved|changes-requested> [--by NAME] [--notes TEXT]
+#   record-review <approved|changes-requested> [--by NAME] [--reviewer-model MODEL] [--notes TEXT]
 #                                              record the reviewer's verdict on the current open session
 #                                              (reviewer-only, run as the mechanical last step of its own
 #                                              protocol) — log-out refuses to close a session whose latest
 #                                              verdict isn't 'approved'; a later call overwrites the verdict,
-#                                              so a re-review after CHANGES_REQUESTED just records over it
+#                                              so a re-review after CHANGES_REQUESTED just records over it.
+#                                              If --by is omitted, --by defaults to "Claude (reviewer agent
+#                                              by <MODEL>)" where <MODEL> comes from --reviewer-model >
+#                                              $HARNESS_ORCHESTRATOR_MODEL > $ANTHROPIC_MODEL > $HARNESS_AGENT
+#                                              (the last is the original fallback). $ANTHROPIC_MODEL is set
+#                                              by Claude Code per-session and the Agent tool's `model`
+#                                              param overrides it in subagents — so a reviewer running Opus
+#                                              shows Opus here even if the orchestrator is MiniMax-M3.
 #   log-out --changes <item...> --verification <text> --closure <text>
 #                                              close the open session and mark its feature done — refuses
 #                                              unless record-review has recorded 'approved' on this session
@@ -322,10 +348,12 @@ VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_es
 
 cmd_claim_spec() {
   local agent="${HARNESS_AGENT:-unknown}"
+  local agent_model=""
   local target=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --agent) agent="$2"; shift 2 ;;
+      --agent-model) agent_model="$2"; shift 2 ;;
       *) target="$1"; shift ;;
     esac
   done
@@ -376,8 +404,12 @@ WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND 
   fi
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
 
+  # See cmd_claim for the helper rationale.
+  local agent_attribution
+  agent_attribution="$(harness_agent_attribution "$agent" "" "$agent_model")"
+
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
-VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
+VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")', '$now');"
   ok "claimed for spec drafting: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 }
 
@@ -479,10 +511,12 @@ RETURNING id, feature_id;" 2>&1)
 
 cmd_claim() {
   local agent="${HARNESS_AGENT:-unknown}"
+  local agent_model=""
   local target=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --agent) agent="$2"; shift 2 ;;
+      --agent-model) agent_model="$2"; shift 2 ;;
       *) target="$1"; shift ;;
     esac
   done
@@ -599,8 +633,16 @@ WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")
   fi
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
 
+  # Resolve the stored agent attribution via the shared helper: explicit
+  # --agent (backward compat, e.g. Codex's "leader -> implementer (<model>)"
+  # chain string) wins, else auto-format "Claude (<role> agent by <MODEL>)"
+  # when a model is known via --agent-model > $HARNESS_AGENT_MODEL >
+  # $ANTHROPIC_MODEL, else fall back to $HARNESS_AGENT or "unknown".
+  local agent_attribution
+  agent_attribution="$(harness_agent_attribution "$agent" "" "$agent_model")"
+
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
-VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
+VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")', '$now');"
   ok "claimed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 
   local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$updated")
@@ -615,11 +657,33 @@ current_session_id() {
 }
 
 cmd_append_log() {
-  local entry="${1:?usage: append-log <entry>}"
+  local entry="${1:?usage: append-log <entry> [--agent NAME] [--agent-model MODEL]}"
+  shift
+  local explicit_agent="" agent_model=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --agent) explicit_agent="$2"; shift 2 ;;
+      --agent-model) agent_model="$2"; shift 2 ;;
+      *) fail "unknown argument: $1"; exit 1 ;;
+    esac
+  done
   local sid; sid="$(current_session_id)"
   [ -n "$sid" ] || { fail "no open session — run 'claim' first"; exit 1; }
-  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$entry")', '$(now_iso)');"
-  ok "appended log entry to session $sid"
+
+  # Determine the role for attribution: explicit --agent wins, else fall back to
+  # the session's stored agent (set when claim/claim-spec opened the session),
+  # else "unknown". Then build the standardized attribution via the shared
+  # helper and prefix the entry so every log line carries agent + model info.
+  local role="$explicit_agent"
+  if [ -z "$role" ]; then
+    role=$(db "SELECT agent FROM session_log WHERE id=$sid;")
+  fi
+  local attribution
+  attribution="$(harness_agent_attribution "$role" "" "$agent_model")"
+  local prefixed_entry="[$attribution] $entry"
+
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$prefixed_entry")', '$(now_iso)');"
+  ok "appended log entry to session $sid (by: $attribution)"
 }
 
 cmd_set_array_field() {
@@ -632,7 +696,7 @@ cmd_set_array_field() {
 }
 
 cmd_record_review() {
-  local verdict_raw="${1:?usage: record-review <approved|changes-requested> [--by NAME] [--notes TEXT]}"; shift
+  local verdict_raw="${1:?usage: record-review <approved|changes-requested> [--by NAME] [--reviewer-model MODEL] [--notes TEXT]}"; shift
   local verdict
   case "$verdict_raw" in
     approved) verdict="approved" ;;
@@ -640,14 +704,22 @@ cmd_record_review() {
     *) fail "verdict must be 'approved' or 'changes-requested', got: $verdict_raw"; exit 1 ;;
   esac
 
-  local by="${HARNESS_AGENT:-unknown}" notes=""
+  local by_explicit="" reviewer_model="" notes=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --by) by="$2"; shift 2 ;;
+      --by) by_explicit="$2"; shift 2 ;;
+      --reviewer-model) reviewer_model="$2"; shift 2 ;;
       --notes) notes="$2"; shift 2 ;;
       *) fail "unknown argument: $1"; exit 1 ;;
     esac
   done
+
+  # Resolve --by via the shared helper: explicit --by (backward compat) wins,
+  # else auto-format "Claude (reviewer agent by <MODEL>)" when a model is known
+  # via --reviewer-model > $HARNESS_AGENT_MODEL > $ANTHROPIC_MODEL, else fall back
+  # to $HARNESS_AGENT or "unknown".
+  local by
+  by="$(harness_agent_attribution reviewer "$by_explicit" "$reviewer_model")"
 
   local sid; sid="$(current_session_id)"
   [ -n "$sid" ] || { fail "no open session — nothing to review"; exit 1; }
