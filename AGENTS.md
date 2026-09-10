@@ -198,7 +198,7 @@ Before finishing:
    ```
    This closes the session and marks the feature `done` in one step — there's no manual "move current.md into
    history.md" step; the closed session *is* the history entry. `log-out` mechanically refuses to run unless
-   a `reviewer` subagent has already recorded `scripts/harness.sh record-review approved --by <name>` on this
+   a `reviewer` subagent has already recorded `scripts/harness.sh record-review approved` on this
    session — a leader instructing an implementer to log out before/instead of review now hits a hard failure
    instead of silently shipping unreviewed code (see `.claude/agents/reviewer.md` step 8 and `leader.md`'s
    hard rule against this).
@@ -231,8 +231,9 @@ Before marking it `done`, do the check that gate would have done:
 5. Only then reconcile the bookkeeping: `claim` the feature (this opens the session `log-out` needs), `append-log`
    with what you verified and every deviation found (reference the actual commits/PR), `record-review approved`
    attributing it to whoever is accountable for accepting the shipped state (the user, if they're the one deciding
-   to accept deviations rather than block on a fix), then `log-out` referencing the real commits/PR — not files
-   from a session that never touched this feature.
+   to accept deviations rather than block on a fix) — using `--by 'human:<name>'` if the reviewer is a literal
+   human, or omitting `--by` to let the harness auto-attribute (the canonical case), then `log-out`
+   referencing the real commits/PR — not files from a session that never touched this feature.
 
 This is not a substitute for the normal implementer → reviewer flow — it exists only because that flow didn't run.
 Route future work on this same feature through `claim`/`record-review`/`log-out` normally; this section is for the
@@ -316,7 +317,12 @@ reachable from `in_progress`, unchanged). The transitions are driven by `scripts
    disk; moves the feature to `spec_ready`.
 3. **Human approval** — the user reviews the 3 files and says so, in this conversation. The orchestrating leader
    then runs `approve-spec <target> --by <name>` — this is the mechanical, DB-recorded gate; `claim` refuses an
-   `sdd=1` feature whose spec isn't recorded as approved, regardless of `status`.
+   `sdd=1` feature whose spec isn't recorded as approved, regardless of `status`. The leader gets `<name>` from
+   `$HARNESS_HUMAN_USER` if set, else `.harness.json::human_user` (scaffolded by `install.sh` at install time);
+   an explicit "approve as <different name>" from the user in the same turn overrides everything. This is the
+   ONLY command that stores a literal human name in the audit trail — see `scripts/harness.sh`'s `approve-spec`
+   doc comment for the full resolution order, and `record-review` for the contrasting rule (rejects bare human
+   names because the reviewer is a subagent, not the human).
 4. `claim` — now works for the feature exactly like any other, launching `implementer` then `reviewer` as usual.
 
 Spec content lives as git-tracked files, not database rows — `specs/<name>/` is authored the same way `src/`/

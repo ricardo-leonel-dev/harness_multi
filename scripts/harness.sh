@@ -47,7 +47,12 @@
 #                                              (best-effort: pushes notion_status_spec_ready if source_id is set)
 #   approve-spec <TARGET> [--by NAME]         record human approval of a spec_ready feature's spec (leader-only,
 #                                              run immediately after the user approves in conversation) — this is
-#                                              the actual DB-enforced precondition claim checks for sdd=1 features
+#                                              the actual DB-enforced precondition claim checks for sdd=1 features.
+#                                              --by resolution: explicit --by > $HARNESS_HUMAN_USER env >
+#                                              .harness.json::human_user > legacy default "user". This is the ONLY
+#                                              command that stores a literal human name (not an agent string);
+#                                              record-review rejects bare human names for the opposite reason — see
+#                                              the record-review doc comment for the full rationale.
 #   claim [--agent NAME] [--agent-model MODEL] [TARGET]
 #                                              claim TARGET (number or name), or lowest claimable if omitted.
 #                                              For sdd=0 features: from pending. For sdd=1 features: only from
@@ -72,19 +77,22 @@
 #                                              the entry off between agents with different models).
 #   set-plan <item> [item...]                 replace the current open session's plan
 #   set-next-step <item> [item...]            replace the current open session's next_step
-#   record-review <approved|changes-requested> [--by NAME] [--reviewer-model MODEL] [--notes TEXT]
+#   record-review <approved|changes-requested> [--by human:NAME] [--reviewer-model MODEL] [--notes TEXT]
 #                                              record the reviewer's verdict on the current open session
 #                                              (reviewer-only, run as the mechanical last step of its own
 #                                              protocol) — log-out refuses to close a session whose latest
 #                                              verdict isn't 'approved'; a later call overwrites the verdict,
 #                                              so a re-review after CHANGES_REQUESTED just records over it.
-#                                              If --by is omitted, --by defaults to "Claude (reviewer agent
-#                                              by <MODEL>)" where <MODEL> comes from --reviewer-model >
-#                                              $HARNESS_ORCHESTRATOR_MODEL > $ANTHROPIC_MODEL > $HARNESS_AGENT
-#                                              (the last is the original fallback). $ANTHROPIC_MODEL is set
-#                                              by Claude Code per-session and the Agent tool's `model`
-#                                              param overrides it in subagents — so a reviewer running Opus
-#                                              shows Opus here even if the orchestrator is MiniMax-M3.
+#                                              --by policy (post feature-38 incident): for the canonical case
+#                                              (subagent reviewer), OMIT --by entirely and let the harness
+#                                              auto-format as "Claude (reviewer agent by <MODEL>)" or
+#                                              "Codex (reviewer agent by <MODEL>)" from $ANTHROPIC_MODEL.
+#                                              The ONLY accepted explicit value is the prefix "human:<name>"
+#                                              — for the rare case where a literal human (not a subagent)
+#                                              records the review. Any other --by value is rejected to
+#                                              prevent confusing this subagent-review gate with the
+#                                              human-spec-approval gate (approve-spec --by "Ricardo Aguilar",
+#                                              which is the ONLY command that accepts a bare human name).
 #   log-out --changes <item...> --verification <text> --closure <text>
 #                                              close the open session and mark its feature done — refuses
 #                                              unless record-review has recorded 'approved' on this session
@@ -467,7 +475,7 @@ SQL
 }
 
 cmd_approve_spec() {
-  local target="" by="user"
+  local target="" by=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --by) by="$2"; shift 2 ;;
@@ -475,6 +483,24 @@ cmd_approve_spec() {
     esac
   done
   [ -n "$target" ] || { fail "usage: approve-spec <feature_number|name> [--by <name>]"; exit 1; }
+
+  # Resolution order for --by (post feature-38 audit): explicit --by always
+  # wins; else $HARNESS_HUMAN_USER env var (CI/override); else
+  # .harness.json::human_user (set by install.sh at install time); else the
+  # legacy default "user" so old installs without the config keep working.
+  # This is the ONLY command where a literal human name is the correct
+  # attribution — subagents don't run it, only the leader does, on behalf
+  # of the human who approved the spec in conversation.
+  if [ -z "$by" ]; then
+    if [ -n "${HARNESS_HUMAN_USER:-}" ]; then
+      by="$HARNESS_HUMAN_USER"
+    else
+      by="$(config '.human_user' '')"
+      if [ -z "$by" ]; then
+        by="user"
+      fi
+    fi
+  fi
 
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
@@ -714,6 +740,27 @@ cmd_record_review() {
     esac
   done
 
+  # --by validation: only the literal prefix "human:<name>" is accepted when a
+  # human (not a subagent) records the review. Subagent reviewers must omit
+  # --by and let the harness auto-format via $ANTHROPIC_MODEL/$HARNESS_AGENT_MODEL.
+  # Bare names like "Ricardo Aguilar" are rejected — that's the spec gate's
+  # pattern (approve-spec), not the review gate's. See the doc comment at the
+  # top of harness.sh for the full rationale.
+  if [ -n "$by_explicit" ]; then
+    case "$by_explicit" in
+      human:*)
+        by_explicit="${by_explicit#human:}"
+        # Trim leading whitespace (e.g. "human:  Name" → "Name") using pure POSIX
+        by_explicit="${by_explicit#"${by_explicit%%[![:space:]]*}"}"
+        [ -n "$by_explicit" ] || { fail "--by 'human:' requires a non-empty name after the prefix"; exit 1; }
+        ;;
+      *)
+        fail "record-review --by must be omitted (auto-attributes as 'Claude/Codex (reviewer agent by <MODEL>)' from \$ANTHROPIC_MODEL) or use the prefix 'human:<name>' when a literal human is the reviewer (e.g. --by 'human:Ricardo Aguilar'). Got: --by '$by_explicit'. If a subagent recorded this review, omit --by entirely."
+        exit 1
+        ;;
+    esac
+  fi
+
   # Resolve --by via the shared helper: explicit --by (backward compat) wins,
   # else auto-format "Claude (reviewer agent by <MODEL>)" when a model is known
   # via --reviewer-model > $HARNESS_AGENT_MODEL > $ANTHROPIC_MODEL, else fall back
@@ -757,7 +804,7 @@ cmd_log_out() {
   # check), so a stale/missing precheck can't be used to bypass this.
   local review_status; review_status=$(db "SELECT review_status FROM session_log WHERE id=$sid;")
   if [ "$review_status" != "approved" ]; then
-    fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved --by <name>' first; only the implementer runs log-out, and only after that approval is recorded"
+    fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved' first (do NOT pass --by; the harness auto-attributes from \$ANTHROPIC_MODEL); only the implementer runs log-out, and only after that approval is recorded"
     exit 1
   fi
 
@@ -895,8 +942,13 @@ RETURNING id, feature_number, name, title, source_id;" 2>&1)
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
 
   # Opens a fresh session (the one from the original log-out is already
-  # closed_at-stamped) — mirrors cmd_claim's session INSERT.
-  local agent="${HARNESS_AGENT:-unknown}"
+  # closed_at-stamped) — mirrors cmd_claim's session INSERT. Use the same
+  # auto-format helper so the stored `agent` matches claim/claim-spec's format
+  # (post feature-38 audit: previously this stored the bare role/env var
+  # instead of "Claude (<role> agent by <MODEL>)").
+  local agent="${HARNESS_AGENT:-leader}"
+  local agent_model=""
+  agent="$(harness_agent_attribution "$agent" "" "$agent_model")"
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
 VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
   local sid; sid="$(current_session_id)"
