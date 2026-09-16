@@ -110,6 +110,12 @@
 #                                              actually created
 #   block <TARGET> <reason...>                mark an in_progress feature blocked (leaves its session open)
 #   unblock <TARGET>                          mark a blocked feature in_progress again, resuming its open session
+#   cancel-session [--force] <session_id> <reason...>
+#                                              soft-delete an open session that never produced real work (e.g. a
+#                                              claim interrupted before any plan/log/changes), freeing the project's
+#                                              one-open-session slot without touching feature status. Refuses unless
+#                                              the session's feature is missing/deleted, unless --force is passed —
+#                                              this is not for abandoning genuine in-progress work (use block for that)
 #   reopen <TARGET> <reason...>               mark a done feature in_progress again, opening a fresh session
 #                                              (e.g. it was closed without meeting a checkpoint) — logs a
 #                                              REOPENED: <reason> entry on the new session for the audit trail
@@ -908,6 +914,59 @@ RETURNING id, feature_number, name, title;" 2>&1)
   ok "unblocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 }
 
+cmd_cancel_session() {
+  local force=0
+  if [ "${1:-}" = "--force" ]; then force=1; shift; fi
+  local sid="${1:?usage: cancel-session [--force] <session_id> <reason...>}"; shift || true
+  local reason="$*"
+  [ -n "$reason" ] || { fail "usage: cancel-session [--force] <session_id> <reason...>"; exit 1; }
+  [[ "$sid" =~ ^[0-9]+$ ]] || { fail "session_id must be numeric"; exit 1; }
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local now; now="$(now_iso)"
+
+  # cancel-session discards a session that never produced real work (e.g. a
+  # claim killed mid-flight before any plan/log/changes) — it soft-deletes the
+  # session_log row (deleted_at, not closed_at: closed_at means "a completed
+  # history entry", which this never was) so the one_open_session_per_project
+  # unique index frees up again without ever touching feature status. Unlike
+  # `block`, it is NOT for abandoning genuine in-flight work — by default it
+  # refuses unless the session's feature is missing or itself soft-deleted;
+  # --force overrides that for any other confirmed case.
+  local row
+  row=$(sqlite3 -json "$DB_PATH" "SELECT sl.id, sl.feature_id, f.deleted_at AS feature_deleted_at
+FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id
+WHERE sl.id=$sid AND sl.project_id='$(sql_escape "$pid")' AND sl.closed_at IS NULL AND sl.deleted_at IS NULL;")
+  if [ "$row" = "[]" ] || [ -z "$row" ]; then
+    fail "not cancelable: no open session $sid in this project"
+    exit 1
+  fi
+  local feature_id feature_deleted_at
+  feature_id=$(jq -r '.[0].feature_id // empty' <<<"$row")
+  feature_deleted_at=$(jq -r '.[0].feature_deleted_at // empty' <<<"$row")
+  if [ "$force" != "1" ] && [ -n "$feature_id" ] && [ -z "$feature_deleted_at" ]; then
+    fail "session $sid is linked to a feature that still exists — refusing to cancel without --force; if you mean to abandon in-progress work use 'block' instead, or pass --force if you're sure"
+    exit 1
+  fi
+
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "CANCELLED: $reason")', '$now');"
+
+  local updated
+  updated=$(sqlite3 -json "$DB_PATH" "UPDATE session_log SET deleted_at='$now'
+WHERE id=$sid AND project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL
+RETURNING id;" 2>&1)
+  if [ $? -ne 0 ]; then
+    fail "cancel-session failed: $updated"
+    exit 1
+  fi
+  if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
+    fail "cancel-session failed for session $sid — state changed between check and cancel; re-run 'status' and try again"
+    exit 1
+  fi
+  ok "cancelled session $sid"
+}
+
 cmd_reopen() {
   local target="${1:?usage: reopen <feature_number|name> <reason...>}"; shift
   local reason="$*"
@@ -1126,6 +1185,7 @@ main() {
     notion-create-feature) cmd_notion_create_feature "$@" ;;
     block) cmd_block "$@" ;;
     unblock) cmd_unblock "$@" ;;
+    cancel-session) cmd_cancel_session "$@" ;;
     reopen) cmd_reopen "$@" ;;
     check-blockers) cmd_check_blockers ;;
     *)
