@@ -8,11 +8,21 @@
 #
 # Usage: scripts/harness.sh <subcommand> [args...]
 #   import-features <seed.json>              bulk-load features (status defaults to pending; optional
-#                                              "sdd": true per item opts it into spec-driven development)
+#                                              "sdd": true per item opts it into spec-driven development;
+#                                              optional "depends_on": [name...] gates claim on those LOCAL
+#                                              features — same project — being 'done' first)
 #   add-feature --name <slug> --title <t> [--description <d>] [--acceptance <item...>] [--sdd]
+#               [--depends-on <name...>]
 #                                              create a single pending feature directly (no seed file) — for
 #                                              ad-hoc tasks the leader creates on the spot, no matching pending
-#                                              feature existed; --sdd requires an approved spec before claim
+#                                              feature existed; --sdd requires an approved spec before claim;
+#                                              --depends-on names other LOCAL features (same project, must
+#                                              already exist) that must be 'done' before this one is claimable
+#   set-depends-on <feature_number|name> [dep_name...]
+#                                              replace a feature's local dependency list (each dep_name must
+#                                              already exist as a feature in this project; call with no
+#                                              dep_name to clear it) — for backfilling/correcting dependencies
+#                                              after creation; works at any status, unlike claim/block/unblock
 #   link-notion <feature_number|name> <notion_page_id>
 #                                              stamp a feature's source_id so claim/log-out's existing best-effort
 #                                              Notion push-back starts applying to it (pairs with notion-create-feature
@@ -20,31 +30,69 @@
 #   import-sessions <seed.json>               bulk-load historical (closed) sessions
 #   notion-diff                               (stdin: JSON array of {source_id,...}) prints only entries not yet imported
 #   notion-import <file.json>                 import entries as pending features, auto-numbered, source_id stored
-#                                              (optional "sdd" checkbox property carried through if present)
-#   claim-spec [--agent NAME] [TARGET]        claim an sdd=1 pending feature for spec drafting (spec_author only —
-#                                              see docs/specs.md); moves it to spec_drafting and opens a session
+#                                              (optional "sdd" checkbox property carried through if present;
+#                                              optional "depends_on": [name...] also carried through — see
+#                                              import-features above)
+#   claim-spec [--agent NAME] [--agent-model MODEL] [TARGET]
+#                                              claim an sdd=1 pending feature for spec drafting (spec_author only —
+#                                              see docs/specs.md); moves it to spec_drafting and opens a session.
+#                                              The session's stored agent is auto-formatted as
+#                                              "Claude (<role> agent by <MODEL>)" when a model is known via
+#                                              --agent-model > $HARNESS_AGENT_MODEL > $ANTHROPIC_MODEL; pass --agent
+#                                              with a pre-formatted string (e.g. Codex's "leader -> spec_author
+#                                              (GPT-5)") to take precedence.
 #   mark-spec-ready                           close the current spec-drafting session: verifies
 #                                              specs/<name>/{requirements,design,tasks}.md exist, records
 #                                              requirement/task counts, moves the feature to spec_ready
 #                                              (best-effort: pushes notion_status_spec_ready if source_id is set)
 #   approve-spec <TARGET> [--by NAME]         record human approval of a spec_ready feature's spec (leader-only,
 #                                              run immediately after the user approves in conversation) — this is
-#                                              the actual DB-enforced precondition claim checks for sdd=1 features
-#   claim [--agent NAME] [TARGET]             claim TARGET (number or name), or lowest claimable if omitted.
+#                                              the actual DB-enforced precondition claim checks for sdd=1 features.
+#                                              --by resolution: explicit --by > $HARNESS_HUMAN_USER env >
+#                                              .harness.json::human_user > legacy default "user". This is the ONLY
+#                                              command that stores a literal human name (not an agent string);
+#                                              record-review rejects bare human names for the opposite reason — see
+#                                              the record-review doc comment for the full rationale.
+#   claim [--agent NAME] [--agent-model MODEL] [TARGET]
+#                                              claim TARGET (number or name), or lowest claimable if omitted.
 #                                              For sdd=0 features: from pending. For sdd=1 features: only from
 #                                              spec_ready with an approved spec (see approve-spec) and the 3 spec
-#                                              files still present on disk.
+#                                              files still present on disk. Either way, every name in the
+#                                              feature's depends_on must already be a 'done' feature in this
+#                                              project (see set-depends-on / --depends-on) — refuses otherwise.
+#                                              The session's stored agent is auto-formatted as
+#                                              "Claude (<role> agent by <MODEL>)" when a model is known via
+#                                              --agent-model > $HARNESS_AGENT_MODEL > $ANTHROPIC_MODEL; pass --agent
+#                                              with a pre-formatted string (e.g. Codex's "leader -> implementer
+#                                              (GPT-5)") to take precedence.
 #                                              (best-effort: also pushes notion_status_in_progress to the
 #                                              feature's source Notion page, if it has a source_id)
-#   append-log <entry> [--agent NAME]         append a line to the current open session's log
+#   append-log <entry> [--agent NAME] [--agent-model MODEL]
+#                                              append a line to the current open session's log. By default
+#                                              the entry is prefixed with the standardized agent attribution
+#                                              ("Claude (<role> agent by <MODEL>)" when $ANTHROPIC_MODEL is
+#                                              set, otherwise the session's stored agent). Pass --agent to
+#                                              override the role for this entry; pass --agent-model to pin
+#                                              the model when the auto-detected one is wrong (e.g. handing
+#                                              the entry off between agents with different models).
 #   set-plan <item> [item...]                 replace the current open session's plan
 #   set-next-step <item> [item...]            replace the current open session's next_step
-#   record-review <approved|changes-requested> [--by NAME] [--notes TEXT]
+#   record-review <approved|changes-requested> [--by human:NAME] [--reviewer-model MODEL] [--notes TEXT]
 #                                              record the reviewer's verdict on the current open session
 #                                              (reviewer-only, run as the mechanical last step of its own
 #                                              protocol) — log-out refuses to close a session whose latest
 #                                              verdict isn't 'approved'; a later call overwrites the verdict,
-#                                              so a re-review after CHANGES_REQUESTED just records over it
+#                                              so a re-review after CHANGES_REQUESTED just records over it.
+#                                              --by policy (post feature-38 incident): for the canonical case
+#                                              (subagent reviewer), OMIT --by entirely and let the harness
+#                                              auto-format as "Claude (reviewer agent by <MODEL>)" or
+#                                              "Codex (reviewer agent by <MODEL>)" from $ANTHROPIC_MODEL.
+#                                              The ONLY accepted explicit value is the prefix "human:<name>"
+#                                              — for the rare case where a literal human (not a subagent)
+#                                              records the review. Any other --by value is rejected to
+#                                              prevent confusing this subagent-review gate with the
+#                                              human-spec-approval gate (approve-spec --by "Ricardo Aguilar",
+#                                              which is the ONLY command that accepts a bare human name).
 #   log-out --changes <item...> --verification <text> --closure <text>
 #                                              close the open session and mark its feature done — refuses
 #                                              unless record-review has recorded 'approved' on this session
@@ -55,7 +103,7 @@
 #   snapshot                                   regenerate state/*.md from harness.db
 #   sync                                       best-effort push to the Postgres mirror
 #   notion-check                               best-effort curl+jq query for new Notion tasks (prints notion-diff-ready JSON)
-#   notion-create-feature --project <slug> --title <t> --description <d> [--acceptance <a>] [--status <s>]
+#   notion-create-feature --project <slug> --title <t> --description <d> [--acceptance <a>] [--status <s>] [--sdd]
 #                                              create a new Notion page (feature card) in a project — for cross-
 #                                              project dependency requests; fails loudly (not a [WARN]) since the
 #                                              caller must not proceed to block a feature on a card that wasn't
@@ -84,7 +132,7 @@ cmd_import_features() {
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
 
   jq -c '.[]' "$seed_file" | while IFS= read -r item; do
-    local number name title desc status accept sdd now
+    local number name title desc status accept sdd depends_on now
     number=$(jq -r '.feature_number' <<<"$item")
     name=$(jq -r '.name' <<<"$item")
     title=$(jq -r '.title' <<<"$item")
@@ -92,15 +140,16 @@ cmd_import_features() {
     status=$(jq -r '.status // "pending"' <<<"$item")
     accept=$(jq -c '.acceptance // []' <<<"$item")
     sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
+    depends_on=$(jq -c '.depends_on // []' <<<"$item")
     now="$(now_iso)"
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, '$(sql_escape "$status")', '$now', '$now');"
+    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, '$(sql_escape "$status")', '$(sql_escape "$depends_on")', '$now', '$now');"
   done
   ok "imported features from $seed_file"
 }
 
 cmd_add_feature() {
-  local name="" title="" desc="" accept_items=() sdd=0
+  local name="" title="" desc="" accept_items=() sdd=0 depends_items=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
@@ -113,25 +162,53 @@ cmd_add_feature() {
           accept_items+=("$1"); shift
         done
         ;;
+      --depends-on)
+        shift
+        while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+          depends_items+=("$1"); shift
+        done
+        ;;
       *) fail "unknown argument: $1"; exit 1 ;;
     esac
   done
   if [ -z "$name" ] || [ -z "$title" ]; then
-    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--acceptance <item...>] [--sdd]"
+    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>]"
     exit 1
   fi
 
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+
+  local dep
+  for dep in "${depends_items[@]}"; do
+    if [ "$dep" = "$name" ]; then
+      fail "feature $name cannot depend on itself"
+      exit 1
+    fi
+    local exists
+    exists=$(db "SELECT 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND name='$(sql_escape "$dep")';")
+    [ -n "$exists" ] || { fail "unknown dependency '$dep' — no feature with that name exists yet in this project (add it first, or fix the typo)"; exit 1; }
+  done
+
   local next_number
   next_number=$(db "SELECT COALESCE(MAX(feature_number), 0) + 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL;")
-  local accept; accept="$(json_array "${accept_items[@]:-}")"
+  # NOTE: "${arr[@]}" (no ':-' fallback) is required here — under `set -u`,
+  # an empty array still expands to zero words this way, but
+  # "${arr[@]:-}" on an EMPTY array expands to one empty-string word, which
+  # made json_array emit [""] instead of [] (this pre-existing shape bit
+  # accept_items too, fixed alongside depends_items here). A stray [""] in
+  # depends_on isn't just cosmetic: cmd_claim's deps_gate treats "" as an
+  # unmet dependency name, so it would refuse to claim a feature with no
+  # declared dependencies at all.
+  local accept; accept="$(json_array "${accept_items[@]}")"
+  local depends_on; depends_on="$(json_array "${depends_items[@]}")"
   local now; now="$(now_iso)"
 
-  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$now', '$now');"
+  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$now', '$now');"
   local sdd_note=""; [ "$sdd" = "1" ] && sdd_note=", sdd"
-  ok "added feature $next_number: $name (pending$sdd_note)"
+  local deps_note=""; [ "$depends_on" != "[]" ] && deps_note=", depends on: $depends_on"
+  ok "added feature $next_number: $name (pending$sdd_note$deps_note)"
 }
 
 cmd_link_notion() {
@@ -165,6 +242,45 @@ RETURNING id, feature_number, name, source_id;" 2>&1)
     exit 1
   fi
   ok "linked feature $target to Notion page $page_id"
+}
+
+cmd_set_depends_on() {
+  local target="${1:?usage: set-depends-on <feature_number|name> [dep_name...]}"; shift
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local now; now="$(now_iso)"
+
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+
+  local target_name
+  target_name=$(db "SELECT name FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
+  [ -n "$target_name" ] || { fail "not updatable: no matching feature $target"; exit 1; }
+
+  local dep
+  for dep in "$@"; do
+    [ -n "$dep" ] || continue
+    if [ "$dep" = "$target_name" ]; then
+      fail "feature $target_name cannot depend on itself"
+      exit 1
+    fi
+    local exists
+    exists=$(db "SELECT 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND name='$(sql_escape "$dep")';")
+    [ -n "$exists" ] || { fail "unknown dependency '$dep' — no feature with that name exists in this project"; exit 1; }
+  done
+
+  # No status/session-state check here (unlike claim/block/unblock) —
+  # dependencies are metadata correctable at any lifecycle stage; claim is
+  # what actually enforces them.
+  local depends_on; depends_on="$(json_array "$@")"
+  db_exec "UPDATE features SET depends_on='$(sql_escape "$depends_on")', updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;"
+  ok "set depends_on for feature $target_name: $depends_on"
 }
 
 cmd_import_sessions() {
@@ -217,12 +333,13 @@ cmd_notion_import() {
   next_number=$(db "SELECT COALESCE(MAX(feature_number), 0) + 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL;")
 
   jq -c '.[]' "$seed_file" | while IFS= read -r item; do
-    local name title desc accept sdd source_id now source_id_sql
+    local name title desc accept sdd depends_on source_id now source_id_sql
     name=$(jq -r '.name' <<<"$item")
     title=$(jq -r '.title' <<<"$item")
     desc=$(jq -r '.description // ""' <<<"$item")
     accept=$(jq -c '.acceptance // []' <<<"$item")
     sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
+    depends_on=$(jq -c '.depends_on // []' <<<"$item")
     source_id=$(jq -r '.source_id // empty' <<<"$item")
     now="$(now_iso)"
     if [ -n "$source_id" ]; then
@@ -230,8 +347,8 @@ cmd_notion_import() {
     else
       source_id_sql="NULL"
     fi
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, source_id, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', $source_id_sql, '$now', '$now');"
+    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, source_id, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', $source_id_sql, '$now', '$now');"
     next_number=$((next_number + 1))
   done
   ok "imported notion tasks from $seed_file"
@@ -239,10 +356,12 @@ VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_es
 
 cmd_claim_spec() {
   local agent="${HARNESS_AGENT:-unknown}"
+  local agent_model=""
   local target=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --agent) agent="$2"; shift 2 ;;
+      --agent-model) agent_model="$2"; shift 2 ;;
       *) target="$1"; shift ;;
     esac
   done
@@ -293,8 +412,12 @@ WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND 
   fi
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
 
+  # See cmd_claim for the helper rationale.
+  local agent_attribution
+  agent_attribution="$(harness_agent_attribution "$agent" "" "$agent_model")"
+
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
-VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
+VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")', '$now');"
   ok "claimed for spec drafting: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 }
 
@@ -352,7 +475,7 @@ SQL
 }
 
 cmd_approve_spec() {
-  local target="" by="user"
+  local target="" by=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --by) by="$2"; shift 2 ;;
@@ -360,6 +483,24 @@ cmd_approve_spec() {
     esac
   done
   [ -n "$target" ] || { fail "usage: approve-spec <feature_number|name> [--by <name>]"; exit 1; }
+
+  # Resolution order for --by (post feature-38 audit): explicit --by always
+  # wins; else $HARNESS_HUMAN_USER env var (CI/override); else
+  # .harness.json::human_user (set by install.sh at install time); else the
+  # legacy default "user" so old installs without the config keep working.
+  # This is the ONLY command where a literal human name is the correct
+  # attribution — subagents don't run it, only the leader does, on behalf
+  # of the human who approved the spec in conversation.
+  if [ -z "$by" ]; then
+    if [ -n "${HARNESS_HUMAN_USER:-}" ]; then
+      by="$HARNESS_HUMAN_USER"
+    else
+      by="$(config '.human_user' '')"
+      if [ -z "$by" ]; then
+        by="user"
+      fi
+    fi
+  fi
 
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
@@ -396,10 +537,12 @@ RETURNING id, feature_id;" 2>&1)
 
 cmd_claim() {
   local agent="${HARNESS_AGENT:-unknown}"
+  local agent_model=""
   local target=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --agent) agent="$2"; shift 2 ;;
+      --agent-model) agent_model="$2"; shift 2 ;;
       *) target="$1"; shift ;;
     esac
   done
@@ -425,16 +568,37 @@ cmd_claim() {
   fi
 
   local check_row
-  check_row=$(sqlite3 -json "$DB_PATH" "SELECT f.id, f.name, f.sdd, f.status, s.status AS spec_status
+  check_row=$(sqlite3 -json "$DB_PATH" "SELECT f.id, f.name, f.sdd, f.status, f.depends_on, s.status AS spec_status
 FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
 WHERE $target_where;")
 
   if [ -n "$check_row" ] && [ "$check_row" != "[]" ]; then
-    local sdd_flag status_now name_now spec_status
+    local sdd_flag status_now name_now spec_status depends_on_now
     sdd_flag=$(jq -r '.[0].sdd' <<<"$check_row")
     status_now=$(jq -r '.[0].status' <<<"$check_row")
     name_now=$(jq -r '.[0].name' <<<"$check_row")
     spec_status=$(jq -r '.[0].spec_status // "none"' <<<"$check_row")
+    depends_on_now=$(jq -r '.[0].depends_on // "[]"' <<<"$check_row")
+
+    # Local (same-project) dependency gate: every name listed in depends_on
+    # must belong to a feature that is already 'done'. This is what would
+    # have caught claiming admin_institutions_cuaderno_seal before
+    # cuaderno_foundation_chapter_header_seal_breakpoint had even started —
+    # nothing previously checked a feature's own textual "Depende de X"
+    # against real feature state. Checked before the sdd checks below since
+    # it applies regardless of sdd.
+    local unmet=() dep_name dep_status
+    while IFS= read -r dep_name; do
+      [ -n "$dep_name" ] || continue
+      dep_status=$(db "SELECT status FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND name='$(sql_escape "$dep_name")';")
+      [ "$dep_status" = "done" ] || unmet+=("$dep_name (${dep_status:-not found})")
+    done < <(jq -r '.[]?' <<<"$depends_on_now" 2>/dev/null)
+    if [ "${#unmet[@]}" -gt 0 ]; then
+      local unmet_list; unmet_list=$(IFS=', '; echo "${unmet[*]}")
+      fail "feature $name_now depends on local feature(s) not yet done: $unmet_list — claim/finish those first, or fix depends_on with 'set-depends-on' if it's stale"
+      exit 1
+    fi
+
     if [ "$sdd_flag" = "1" ]; then
       if [ "$status_now" = "pending" ] || [ "$status_now" = "spec_drafting" ]; then
         fail "feature $name_now requires an approved spec first (status=$status_now) — run 'claim-spec' then 'mark-spec-ready', get human approval, then 'approve-spec', then 'claim' (see docs/specs.md)"
@@ -459,18 +623,25 @@ WHERE $target_where;")
   # stale/missing precheck.
   local sdd_gate="(f.sdd = 0 AND f.status = 'pending') OR (f.sdd = 1 AND f.status = 'spec_ready' AND f.id IN (SELECT feature_id FROM specs WHERE status = 'approved' AND deleted_at IS NULL))"
 
+  # Same posture for the local dependency gate as sdd_gate above: the real
+  # enforcement is this WHERE condition, not the friendlier precheck earlier
+  # in the function. depends_on defaults to '[]', so json_each yields no
+  # rows and the NOT EXISTS is vacuously true for features with no
+  # dependencies declared.
+  local deps_gate="NOT EXISTS (SELECT 1 FROM json_each(f.depends_on) dep WHERE dep.value NOT IN (SELECT name FROM features d2 WHERE d2.project_id = f.project_id AND d2.status = 'done' AND d2.deleted_at IS NULL))"
+
   local update_sql
   if [ -n "$target" ]; then
     if [[ "$target" =~ ^[0-9]+$ ]]; then
       update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.feature_number=$target AND ($sdd_gate))"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.feature_number=$target AND ($sdd_gate) AND ($deps_gate))"
     else
       update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.name='$(sql_escape "$target")' AND ($sdd_gate))"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.name='$(sql_escape "$target")' AND ($sdd_gate) AND ($deps_gate))"
     fi
   else
     update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND ($sdd_gate) ORDER BY f.feature_number LIMIT 1)"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND ($sdd_gate) AND ($deps_gate) ORDER BY f.feature_number LIMIT 1)"
   fi
 
   # SQLite has no RAISE()/control flow outside triggers, so "claim exactly
@@ -488,8 +659,16 @@ WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")
   fi
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
 
+  # Resolve the stored agent attribution via the shared helper: explicit
+  # --agent (backward compat, e.g. Codex's "leader -> implementer (<model>)"
+  # chain string) wins, else auto-format "Claude (<role> agent by <MODEL>)"
+  # when a model is known via --agent-model > $HARNESS_AGENT_MODEL >
+  # $ANTHROPIC_MODEL, else fall back to $HARNESS_AGENT or "unknown".
+  local agent_attribution
+  agent_attribution="$(harness_agent_attribution "$agent" "" "$agent_model")"
+
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
-VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
+VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")', '$now');"
   ok "claimed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 
   local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$updated")
@@ -504,11 +683,33 @@ current_session_id() {
 }
 
 cmd_append_log() {
-  local entry="${1:?usage: append-log <entry>}"
+  local entry="${1:?usage: append-log <entry> [--agent NAME] [--agent-model MODEL]}"
+  shift
+  local explicit_agent="" agent_model=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --agent) explicit_agent="$2"; shift 2 ;;
+      --agent-model) agent_model="$2"; shift 2 ;;
+      *) fail "unknown argument: $1"; exit 1 ;;
+    esac
+  done
   local sid; sid="$(current_session_id)"
   [ -n "$sid" ] || { fail "no open session — run 'claim' first"; exit 1; }
-  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$entry")', '$(now_iso)');"
-  ok "appended log entry to session $sid"
+
+  # Determine the role for attribution: explicit --agent wins, else fall back to
+  # the session's stored agent (set when claim/claim-spec opened the session),
+  # else "unknown". Then build the standardized attribution via the shared
+  # helper and prefix the entry so every log line carries agent + model info.
+  local role="$explicit_agent"
+  if [ -z "$role" ]; then
+    role=$(db "SELECT agent FROM session_log WHERE id=$sid;")
+  fi
+  local attribution
+  attribution="$(harness_agent_attribution "$role" "" "$agent_model")"
+  local prefixed_entry="[$attribution] $entry"
+
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$prefixed_entry")', '$(now_iso)');"
+  ok "appended log entry to session $sid (by: $attribution)"
 }
 
 cmd_set_array_field() {
@@ -521,7 +722,7 @@ cmd_set_array_field() {
 }
 
 cmd_record_review() {
-  local verdict_raw="${1:?usage: record-review <approved|changes-requested> [--by NAME] [--notes TEXT]}"; shift
+  local verdict_raw="${1:?usage: record-review <approved|changes-requested> [--by NAME] [--reviewer-model MODEL] [--notes TEXT]}"; shift
   local verdict
   case "$verdict_raw" in
     approved) verdict="approved" ;;
@@ -529,14 +730,43 @@ cmd_record_review() {
     *) fail "verdict must be 'approved' or 'changes-requested', got: $verdict_raw"; exit 1 ;;
   esac
 
-  local by="${HARNESS_AGENT:-unknown}" notes=""
+  local by_explicit="" reviewer_model="" notes=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --by) by="$2"; shift 2 ;;
+      --by) by_explicit="$2"; shift 2 ;;
+      --reviewer-model) reviewer_model="$2"; shift 2 ;;
       --notes) notes="$2"; shift 2 ;;
       *) fail "unknown argument: $1"; exit 1 ;;
     esac
   done
+
+  # --by validation: only the literal prefix "human:<name>" is accepted when a
+  # human (not a subagent) records the review. Subagent reviewers must omit
+  # --by and let the harness auto-format via $ANTHROPIC_MODEL/$HARNESS_AGENT_MODEL.
+  # Bare names like "Ricardo Aguilar" are rejected — that's the spec gate's
+  # pattern (approve-spec), not the review gate's. See the doc comment at the
+  # top of harness.sh for the full rationale.
+  if [ -n "$by_explicit" ]; then
+    case "$by_explicit" in
+      human:*)
+        by_explicit="${by_explicit#human:}"
+        # Trim leading whitespace (e.g. "human:  Name" → "Name") using pure POSIX
+        by_explicit="${by_explicit#"${by_explicit%%[![:space:]]*}"}"
+        [ -n "$by_explicit" ] || { fail "--by 'human:' requires a non-empty name after the prefix"; exit 1; }
+        ;;
+      *)
+        fail "record-review --by must be omitted (auto-attributes as 'Claude/Codex (reviewer agent by <MODEL>)' from \$ANTHROPIC_MODEL) or use the prefix 'human:<name>' when a literal human is the reviewer (e.g. --by 'human:Ricardo Aguilar'). Got: --by '$by_explicit'. If a subagent recorded this review, omit --by entirely."
+        exit 1
+        ;;
+    esac
+  fi
+
+  # Resolve --by via the shared helper: explicit --by (backward compat) wins,
+  # else auto-format "Claude (reviewer agent by <MODEL>)" when a model is known
+  # via --reviewer-model > $HARNESS_AGENT_MODEL > $ANTHROPIC_MODEL, else fall back
+  # to $HARNESS_AGENT or "unknown".
+  local by
+  by="$(harness_agent_attribution reviewer "$by_explicit" "$reviewer_model")"
 
   local sid; sid="$(current_session_id)"
   [ -n "$sid" ] || { fail "no open session — nothing to review"; exit 1; }
@@ -574,7 +804,7 @@ cmd_log_out() {
   # check), so a stale/missing precheck can't be used to bypass this.
   local review_status; review_status=$(db "SELECT review_status FROM session_log WHERE id=$sid;")
   if [ "$review_status" != "approved" ]; then
-    fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved --by <name>' first; only the implementer runs log-out, and only after that approval is recorded"
+    fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved' first (do NOT pass --by; the harness auto-attributes from \$ANTHROPIC_MODEL); only the implementer runs log-out, and only after that approval is recorded"
     exit 1
   fi
 
@@ -712,8 +942,13 @@ RETURNING id, feature_number, name, title, source_id;" 2>&1)
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
 
   # Opens a fresh session (the one from the original log-out is already
-  # closed_at-stamped) — mirrors cmd_claim's session INSERT.
-  local agent="${HARNESS_AGENT:-unknown}"
+  # closed_at-stamped) — mirrors cmd_claim's session INSERT. Use the same
+  # auto-format helper so the stored `agent` matches claim/claim-spec's format
+  # (post feature-38 audit: previously this stored the bare role/env var
+  # instead of "Claude (<role> agent by <MODEL>)").
+  local agent="${HARNESS_AGENT:-leader}"
+  local agent_model=""
+  agent="$(harness_agent_attribution "$agent" "" "$agent_model")"
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
 VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
   local sid; sid="$(current_session_id)"
@@ -869,6 +1104,7 @@ main() {
   case "$sub" in
     import-features) cmd_import_features "$@" ;;
     add-feature) cmd_add_feature "$@" ;;
+    set-depends-on) cmd_set_depends_on "$@" ;;
     link-notion) cmd_link_notion "$@" ;;
     import-sessions) cmd_import_sessions "$@" ;;
     notion-diff) cmd_notion_diff "$@" ;;

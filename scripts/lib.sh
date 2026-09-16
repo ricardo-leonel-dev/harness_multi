@@ -151,6 +151,20 @@ if ! sqlite3 "$DB_PATH" "PRAGMA table_info(session_log);" | grep -q '|review_sta
   sqlite3 "$DB_PATH" "ALTER TABLE session_log ADD COLUMN reviewed_at TEXT;"
 fi
 
+# Adds features.depends_on — a JSON array of *local* feature names (same
+# project) that must all be 'done' before this feature is claimable. This is
+# the mechanical fix for a real incident: a feature was explicitly claimed
+# and blocked before another feature in the same project that it textually
+# depended on ("Depende de X" in its own description) had even been started,
+# because nothing checked that prose. `claim` now refuses instead of
+# silently allowing out-of-order work — same "real DB constraint, not just a
+# convention" posture already used for sdd/spec approval. Plain ADD COLUMN
+# is enough (no CHECK constraint at the DB level): membership against the
+# JSON array is validated at claim time via json_each, not by SQLite itself.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|depends_on|'; then
+  sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]';"
+fi
+
 db() {
   sqlite3 "$DB_PATH" "$@"
 }
@@ -175,6 +189,60 @@ now_iso() {
 # Build a JSON array (as a SQL-escaped string literal body) from args.
 json_array() {
   jq -c -n '$ARGS.positional' --args -- "$@" 2>/dev/null || echo '[]'
+}
+
+# Build a standardized agent attribution string in the format
+# "<tool> (<role> agent by <MODEL>)" where <tool> is detected from env vars
+# ("Claude" when $ANTHROPIC_MODEL is set, "Codex" when $CODEX_MODEL is set —
+# or "Claude" as the default for callers that pass a model explicitly). Used
+# by claim/claim-spec/record-review/append-log so any session's `agent` and
+# `reviewed_by` columns + every append-log entry carry the same shape across
+# both Claude Code and Codex CLI sessions.
+#
+# Args: <role> [explicit] [model]
+#   $role     — the agent role (implementer / reviewer / spec_author / leader).
+#   $explicit — pre-formatted string that wins as-is (e.g. Codex's
+#               "leader -> implementer (GPT-5)" chain format).
+#   $model    — explicit model override for this call (3rd arg); otherwise
+#               resolved from env vars below.
+#
+# Resolution priority (model + tool prefix detected together):
+#   1. $explicit returns as-is, ignoring everything else.
+#   2. $model (3rd arg)  → prefix "Claude" (default; override via the explicit
+#      agent chain if you need "Codex" with an explicit model).
+#   3. $HARNESS_AGENT_MODEL env var → prefix "Claude" (caller set a model but
+#      not a prefix; Claude Code is the default tool in this harness).
+#   4. $ANTHROPIC_MODEL  → prefix "Claude" (set by Claude Code per-session;
+#      the Agent tool's `model` param overrides it in subagents, so a reviewer
+#      running Opus shows Opus here even if the orchestrator is MiniMax-M3).
+#   5. $CODEX_MODEL      → prefix "Codex" (set by Codex CLI in some versions;
+#      not all Codex versions export this — pass --agent-model explicitly or
+#      rely on the Codex chain-string convention if it doesn't).
+#   6. Fall back to $HARNESS_AGENT (legacy env var) or "unknown" — no prefix.
+harness_agent_attribution() {
+  local role="$1"
+  local explicit="${2:-}"
+  local prefix="Claude"
+  local model="${3:-}"
+  if [ -z "$model" ] && [ -n "${HARNESS_AGENT_MODEL:-}" ]; then
+    model="$HARNESS_AGENT_MODEL"
+  fi
+  if [ -z "$model" ] && [ -n "${ANTHROPIC_MODEL:-}" ]; then
+    model="$ANTHROPIC_MODEL"
+    prefix="Claude"
+  fi
+  if [ -z "$model" ] && [ -n "${CODEX_MODEL:-}" ]; then
+    model="$CODEX_MODEL"
+    prefix="Codex"
+  fi
+
+  if [ -n "$explicit" ]; then
+    printf '%s' "$explicit"
+  elif [ -n "$model" ]; then
+    printf '%s (%s agent by %s)' "$prefix" "$role" "$model"
+  else
+    printf '%s' "${HARNESS_AGENT:-unknown}"
+  fi
 }
 
 warn() { printf '[WARN]  %s\n' "$1" >&2; }

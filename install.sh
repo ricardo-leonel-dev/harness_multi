@@ -32,6 +32,7 @@ NOTION_TOKEN_ENV="NOTION_API_TOKEN"
 NOTION_STATUS_IN_PROGRESS="In Progress"
 NOTION_STATUS_DONE="Done"
 NOTION_STATUS_SPEC_READY="Spec Ready"
+HUMAN_USER=""
 
 usage() {
   cat <<EOF
@@ -49,6 +50,11 @@ Usage: install.sh --slug SLUG [options]
   --notion-status-done VAL         Status value to push to Notion when a feature is logged out (default: "Done")
   --notion-status-spec-ready VAL   Status value to push to Notion when an sdd=1 feature's spec is marked ready
                                     (default: "Spec Ready"; see docs/specs.md)
+  --human-user NAME            name of the human who approves specs in this project (e.g. "Ricardo Aguilar").
+                                Written to .harness.json::human_user; approve-spec uses it as the default for
+                                --by when the leader doesn't pass an explicit name. REQUIRED — install.sh
+                                prompts interactively if --human-user is not passed. Skipping the prompt is
+                                only possible in CI by passing --human-user "...".
 EOF
 }
 
@@ -66,6 +72,7 @@ while [ $# -gt 0 ]; do
     --notion-status-in-progress) NOTION_STATUS_IN_PROGRESS="$2"; shift 2 ;;
     --notion-status-done) NOTION_STATUS_DONE="$2"; shift 2 ;;
     --notion-status-spec-ready) NOTION_STATUS_SPEC_READY="$2"; shift 2 ;;
+    --human-user) HUMAN_USER="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1"; usage; exit 1 ;;
   esac
@@ -80,6 +87,27 @@ fi
 for tool in sqlite3 jq; do
   command -v "$tool" >/dev/null 2>&1 || { fail "$tool is required but not installed"; exit 1; }
 done
+
+# --human-user is mandatory. If not passed via flag, prompt interactively —
+# the install does NOT proceed with an empty name. The leader agent prompt
+# reads this from .harness.json when running approve-spec --by, so an empty
+# value would silently fall through to the legacy "user" default and pollute
+# the audit trail. Refusing to install without it is the only way to keep
+# approve-spec attribution accurate across teams. CI callers must pass
+# --human-user "<name>" explicitly OR pipe the name into stdin (e.g.
+# `echo "Name" | bash install.sh --slug ...`).
+if [ -z "$HUMAN_USER" ]; then
+  printf 'human user (the person who will approve specs in this project, e.g. "Ricardo Aguilar"): '
+  read -r HUMAN_USER
+fi
+# Trim leading/trailing whitespace (pure POSIX, no subshell)
+HUMAN_USER="${HUMAN_USER#"${HUMAN_USER%%[![:space:]]*}"}"
+HUMAN_USER="${HUMAN_USER%"${HUMAN_USER##*[![:space:]]}"}"
+if [ -z "$HUMAN_USER" ]; then
+  fail "--human-user cannot be empty (pass --human-user \"<name>\" or pipe a name into stdin)"
+  exit 1
+fi
+ok "human user: $HUMAN_USER"
 
 gen_uuid() {
   if command -v uuidgen >/dev/null 2>&1; then
@@ -182,12 +210,14 @@ jq -n \
   --arg notion_status_in_progress "$NOTION_STATUS_IN_PROGRESS" \
   --arg notion_status_done "$NOTION_STATUS_DONE" \
   --arg notion_status_spec_ready "$NOTION_STATUS_SPEC_READY" \
+  --arg human_user "$HUMAN_USER" \
   '{harness_version: $version, db_path: "harness.db", snapshot_path: "state",
     project_slug: $slug, verify_command: $verify,
     supabase_url_env: $url_env, supabase_key_env: $key_env, supabase_rest_path: $rest_path,
     notion_database_id: $notion_db, notion_token_env: $notion_token_env,
     notion_status_in_progress: $notion_status_in_progress, notion_status_done: $notion_status_done,
-    notion_status_spec_ready: $notion_status_spec_ready}' \
+    notion_status_spec_ready: $notion_status_spec_ready,
+    human_user: $human_user}' \
   > "$TARGET_DIR/.harness.json"
 ok "wrote .harness.json"
 

@@ -49,12 +49,17 @@ You are a strict reviewer. Your only function is to **approve or reject** change
    action, not something to only describe in your response. Do this before composing anything else.
 8. **Record your verdict mechanically**, so it isn't just prose another agent could talk its way past:
    ```
-   scripts/harness.sh record-review approved --by "<your agent string>"
+   scripts/harness.sh record-review approved
    ```
    or
    ```
-   scripts/harness.sh record-review changes-requested --by "<your agent string>" --notes "<one-line summary>"
+   scripts/harness.sh record-review changes-requested --notes "<one-line summary>"
    ```
+   **Do NOT pass `--by` to record-review** — the harness auto-attributes the verdict to your agent string
+   from `$ANTHROPIC_MODEL`/$HARNESS_AGENT_MODEL. The `--by human:<name>` prefix is reserved for the rare
+   case where a literal human (not a subagent) records a review; bare names like `--by "Ricardo Aguilar"`
+   are rejected as a footgun, because that's the spec-approval gate's pattern (approve-spec), not the
+   review gate's. See `scripts/harness.sh` line ~75 for the full policy.
    This is what `log-out` actually checks before it will let the session close — writing `progress/review.md`
    documents the verdict for humans, but `record-review` is the DB-enforced gate. Run this yourself; never
    describe the verdict to the leader and expect it (or the implementer) to record it on your behalf.

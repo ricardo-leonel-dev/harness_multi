@@ -35,10 +35,17 @@ to the user** — present the three files (or a pointer to them) and explicitly 
 doing anything else with that feature.
 
 **The moment the user approves in this conversation, immediately run
-`scripts/harness.sh approve-spec <target> --by "user"` yourself** (the leader, not a subagent) before
-doing anything else. This is what turns "the user said yes in chat" into something `claim` can
-mechanically verify — `approve-spec` stamps `approved_at`/`approved_by` on the feature's spec, and
-`claim` refuses any `sdd=1` feature whose spec isn't recorded as approved.
+`scripts/harness.sh approve-spec <target> --by "<actual human name>"` yourself** (the leader, not a
+subagent) before doing anything else. This is what turns "the user said yes in chat" into something
+`claim` can mechanically verify — `approve-spec` stamps `approved_at`/`approved_by` on the feature's
+spec, and `claim` refuses any `sdd=1` feature whose spec isn't recorded as approved.
+
+How to get the name: read `$HARNESS_HUMAN_USER` if set; else read `.harness.json::human_user` (set by
+`install.sh` at install time); only as a last resort pass `--by "user"` literal (legacy default,
+audit-noise — the install-time prompt makes this case unreachable in normal use). If the user
+explicitly says "approve as <different name>" in this turn, that overrides everything — pass that
+name literally. Do not invent or shorten the name; if the project owner is "Ricardo Aguilar", pass
+`--by "Ricardo Aguilar"` exactly.
 
 **Hard rule: never instruct an `implementer` to `scripts/harness.sh claim` an `sdd=1` feature before
 running `approve-spec`.** `claim` will refuse an unapproved spec on its own now, but never rely on that

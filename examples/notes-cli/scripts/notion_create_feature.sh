@@ -21,7 +21,15 @@
 #
 # Usage:
 #   notion_create_feature.sh (--project <slug> | --project-path <dir>) --title <text> \
-#                             --description <text> [--acceptance <text>] [--status <value, default "Backlog">]
+#                             --description <text> [--acceptance <text>] [--status <value, default "Backlog">] [--sdd]
+#
+# --sdd checks the database's optional "SDD" checkbox property (the same one
+# notion_check.sh reads back on import) on the created page. Pass it whenever the local
+# feature this card mirrors was itself created with `add-feature --sdd` — otherwise the
+# card silently reads as a non-spec-driven feature to anyone looking at the Notion board,
+# even though harness.db enforces the spec gate correctly regardless of what Notion shows.
+# A database without an "SDD" property just ignores the flag (same graceful-skip as the
+# optional Description/Acceptance Criteria properties below).
 #
 # --project-path <dir> reads <dir>/.harness.json's project_slug directly instead of
 # trusting a hand-typed/guessed slug — use this whenever the target project's directory
@@ -50,6 +58,7 @@ TITLE=""
 DESCRIPTION=""
 ACCEPTANCE=""
 STATUS_VALUE="Backlog"
+SDD_FLAG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -59,6 +68,7 @@ while [ $# -gt 0 ]; do
     --description) DESCRIPTION="$2"; shift 2 ;;
     --acceptance) ACCEPTANCE="$2"; shift 2 ;;
     --status) STATUS_VALUE="$2"; shift 2 ;;
+    --sdd) SDD_FLAG=1; shift ;;
     *) echo "[FAIL] unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -136,6 +146,10 @@ status_prop_id=$(jq -r '.id // empty' <<<"$status_prop")
 status_prop_type=$(jq -r '.type // empty' <<<"$status_prop")
 desc_prop_id=$(jq -r '.id // empty' <<<"$(prop description)")
 accept_prop_id=$(jq -r '.id // empty' <<<"$(prop acceptancecriteria)")
+sdd_prop=$(prop sdd)
+sdd_prop_id=$(jq -r '.id // empty' <<<"$sdd_prop")
+sdd_prop_type=$(jq -r '.type // empty' <<<"$sdd_prop")
+if [ -n "$SDD_FLAG" ]; then sdd_flag_json=true; else sdd_flag_json=false; fi
 
 if [ -z "$name_prop_id" ] || [ -z "$project_prop_id" ] || [ -z "$status_prop_id" ]; then
   echo "[FAIL] database $DATABASE_ID is missing a Name/Project/Status property" >&2
@@ -157,6 +171,7 @@ properties=$(jq -n \
   --arg status_id "$status_prop_id" --arg status_type "$status_prop_type" --arg status "$STATUS_VALUE" \
   --arg desc_id "$desc_prop_id" --arg description "$DESCRIPTION" \
   --arg accept_id "$accept_prop_id" --arg acceptance "$ACCEPTANCE" \
+  --arg sdd_id "$sdd_prop_id" --arg sdd_type "$sdd_prop_type" --argjson sdd_flag "$sdd_flag_json" \
   '{
     ($name_id): {title: [{text: {content: $title}}]},
     ($project_id): {select: {name: $project}},
@@ -164,6 +179,7 @@ properties=$(jq -n \
   }
   + (if $desc_id != "" then {($desc_id): {rich_text: [{text: {content: $description}}]}} else {} end)
   + (if $accept_id != "" and $acceptance != "" then {($accept_id): {rich_text: [{text: {content: $acceptance}}]}} else {} end)
+  + (if $sdd_id != "" and $sdd_type == "checkbox" and $sdd_flag then {($sdd_id): {checkbox: true}} else {} end)
   ')
 
 payload=$(jq -n --arg db "$DATABASE_ID" --argjson props "$properties" \

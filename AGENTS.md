@@ -87,11 +87,17 @@ autonomously. **This is scoped to the feature being created right now** — it d
 
 On confirmation:
 ```
-scripts/harness.sh add-feature --name <slug> --title "<title>" --description "<description>" --acceptance "<item...>"
+scripts/harness.sh add-feature --name <slug> --title "<title>" --description "<description>" --acceptance "<item...>" [--sdd]
 scripts/harness.sh notion-create-feature --project-path . --title "<title>" \
-  --description "<description>" --acceptance "<acceptance>" --status Ready
+  --description "<description>" --acceptance "<acceptance>" --status Ready [--sdd]
 scripts/harness.sh link-notion <slug> <page_id-from-the-previous-command's-output>
 ```
+**Pass `--sdd` to both commands together, or to neither.** `add-feature --sdd` is what actually gates `claim`
+locally (the DB-enforced spec requirement) — `notion-create-feature --sdd` only checks the database's optional
+"SDD" checkbox property so the Notion card visually matches; it has no bearing on enforcement. Passing it to
+`add-feature` but forgetting it on `notion-create-feature` leaves a spec-driven feature's card looking like a
+non-SDD one on the board, even though `claim` still correctly refuses it without an approved spec.
+
 `link-notion` stamps the feature's `source_id`, so the existing automatic push-back (above) starts applying to it
 immediately: the very next `claim` on this feature pushes `Status` to `notion_status_in_progress`, and `log-out`
 later pushes `notion_status_done` — no extra code, same mechanism as any Notion-sourced feature. If the user declines
@@ -138,6 +144,10 @@ return only the reference, not the content — never the full content in chat.
 
 - **Only one feature at a time.** `scripts/harness.sh claim` will refuse a second concurrent claim — this is a real
   database constraint, not just a convention.
+- **Respect local feature dependencies.** If a feature's `depends_on` names other features in this same project,
+  `claim` mechanically refuses it until every one of them is `done` — see "Local Feature Dependencies" in §4. A
+  feature's free-text description saying "depends on X" is not enough on its own; record it with `--depends-on` /
+  `set-depends-on` so `claim` actually enforces it instead of relying on whoever picks the next task to notice.
 - **Don't declare a task `done` without green tests.** Run `./init.sh` and make sure the verification command passes.
 - **Document what you do** via `scripts/harness.sh append-log "<note>"` while you work, not at the end.
 - **Clean up the repository** before closing the session (see [5](#5-log-out-lifecycle)).
@@ -157,6 +167,25 @@ return only the reference, not the content — never the full content in chat.
 `claim` atomically marks the feature `in_progress` and opens a session — there's no separate "save" step, and no way
 to end up with two features in progress at once.
 
+### Local Feature Dependencies
+
+A feature can require one or more *other features in this same project* to be `done` first — set this with
+`add-feature ... --depends-on <name...>` at creation time, or `scripts/harness.sh set-depends-on <target>
+<name...>` afterwards (each name must already exist as a feature in this project; calling it with no names clears
+the list). `import-features`/`notion-import` also accept an optional `"depends_on": [name...]` field per item.
+
+`claim` checks this mechanically: if any named dependency isn't `done` yet, claim refuses with a message naming
+which one(s) are still outstanding — for an explicit target and for the no-target "lowest pending" default alike.
+This exists because a feature's own `description` saying "depends on X" is just prose nothing reads — before this
+gate, nothing stopped claiming (and even blocking) a feature whose own prerequisite hadn't been started, which
+could leave the *only* global open session (§3) stuck on a feature that could never legitimately finish. Prefer
+`depends_on` over writing the dependency only in prose whenever a feature genuinely can't be implemented (not just
+"is nicer after") without another one in this project landing first.
+
+This is separate from the cross-project `block`/`BLOCKED_ON`/`check-blockers` mechanism (§8) — that one is for
+dependencies on a *different* project's harness; this one is for dependencies between features inside this same
+`harness.db`.
+
 ## 5. Log Out (Lifecycle)
 
 Before finishing:
@@ -169,11 +198,46 @@ Before finishing:
    ```
    This closes the session and marks the feature `done` in one step — there's no manual "move current.md into
    history.md" step; the closed session *is* the history entry. `log-out` mechanically refuses to run unless
-   a `reviewer` subagent has already recorded `scripts/harness.sh record-review approved --by <name>` on this
+   a `reviewer` subagent has already recorded `scripts/harness.sh record-review approved` on this
    session — a leader instructing an implementer to log out before/instead of review now hits a hard failure
    instead of silently shipping unreviewed code (see `.claude/agents/reviewer.md` step 8 and `leader.md`'s
    hard rule against this).
 3. Do not leave temporary files, debug `print()` commands, or TODOs without context.
+
+### Reconciling Work Implemented Outside This Harness
+
+Sometimes a feature's code already exists — shipped, merged, even in production — without ever going through
+`claim`/`record-review`/`log-out` here: a different session, a different model, or a human wrote it directly and
+merged it on its own. The trigger is simple: you're told (or discover) that a feature is effectively finished, but
+`scripts/harness.sh status` shows no open session for it. `log-out`'s review gate (above) never ran, because there
+was no session for it to run *on* — a feature implemented this way has had **zero** spec-conformance checking, not
+"less than usual."
+
+Before marking it `done`, do the check that gate would have done:
+
+1. **Read the actual shipped code** — the real diff, not a self-report about it (a PR description, a commit
+   message, another session's summary). Self-reports describe intent, not necessarily what happened.
+2. **Diff it against the ground truth**: `specs/<name>/{requirements.md,design.md}` for an `sdd=1` feature, or the
+   feature's own `description`/`acceptance` for `sdd=0`. Check the actual shape of the code (input names, whether
+   something is optional vs. required, where a change is scoped to) against what was specified — not just whether
+   it "looks like it does the right thing."
+3. **Document every deviation you find**, even ones that seem harmless, in the session log (step 4 below) — a
+   deviation that looks cosmetic to you may matter to whoever approved the original spec.
+4. **If a deviation would break a dependent feature** (one that lists this feature in its `depends_on`, §4), don't
+   just note it and move on: propose a follow-up feature to the user covering the fix (the ad-hoc-task flow in §0
+   applies — propose before creating, use Notion if configured), and once created, add it as an *additional*
+   `depends_on` entry (`set-depends-on`, keeping the existing entries) on every feature that needs the fix first.
+   This is what actually protects those dependents — noting the gap in a log nobody reads before claiming does not.
+5. Only then reconcile the bookkeeping: `claim` the feature (this opens the session `log-out` needs), `append-log`
+   with what you verified and every deviation found (reference the actual commits/PR), `record-review approved`
+   attributing it to whoever is accountable for accepting the shipped state (the user, if they're the one deciding
+   to accept deviations rather than block on a fix) — using `--by 'human:<name>'` if the reviewer is a literal
+   human, or omitting `--by` to let the harness auto-attribute (the canonical case), then `log-out`
+   referencing the real commits/PR — not files from a session that never touched this feature.
+
+This is not a substitute for the normal implementer → reviewer flow — it exists only because that flow didn't run.
+Route future work on this same feature through `claim`/`record-review`/`log-out` normally; this section is for the
+one-time reconciliation, not an alternate lifecycle.
 
 ## 6. If you get stuck
 
@@ -253,7 +317,12 @@ reachable from `in_progress`, unchanged). The transitions are driven by `scripts
    disk; moves the feature to `spec_ready`.
 3. **Human approval** — the user reviews the 3 files and says so, in this conversation. The orchestrating leader
    then runs `approve-spec <target> --by <name>` — this is the mechanical, DB-recorded gate; `claim` refuses an
-   `sdd=1` feature whose spec isn't recorded as approved, regardless of `status`.
+   `sdd=1` feature whose spec isn't recorded as approved, regardless of `status`. The leader gets `<name>` from
+   `$HARNESS_HUMAN_USER` if set, else `.harness.json::human_user` (scaffolded by `install.sh` at install time);
+   an explicit "approve as <different name>" from the user in the same turn overrides everything. This is the
+   ONLY command that stores a literal human name in the audit trail — see `scripts/harness.sh`'s `approve-spec`
+   doc comment for the full resolution order, and `record-review` for the contrasting rule (rejects bare human
+   names because the reviewer is a subagent, not the human).
 4. `claim` — now works for the feature exactly like any other, launching `implementer` then `reviewer` as usual.
 
 Spec content lives as git-tracked files, not database rows — `specs/<name>/` is authored the same way `src/`/
