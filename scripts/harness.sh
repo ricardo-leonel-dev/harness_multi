@@ -817,7 +817,10 @@ cmd_log_out() {
     exit 1
   fi
 
-  local changes_json; changes_json=$(json_array "${changes[@]:-}")
+  # "${arr[@]+"${arr[@]}"}" rather than "${arr[@]:-}": same reason as in
+  # cmd_add_feature — ':-' turns an empty array into [""], bare "${arr[@]}"
+  # trips `set -u` on bash 3.2.
+  local changes_json; changes_json=$(json_array "${changes[@]+"${changes[@]}"}")
   local now; now="$(now_iso)"
 
   sqlite3 "$DB_PATH" <<SQL
