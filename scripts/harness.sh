@@ -186,7 +186,7 @@ cmd_add_feature() {
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
 
   local dep
-  for dep in "${depends_items[@]}"; do
+  for dep in "${depends_items[@]+"${depends_items[@]}"}"; do
     if [ "$dep" = "$name" ]; then
       fail "feature $name cannot depend on itself"
       exit 1
@@ -198,16 +198,19 @@ cmd_add_feature() {
 
   local next_number
   next_number=$(db "SELECT COALESCE(MAX(feature_number), 0) + 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL;")
-  # NOTE: "${arr[@]}" (no ':-' fallback) is required here — under `set -u`,
-  # an empty array still expands to zero words this way, but
-  # "${arr[@]:-}" on an EMPTY array expands to one empty-string word, which
-  # made json_array emit [""] instead of [] (this pre-existing shape bit
-  # accept_items too, fixed alongside depends_items here). A stray [""] in
-  # depends_on isn't just cosmetic: cmd_claim's deps_gate treats "" as an
+  # NOTE: "${arr[@]:-}" on an EMPTY array expands to one empty-string word,
+  # which made json_array emit [""] instead of [] (this pre-existing shape
+  # bit accept_items too, fixed alongside depends_items here). A stray [""]
+  # in depends_on isn't just cosmetic: cmd_claim's deps_gate treats "" as an
   # unmet dependency name, so it would refuse to claim a feature with no
-  # declared dependencies at all.
-  local accept; accept="$(json_array "${accept_items[@]}")"
-  local depends_on; depends_on="$(json_array "${depends_items[@]}")"
+  # declared dependencies at all. Bare "${arr[@]}" avoids that, but on
+  # bash 3.2 (macOS's stock /bin/bash) an EMPTY array with no ':-' fallback
+  # trips `set -u` itself ("unbound variable") — bash 3.2 predates the 4.4
+  # fix that made this safe. "${arr[@]+"${arr[@]}"}" is the idiom that is
+  # simultaneously bash-3.2-safe (empty array + `set -u`) and shape-safe
+  # (never produces a stray [""]).
+  local accept; accept="$(json_array "${accept_items[@]+"${accept_items[@]}"}")"
+  local depends_on; depends_on="$(json_array "${depends_items[@]+"${depends_items[@]}"}")"
   local now; now="$(now_iso)"
 
   db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, created_at, updated_at)
