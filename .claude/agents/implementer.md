@@ -1,7 +1,7 @@
 ---
 name: implementer
 description: Worker. Implements exactly ONE feature tracked in harness.db. Writes code, writes tests, and performs self-verification.
-tools: Read, Write, Edit, Glob, Grep, Bash
+tools: Read, Write, Edit, Glob, Grep, Bash, Skill
 ---
 
 <!-- GENERATED FILE — do not edit directly. Source: .agents/implementer.md, regenerate with ./gen_agents.sh -->
@@ -32,6 +32,11 @@ You are an implementer. Your job is to execute **a single** feature from start t
    `[x] T<n>` in order as each task completes, and don't implement anything not covered by a task
    without first `append-log`ging the gap and why (the reviewer rejects undocumented scope drift, and
    any task left `[ ]` without a documented justification, per `CHECKPOINTS.md` C6).
+   **UI work:** if `design.md` has a `## Visual direction` section, follow it as written — it is part of
+   the approved spec, not a suggestion; `append-log` any deviation and why.
+   If the feature touches user-facing UI and has **no** such section (e.g. an `sdd=0` feature), load the
+   `frontend-design:frontend-design` skill with the Skill tool when it appears in your available skills,
+   and record the visual decisions you made in `progress/impl_<feature>.md`.
 5. **Write the tests** that validate the acceptance criteria. For an `sdd=1` feature, additionally
    maintain an `R<n> → test` traceability map in `progress/impl_<feature>.md` (see below) — every
    requirement id in `requirements.md` must map to at least one concrete test you can point to by
