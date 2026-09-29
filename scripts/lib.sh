@@ -279,12 +279,32 @@ json_array() {
 #   5. $CODEX_MODEL      → prefix "Codex" (set by Codex CLI in some versions;
 #      not all Codex versions export this — pass --agent-model explicitly or
 #      rely on the Codex chain-string convention if it doesn't).
-#   6. Fall back to $HARNESS_AGENT (legacy env var) or "unknown" — no prefix.
+#   6. No model known → the input as-is if it was already formatted, else the
+#      role itself, else $HARNESS_AGENT (legacy env var),
+#      else "unknown" — no prefix.
+#
+# $role is normalized first, because callers pass whatever --agent or the
+# session's stored agent holds, not always a bare role:
+#   - an already-formatted attribution ("Claude (leader agent by X)") is
+#     unwrapped to its role, so re-formatting it doesn't nest it
+#     ("Claude (Claude (leader agent by X) agent by X)" — what append-log used
+#     to write, since it passes the session's stored agent as the role);
+#   - anything else that isn't a bare role token (e.g. Codex's
+#     "leader -> implementer (GPT-5)" chain passed via --agent) is treated as
+#     $explicit and returned as-is, as claim/claim-spec's docs promise.
 harness_agent_attribution() {
   local role="$1"
   local explicit="${2:-}"
   local prefix="Claude"
   local model="${3:-}"
+  local formatted_re='^(Claude|Codex) \((.*) agent by .*\)$' formatted=""
+  while [[ "$role" =~ $formatted_re ]]; do
+    formatted="$role"
+    role="${BASH_REMATCH[2]}"
+  done
+  if [ -z "$explicit" ] && [ -n "$role" ] && ! [[ "$role" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    explicit="$role"
+  fi
   if [ -z "$model" ] && [ -n "${HARNESS_AGENT_MODEL:-}" ]; then
     model="$HARNESS_AGENT_MODEL"
   fi
@@ -302,7 +322,9 @@ harness_agent_attribution() {
   elif [ -n "$model" ]; then
     printf '%s (%s agent by %s)' "$prefix" "$role" "$model"
   else
-    printf '%s' "${HARNESS_AGENT:-unknown}"
+    # With no model to re-format with, an already-formatted input is kept
+    # (innermost level), so its original model isn't lost.
+    printf '%s' "${formatted:-${role:-${HARNESS_AGENT:-unknown}}}"
   fi
 }
 
