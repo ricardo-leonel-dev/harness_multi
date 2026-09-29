@@ -13,14 +13,16 @@ mkdir -p "$SNAPSHOT_PATH/features" "$SNAPSHOT_PATH/sessions"
 
 pid=$(db "SELECT id FROM projects WHERE slug='$(sql_escape "$PROJECT_SLUG")' AND deleted_at IS NULL LIMIT 1;")
 
-sqlite3 -json "$DB_PATH" "SELECT feature_number, name, title, description, acceptance, status,
-  created_at, updated_at FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL
+sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, acceptance, status,
+  superseded_by, created_at, updated_at FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL
   ORDER BY feature_number;" | jq -c '.[]' | while IFS= read -r row; do
   number=$(jq -r '.feature_number' <<<"$row")
   name=$(jq -r '.name' <<<"$row")
   title=$(jq -r '.title' <<<"$row")
   desc=$(jq -r '.description // ""' <<<"$row")
   status=$(jq -r '.status' <<<"$row")
+  superseded_by=$(jq -r '.superseded_by // ""' <<<"$row")
+  fid=$(jq -r '.id' <<<"$row")
   created=$(jq -r '.created_at' <<<"$row")
   updated=$(jq -r '.updated_at' <<<"$row")
   padded=$(printf '%03d' "$number")
@@ -32,6 +34,7 @@ sqlite3 -json "$DB_PATH" "SELECT feature_number, name, title, description, accep
     echo "name: $name"
     echo "title: $title"
     echo "status: $status"
+    [ -n "$superseded_by" ] && echo "superseded_by: $superseded_by"
     echo "created_at: $created"
     echo "updated_at: $updated"
     echo "---"
@@ -43,6 +46,13 @@ sqlite3 -json "$DB_PATH" "SELECT feature_number, name, title, description, accep
     jq -r '(.acceptance | fromjson // [])[]' <<<"$row" | while IFS= read -r item; do
       echo "- [ ] $item"
     done
+    notes=$(sqlite3 -json "$DB_PATH" "SELECT entry, created_at FROM feature_notes
+      WHERE feature_id=$fid AND deleted_at IS NULL ORDER BY created_at, id;")
+    if [ -n "$notes" ] && [ "$notes" != "[]" ]; then
+      echo
+      echo "## Notes"
+      jq -r '.[] | "- \(.created_at) \(.entry)"' <<<"$notes"
+    fi
   } > "$file"
 done
 

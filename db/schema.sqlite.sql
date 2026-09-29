@@ -28,8 +28,11 @@ CREATE TABLE features (
   acceptance TEXT NOT NULL DEFAULT '[]',      -- JSON array; SQLite has no native array type
   sdd INTEGER NOT NULL DEFAULT 0,             -- opt-in: does this feature require an approved spec first?
   status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'spec_drafting', 'spec_ready', 'in_progress', 'done', 'blocked')),
+    CHECK (status IN ('pending', 'spec_drafting', 'spec_ready', 'in_progress', 'done', 'blocked', 'superseded')),
   source_id TEXT,                             -- external origin id (e.g. a Notion page id), for idempotent intake
+  depends_on TEXT NOT NULL DEFAULT '[]',      -- JSON array of local feature names that must be 'done' first
+  superseded_by TEXT,                         -- name of the feature that absorbed this one (status='superseded')
+  superseded_from TEXT,                       -- status before supersede, restored by unsupersede
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   deleted_at TEXT
@@ -75,6 +78,19 @@ CREATE TABLE session_log_entries (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   deleted_at TEXT
 );
+
+-- Feature-level notes that don't belong to any session (append-log --feature,
+-- supersede/unsupersede audit entries) — e.g. a note written after the
+-- feature's last session closed, or on a feature that never had one.
+CREATE TABLE feature_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+  entry TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+
+CREATE INDEX idx_feature_notes_feature ON feature_notes(feature_id, created_at);
 
 -- Metadata about a feature's spec-driven-development artifacts. Content
 -- (requirements.md/design.md/tasks.md) lives as git-tracked files on disk at

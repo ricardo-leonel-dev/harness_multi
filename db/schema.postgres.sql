@@ -19,7 +19,7 @@ create table projects (
 
 create unique index projects_slug_active on projects (slug) where deleted_at is null;
 
-create type feature_status as enum ('pending', 'spec_drafting', 'spec_ready', 'in_progress', 'done', 'blocked');
+create type feature_status as enum ('pending', 'spec_drafting', 'spec_ready', 'in_progress', 'done', 'blocked', 'superseded');
 
 create table features (
   id bigserial primary key,

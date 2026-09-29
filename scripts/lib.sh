@@ -165,6 +165,67 @@ if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|depends_on|';
   sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]';"
 fi
 
+# Adds the 'superseded' feature status (+ superseded_by/superseded_from) and
+# the feature_notes table. 'superseded' closes a feature that another one
+# absorbed without soft-deleting it: delete-feature records no reason, has
+# no inverse, and never reaches Notion. feature_notes gives append-log
+# --feature a place to write when no session is open. Same 12-step rebuild
+# as the sdd migration above, since the status CHECK has to change.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|superseded_by|'; then
+  sqlite3 "$DB_PATH" <<'SQL'
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+
+CREATE TABLE features_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  feature_number INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  acceptance TEXT NOT NULL DEFAULT '[]',
+  sdd INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'spec_drafting', 'spec_ready', 'in_progress', 'done', 'blocked', 'superseded')),
+  source_id TEXT,
+  depends_on TEXT NOT NULL DEFAULT '[]',
+  superseded_by TEXT,
+  superseded_from TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+
+INSERT INTO features_new (id, project_id, feature_number, name, title, description, acceptance, sdd, status, source_id, depends_on, created_at, updated_at, deleted_at)
+  SELECT id, project_id, feature_number, name, title, description, acceptance, sdd, status, source_id, depends_on, created_at, updated_at, deleted_at
+  FROM features;
+
+DROP TABLE features;
+ALTER TABLE features_new RENAME TO features;
+
+CREATE UNIQUE INDEX features_number_active ON features(project_id, feature_number) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX features_name_active ON features(project_id, name) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX features_source_id_active ON features(project_id, source_id)
+  WHERE deleted_at IS NULL AND source_id IS NOT NULL;
+CREATE UNIQUE INDEX one_in_progress_per_project ON features(project_id)
+  WHERE status = 'in_progress' AND deleted_at IS NULL;
+CREATE INDEX idx_features_project_status ON features(project_id, status);
+
+CREATE TABLE IF NOT EXISTS feature_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+  entry TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_feature_notes_feature ON feature_notes(feature_id, created_at);
+
+COMMIT;
+PRAGMA foreign_key_check;
+PRAGMA foreign_keys=ON;
+SQL
+fi
+
 db() {
   sqlite3 "$DB_PATH" "$@"
 }
