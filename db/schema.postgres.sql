@@ -58,12 +58,13 @@ create table session_log (
   closure text,
   started_at timestamptz not null default now(),
   closed_at timestamptz,
+  paused_at timestamptz,      -- set while the session's feature is blocked; see schema.sqlite.sql
   deleted_at timestamptz
 );
 
 create unique index session_log_local_id on session_log (project_id, local_id);
 create unique index one_open_session_per_project on session_log (project_id)
-  where closed_at is null and deleted_at is null;
+  where closed_at is null and deleted_at is null and paused_at is null;
 
 create table session_log_entries (
   id bigserial primary key,

@@ -57,7 +57,7 @@ sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, a
 done
 
 sqlite3 -json "$DB_PATH" "SELECT sl.id, sl.agent, sl.plan, sl.next_step, sl.changes, sl.verification,
-  sl.closure, sl.started_at, sl.closed_at, f.name AS feature_name
+  sl.closure, sl.started_at, sl.closed_at, sl.paused_at, f.name AS feature_name
   FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id
   WHERE sl.project_id='$(sql_escape "$pid")' AND sl.deleted_at IS NULL
   ORDER BY sl.started_at;" | jq -c '.[]' | while IFS= read -r row; do
@@ -66,6 +66,7 @@ sqlite3 -json "$DB_PATH" "SELECT sl.id, sl.agent, sl.plan, sl.next_step, sl.chan
   feature_name=$(jq -r '.feature_name // "bootstrap"' <<<"$row")
   started=$(jq -r '.started_at' <<<"$row")
   closed=$(jq -r '.closed_at // ""' <<<"$row")
+  paused=$(jq -r '.paused_at // ""' <<<"$row")
   date_part=$(cut -c1-10 <<<"$started")
   file="$SNAPSHOT_PATH/sessions/${date_part}-${id}-${feature_name}.md"
 
@@ -76,6 +77,7 @@ sqlite3 -json "$DB_PATH" "SELECT sl.id, sl.agent, sl.plan, sl.next_step, sl.chan
     echo "agent: $agent"
     echo "started_at: $started"
     if [ -n "$closed" ]; then echo "closed_at: $closed"; else echo "closed_at:"; fi
+    [ -z "$paused" ] || echo "paused_at: $paused"
     echo "---"
     echo
     echo "## Plan"
