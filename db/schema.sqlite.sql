@@ -63,13 +63,16 @@ CREATE TABLE session_log (
   reviewed_at TEXT,
   started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   closed_at TEXT,                -- NULL = "current session"; set = a "history" entry
+  paused_at TEXT,                -- set by `block`, cleared by `unblock`: the session stays open
+                                  -- (closed_at NULL) but stops occupying the project's slot
   deleted_at TEXT
 );
 
 -- One row IS both current.md and history.md: filter by closed_at instead of
--- moving/erasing files between two locations.
+-- moving/erasing files between two locations. Paused sessions (their feature
+-- is blocked) are excluded so a block doesn't stall the whole project.
 CREATE UNIQUE INDEX one_open_session_per_project ON session_log(project_id)
-  WHERE closed_at IS NULL AND deleted_at IS NULL;
+  WHERE closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;
 
 CREATE TABLE session_log_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

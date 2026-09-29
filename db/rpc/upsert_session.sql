@@ -15,7 +15,8 @@ create or replace function upsert_session(
   p_closure text default null,
   p_started_at timestamptz default now(),
   p_closed_at timestamptz default null,
-  p_deleted_at timestamptz default null
+  p_deleted_at timestamptz default null,
+  p_paused_at timestamptz default null
 ) returns session_log
 language plpgsql as $$
 declare
@@ -34,9 +35,9 @@ begin
   end if;
 
   insert into session_log (project_id, local_id, feature_id, agent, plan, next_step,
-                            changes, verification, closure, started_at, closed_at, deleted_at)
+                            changes, verification, closure, started_at, closed_at, paused_at, deleted_at)
     values (v_project_id, p_local_id, v_feature_id, p_agent, p_plan, p_next_step,
-            p_changes, p_verification, p_closure, p_started_at, p_closed_at, p_deleted_at)
+            p_changes, p_verification, p_closure, p_started_at, p_closed_at, p_paused_at, p_deleted_at)
   on conflict (project_id, local_id)
     do update set
       feature_id = excluded.feature_id,
@@ -47,6 +48,7 @@ begin
       verification = excluded.verification,
       closure = excluded.closure,
       closed_at = excluded.closed_at,
+      paused_at = excluded.paused_at,
       deleted_at = excluded.deleted_at
   returning * into result;
   return result;

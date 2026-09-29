@@ -293,9 +293,9 @@ routed through Notion, the same shared task board `notion-check`/`notion-import`
    scripts/harness.sh block <current-feature> "waiting on <target-project-slug>: BLOCKED_ON: path=<absolute path \
      to the target project's directory> feature=<predicted_name> notion_page=<url>"
    ```
-   This sets the feature's status to `blocked` (a real status the schema has always supported, just newly wired
-   up) and leaves the session open — same "leave it for the next session" idiom as §6, just with `blocked` instead
-   of `in_progress`.
+   This sets the feature's status to `blocked` and **pauses** its session: the session stays open (log, plan and
+   any review verdict intact) but no longer holds the project's single session slot, so other pending features
+   can be claimed while this one waits. `unblock` later resumes that same session.
 4. Report to the user what was created and that the feature is now blocked, then end the session.
 5. The user flips the Notion card to `Ready` whenever they want work to start there — **nothing changes** on the
    target project's side: its own `notion-check`/`notion-import`/`claim`/`log-out` flow (§0's "Notion Task Intake"
@@ -304,8 +304,16 @@ routed through Notion, the same shared task board `notion-check`/`notion-import`
 6. **Resuming happens on your next session in *this* project** (Startup Protocol step 5): `check-blockers` reads
    every `blocked` feature's `BLOCKED_ON` note and queries the target project's `harness.db` *directly* (not
    Notion — faster, and doesn't depend on that project's own Notion push-back having succeeded). If the dependency
-   is `done`, run `scripts/harness.sh unblock <feature>` and continue it; if not, report its current status and
-   work on something else pending instead.
+   is `done`, run `scripts/harness.sh unblock <feature>` and continue it (it refuses while another session is
+   active — finish or block that one first); if not, report its current status and work on something else pending
+   instead.
+
+**A feature that lost its session.** If a `blocked` or `in_progress` feature has no open session (e.g. it was
+removed with `cancel-session --force`), `unblock` refuses — it only resumes sessions, it never opens one. Run
+`scripts/harness.sh claim <feature>` with the feature named explicitly: it opens a new session, sets the feature
+to `in_progress` and logs `RESUMED: previous session <id> was cancelled`. Review verdicts don't carry over, so the
+`reviewer` must run `record-review` again on the new session before `log-out`. Never use `cancel-session --force`
+just to free the slot for other work — `block` does that now without discarding anything.
 
 There is deliberately no background polling or scheduled agent here — resuming is tied to opening a session in
 this project again, consistent with how every other best-effort integration in this harness works (session-based,

@@ -226,6 +226,28 @@ PRAGMA foreign_keys=ON;
 SQL
 fi
 
+# Adds session_log.paused_at. `block` used to leave its session open, so a
+# blocked feature held the project's only session slot and the sole way to
+# start other work was `cancel-session --force` on real, even already-approved
+# work. A paused session keeps closed_at NULL (it is not history) but drops
+# out of one_open_session_per_project; `unblock` clears paused_at and resumes
+# it. Open sessions of features that are already blocked are paused here too,
+# so existing installs free their slot on the first run after upgrading.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(session_log);" | grep -q '|paused_at|'; then
+  sqlite3 "$DB_PATH" <<'SQL'
+.bail on
+BEGIN TRANSACTION;
+ALTER TABLE session_log ADD COLUMN paused_at TEXT;
+DROP INDEX IF EXISTS one_open_session_per_project;
+CREATE UNIQUE INDEX one_open_session_per_project ON session_log(project_id)
+  WHERE closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;
+UPDATE session_log SET paused_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE closed_at IS NULL AND deleted_at IS NULL
+    AND feature_id IN (SELECT id FROM features WHERE status = 'blocked' AND deleted_at IS NULL);
+COMMIT;
+SQL
+fi
+
 db() {
   sqlite3 "$DB_PATH" "$@"
 }

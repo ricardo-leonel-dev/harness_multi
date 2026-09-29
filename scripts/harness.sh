@@ -74,6 +74,11 @@
 #                                              (GPT-5)") to take precedence.
 #                                              (best-effort: also pushes notion_status_in_progress to the
 #                                              feature's source Notion page, if it has a source_id)
+#                                              An explicit TARGET that is in_progress/blocked with NO open session
+#                                              (e.g. lost to cancel-session --force) is resumed instead: new session,
+#                                              status in_progress, "RESUMED: previous session <id> was cancelled"
+#                                              logged. Gates are not re-run; any review verdict stays on the old
+#                                              session, so record-review must run again before log-out.
 #   append-log <entry> [--feature TARGET] [--agent NAME] [--agent-model MODEL]
 #                                              append a line to the current open session's log. By default
 #                                              the entry is prefixed with the standardized agent attribution
@@ -117,8 +122,12 @@
 #                                              project dependency requests; fails loudly (not a [WARN]) since the
 #                                              caller must not proceed to block a feature on a card that wasn't
 #                                              actually created
-#   block <TARGET> <reason...>                mark an in_progress feature blocked (leaves its session open)
-#   unblock <TARGET>                          mark a blocked feature in_progress again, resuming its open session
+#   block <TARGET> <reason...>                mark an in_progress feature blocked and pause its session (still
+#                                              open, log/review intact, but no longer holding the project's
+#                                              one-session slot — other features can be claimed meanwhile)
+#   unblock <TARGET>                          mark a blocked feature in_progress again, resuming its paused
+#                                              session; refuses if it has none (use claim TARGET) or if another
+#                                              session is active
 #   cancel-session [--force] <session_id> <reason...>
 #                                              soft-delete an open session that never produced real work (e.g. a
 #                                              claim interrupted before any plan/log/changes), freeing the project's
@@ -674,6 +683,11 @@ WHERE $target_where;")
       exit 1
     fi
 
+    if [ -n "$target" ] && { [ "$status_now" = "in_progress" ] || [ "$status_now" = "blocked" ]; }; then
+      claim_resume "$(jq -r '.[0].id' <<<"$check_row")" "$agent" "$agent_model"
+      return
+    fi
+
     # Local (same-project) dependency gate: every name listed in depends_on
     # must belong to a feature that is already 'done'. This is what would
     # have caught claiming admin_institutions_cuaderno_seal before
@@ -724,6 +738,15 @@ WHERE $target_where;")
   # dependencies declared.
   local deps_gate="NOT EXISTS (SELECT 1 FROM json_each(f.depends_on) dep WHERE dep.value NOT IN (SELECT name FROM features d2 WHERE d2.project_id = f.project_id AND d2.status = 'done' AND d2.deleted_at IS NULL))"
 
+  # Checked before the feature UPDATE: otherwise a claim while another session
+  # is active (e.g. a spec_drafting one) flips the feature to in_progress and
+  # only then fails on the session INSERT, leaving it in_progress sessionless.
+  local active_sid; active_sid="$(current_session_id)"
+  if [ -n "$active_sid" ]; then
+    fail "session $active_sid is already open — log it out or block its feature before claiming another"
+    exit 1
+  fi
+
   local update_sql
   if [ -n "$target" ]; then
     if [[ "$target" =~ ^[0-9]+$ ]]; then
@@ -771,9 +794,91 @@ VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")
   fi
 }
 
+# The project's active session. A paused session (its feature is blocked) is
+# still open but not current: nothing but unblock/cancel-session acts on it.
 current_session_id() {
   local pid; pid="$(project_id)"
-  db "SELECT id FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL LIMIT 1;"
+  db "SELECT id FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL LIMIT 1;"
+}
+
+# claim_resume <feature_id> <agent> <agent_model> — the explicit-claim path for
+# an in_progress/blocked feature that has lost its session (e.g. to
+# `cancel-session --force`). Without it nothing could reopen such a feature:
+# claim only took pending/spec_ready, reopen only done, unblock never opened a
+# session, and log-out needs one. The dependency/spec gates are not re-run —
+# the feature already passed them when it was first claimed.
+claim_resume() {
+  local fid="$1" agent="$2" agent_model="$3"
+  local pid; pid="$(project_id)"
+  local now; now="$(now_iso)"
+
+  local open_row
+  open_row=$(sqlite3 -json "$DB_PATH" "SELECT id, paused_at FROM session_log
+WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL LIMIT 1;")
+  if [ -n "$open_row" ] && [ "$open_row" != "[]" ]; then
+    local open_sid; open_sid=$(jq -r '.[0].id' <<<"$open_row")
+    if [ -n "$(jq -r '.[0].paused_at // empty' <<<"$open_row")" ]; then
+      fail "feature still has paused session $open_sid — run 'unblock <feature>' to resume it instead of claiming"
+    else
+      fail "feature is already in progress with open session $open_sid — nothing to claim"
+    fi
+    exit 1
+  fi
+  local active_sid; active_sid="$(current_session_id)"
+  if [ -n "$active_sid" ]; then
+    fail "session $active_sid is already open — log it out, block its feature, or cancel it before resuming this one"
+    exit 1
+  fi
+
+  local prev_sid prev_note resumed
+  prev_sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 1;")
+  if [ -n "$prev_sid" ]; then
+    prev_note=$(db "SELECT entry FROM session_log_entries WHERE session_id=$prev_sid AND entry LIKE 'CANCELLED:%' ORDER BY id DESC LIMIT 1;")
+    resumed="RESUMED: previous session $prev_sid was cancelled${prev_note:+ ($prev_note)}"
+  else
+    resumed="RESUMED: feature had no open session and no cancelled session on record"
+  fi
+
+  local agent_attribution
+  agent_attribution="$(harness_agent_attribution "$agent" "" "$agent_model")"
+
+  # changes() gates each INSERT on the previous statement having matched, so
+  # a feature whose status or sessions changed since the checks above gets no
+  # session instead of a stray one; .bail rolls back on an index conflict.
+  local out
+  out=$(sqlite3 "$DB_PATH" <<SQL 2>&1
+.bail on
+BEGIN;
+UPDATE features SET status='in_progress', updated_at='$now'
+  WHERE id=$fid AND status IN ('in_progress','blocked') AND deleted_at IS NULL
+    AND NOT EXISTS (SELECT 1 FROM session_log WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL);
+INSERT INTO session_log (project_id, feature_id, agent, started_at)
+  SELECT '$(sql_escape "$pid")', $fid, '$(sql_escape "$agent_attribution")', '$now' WHERE changes() = 1;
+INSERT INTO session_log_entries (session_id, entry, created_at)
+  SELECT last_insert_rowid(), '$(sql_escape "$resumed")', '$now' WHERE changes() = 1;
+COMMIT;
+SQL
+)
+  if [ $? -ne 0 ]; then
+    fail "resume failed (is another feature already in_progress?): $out"
+    exit 1
+  fi
+  local new_sid
+  new_sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND started_at='$now' AND closed_at IS NULL AND deleted_at IS NULL LIMIT 1;")
+  if [ -z "$new_sid" ]; then
+    fail "resume failed — feature state changed between the check and the claim; re-run 'status' and try again"
+    exit 1
+  fi
+
+  local row
+  row=$(sqlite3 -json "$DB_PATH" "SELECT feature_number, name, title, source_id FROM features WHERE id=$fid;")
+  ok "resumed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$row") (new session $new_sid; ${resumed#RESUMED: })"
+  warn "any review verdict stayed on the old session — record-review must run again on session $new_sid before log-out"
+
+  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$row")
+  if [ -n "$source_id" ]; then
+    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_in_progress' 'In Progress')"
+  fi
 }
 
 cmd_append_log() {
@@ -981,9 +1086,7 @@ cmd_block() {
 
   # Same "UPDATE ... RETURNING or fail cleanly" shape as cmd_claim — only an
   # in_progress feature can be blocked (mirrors: only a pending one can be
-  # claimed). The session stays open (no closed_at write) — same "leave it
-  # for the next session to pick up" idiom AGENTS.md already documents for
-  # getting stuck, just with status='blocked' instead of 'in_progress'.
+  # claimed).
   local updated
   updated=$(sqlite3 -json "$DB_PATH" "UPDATE features SET status='blocked', updated_at='$now'
 WHERE project_id='$(sql_escape "$pid")' AND status='in_progress' AND deleted_at IS NULL AND $where
@@ -996,13 +1099,24 @@ RETURNING id, feature_number, name, title;" 2>&1)
     fail "not blockable: no matching in_progress feature"
     exit 1
   fi
+  local fid; fid=$(jq -r '.[0].id' <<<"$updated")
 
-  local sid; sid="$(current_session_id)"
+  # The feature's own session is paused, not closed: it stays open (log, plan
+  # and review verdict intact) for unblock to resume, but frees the project's
+  # one-session slot so other work can be claimed meanwhile. The reason goes
+  # on that session — not on whatever session happens to be current — so
+  # check-blockers finds its BLOCKED_ON note.
+  local sid
+  sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL LIMIT 1;")
   if [ -n "$sid" ]; then
-    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$reason")', '$now');"
+    db_exec "UPDATE session_log SET paused_at='$now' WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$reason")', '$now');"
+    ok "blocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated") (session $sid paused)"
+  else
+    db_exec "INSERT INTO feature_notes (feature_id, entry, created_at) VALUES ($fid, '$(sql_escape "$reason")', '$now');"
+    ok "blocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
+    warn "feature had no open session — reason saved as a feature note; after unblocking, 'claim <feature>' opens a new session"
   fi
-
-  ok "blocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 }
 
 cmd_unblock() {
@@ -1019,22 +1133,48 @@ cmd_unblock() {
     where="name='$(sql_escape "$target")'"
   fi
 
-  # Respects the same one_in_progress_per_project unique index cmd_claim
-  # does — if another feature is already in_progress, the UPDATE fails and
-  # we report that clearly instead of surfacing SQLite's raw constraint error.
-  local updated
-  updated=$(sqlite3 -json "$DB_PATH" "UPDATE features SET status='in_progress', updated_at='$now'
-WHERE project_id='$(sql_escape "$pid")' AND status='blocked' AND deleted_at IS NULL AND $where
-RETURNING id, feature_number, name, title;" 2>&1)
-  if [ $? -ne 0 ]; then
-    fail "unblock failed (is another feature already in_progress?): $updated"
-    exit 1
-  fi
-  if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
+  local row
+  row=$(sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title FROM features
+WHERE project_id='$(sql_escape "$pid")' AND status='blocked' AND deleted_at IS NULL AND $where;")
+  if [ "$row" = "[]" ] || [ -z "$row" ]; then
     fail "not unblockable: no matching blocked feature"
     exit 1
   fi
-  ok "unblocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
+  local fid fname; fid=$(jq -r '.[0].id' <<<"$row"); fname=$(jq -r '.[0].name' <<<"$row")
+
+  # unblock resumes the feature's session; it never opens one. Flipping a
+  # sessionless feature to in_progress (as it used to) leaves it stranded:
+  # nothing can log it out. Point at claim, which opens a fresh session.
+  local sid
+  sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL LIMIT 1;")
+  if [ -z "$sid" ]; then
+    fail "feature $fname has no open session to resume (was it cancelled?) — run 'scripts/harness.sh claim $fname' instead: it opens a new session and logs RESUMED"
+    exit 1
+  fi
+
+  local active_sid; active_sid="$(current_session_id)"
+  if [ -n "$active_sid" ] && [ "$active_sid" != "$sid" ]; then
+    fail "session $active_sid is already open — log it out or block its feature before unblocking $fname"
+    exit 1
+  fi
+
+  # Respects the same unique indexes cmd_claim does (one in_progress feature,
+  # one active session); .bail rolls both statements back together.
+  local out
+  out=$(sqlite3 "$DB_PATH" <<SQL 2>&1
+.bail on
+BEGIN;
+UPDATE features SET status='in_progress', updated_at='$now' WHERE id=$fid AND status='blocked';
+UPDATE session_log SET paused_at=NULL WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, 'UNBLOCKED: session resumed', '$now');
+COMMIT;
+SQL
+)
+  if [ $? -ne 0 ]; then
+    fail "unblock failed (is another feature already in_progress?): $out"
+    exit 1
+  fi
+  ok "unblocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$row") (session $sid resumed)"
 }
 
 cmd_cancel_session() {
@@ -1306,10 +1446,15 @@ WHERE project_id='$(sql_escape "$pid")' AND status='blocked' AND deleted_at IS N
     # feature (block writes one, see cmd_block's caller in the
     # cross-project-dependency flow documented in AGENTS.md).
     local note
-    note=$(sqlite3 "$DB_PATH" "SELECT sle.entry FROM session_log_entries sle
-JOIN session_log sl ON sl.id = sle.session_id
-WHERE sl.feature_id=$fid AND sle.deleted_at IS NULL AND sle.entry LIKE '%BLOCKED_ON:%'
-ORDER BY sle.created_at DESC LIMIT 1;")
+    # block writes it as a feature note instead when the feature had no session.
+    note=$(sqlite3 "$DB_PATH" "SELECT entry FROM (
+  SELECT sle.entry, sle.created_at FROM session_log_entries sle
+  JOIN session_log sl ON sl.id = sle.session_id
+  WHERE sl.feature_id=$fid AND sle.deleted_at IS NULL AND sle.entry LIKE '%BLOCKED_ON:%'
+  UNION ALL
+  SELECT entry, created_at FROM feature_notes
+  WHERE feature_id=$fid AND deleted_at IS NULL AND entry LIKE '%BLOCKED_ON:%'
+) ORDER BY created_at DESC LIMIT 1;")
 
     if [ -z "$note" ]; then
       warn "$fnum $fname is blocked but has no BLOCKED_ON note — can't check automatically"
@@ -1361,7 +1506,13 @@ cmd_status() {
 FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
 WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL ORDER BY f.feature_number;"
   echo "--- open session ---"
-  db -header -column "SELECT id, agent, started_at, review_status, reviewed_by FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL;"
+  db -header -column "SELECT id, agent, started_at, review_status, reviewed_by FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;"
+  local paused
+  paused=$(db -header -column "SELECT sl.id, f.feature_number, f.name AS feature, sl.paused_at, sl.review_status FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id WHERE sl.project_id='$(sql_escape "$pid")' AND sl.closed_at IS NULL AND sl.deleted_at IS NULL AND sl.paused_at IS NOT NULL;")
+  if [ -n "$paused" ]; then
+    echo "--- paused sessions (blocked features; resume with unblock) ---"
+    echo "$paused"
+  fi
 }
 
 cmd_delete_feature() {
