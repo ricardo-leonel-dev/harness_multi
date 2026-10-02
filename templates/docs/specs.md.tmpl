@@ -130,3 +130,18 @@ documents this mapping in `progress/impl_<feature>.md`:
 The `reviewer` does not trust this claim — it independently confirms each named test exists and
 actually exercises the requirement it's mapped to (see `.claude/agents/reviewer.md` / `.codex/agents/
 reviewer.toml`, step 4b), and checks the same `R<n>` coverage as part of `CHECKPOINTS.md`'s C6 group.
+
+## Coverage granularity
+
+Every requirement still needs a concrete, currently-passing test. A compact
+acceptance evidence table may group multiple requirements in one row when the
+named test actually exercises each of them. State the grouping in design.md and
+list every requirement id explicitly. A preservation requirement can use one
+baseline comparison when it checks the complete required surface; separate rows
+for each unchanged item are unnecessary. These choices reduce report repetition,
+not the evidence required or the independent reviewer check.
+
+An evidence index generated from names is only a navigation aid. It neither
+executes tests nor establishes that they exercise the mapped requirements.
+
+See `harness/instructions/coverage.md` for shared guidance on existing installs.

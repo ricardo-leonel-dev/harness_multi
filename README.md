@@ -217,3 +217,32 @@ bash scripts/harness.sh status
 Then open Claude Code in `examples/notes-cli/` and give it a task — it will
 pick up the one remaining `pending` feature (`cli_recent`) and work through
 the `leader` → `implementer` → `reviewer` loop end to end.
+
+## Shared verification tools and PostgreSQL profile
+
+Harness-owned scripts, agents and `harness/instructions/*.md` are refreshed on
+installation. Make shared changes in this source toolkit and reinstall consumers.
+Project-owned `.harness.json`, docs, CHECKPOINTS.md, specs and tests are preserved.
+Reinstall flags do not override an existing runtime configuration; edit that
+configuration explicitly in the consuming project when its settings must change.
+
+Generic installation remains the default. Database projects can opt in explicitly:
+
+```sh
+cd /path/to/database-project
+bash /path/to/personal_harness/install.sh --slug actual-project-slug --profile postgres
+```
+
+For a first installation, also pass `--human-user` and the appropriate
+`--verify-command`. Reinstallation uses the existing configuration without a new
+human-user prompt. Pass `--profile postgres` on each refresh; generic installation
+does not remove previously installed postgres assets or infer a saved profile.
+The profile installs an evidence-index helper, transactional SQL acceptance
+prologue and `harness/instructions/postgres.md`. It installs no database runner,
+connection defaults or credentials. Shared coverage guidance is installed for all
+profiles, including existing projects whose docs are preserved. Consult AGENTS.md
+for discovery. Standalone migration diffs must remain self-contained for external
+deployment. No timing savings are claimed until measured in actual projects.
+
+Run isolated regressions with `bash tests/database_profile_test.sh` and
+`bash tests/session_resume_test.sh`.

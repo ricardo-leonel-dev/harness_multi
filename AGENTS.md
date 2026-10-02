@@ -131,6 +131,8 @@ return only the reference, not the content — never the full content in chat.
 | `scripts/notion_create_feature.sh` | Creates a new Notion page (feature card) — used for cross-project dependency requests (§8) | Setting up or troubleshooting cross-project requests |
 | `docs/architecture.md`    | What "doing a good job" means in this project                            | Before implementing                   |
 | `docs/conventions.md`     | Style rules, naming conventions, structure                               | Before writing code                   |
+| `harness/instructions/coverage.md` | Harness-owned shared coverage guidance (refreshed on reinstall) | Before preparing evidence |
+| `harness/instructions/postgres.md` | Optional postgres profile tools and transactional SQL guidance | Before database verification, when present |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
 | `docs/specs.md`           | Spec-driven development: EARS format, file layout, traceability (§9)     | Before drafting, implementing, or reviewing an `sdd=1` feature |
 | `specs/<name>/{requirements,design,tasks}.md` | Spec content for `sdd=1` features — git-tracked, human/agent-authored (not generated) | Before implementing or reviewing an `sdd=1` feature |
@@ -139,6 +141,10 @@ return only the reference, not the content — never the full content in chat.
 | `.codex/agents/`          | Codex CLI custom agent definitions (leader, implementer, reviewer, spec_author) | Codex CLI: if you orchestrate work    |
 | `src/`                    | Application code                                                          | To implement                          |
 | `tests/`                  | Automated tests                                                           | To verify                             |
+
+Read the shared instructions above when present, alongside project-specific docs.
+Update harness-owned scripts/instructions in the source toolkit; installed project
+docs, specs, tests, CHECKPOINTS.md and .harness.json belong to the project.
 
 ## 3. Hard Rules (non-negotiable)
 
