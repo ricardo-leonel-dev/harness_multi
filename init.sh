@@ -127,8 +127,12 @@ echo ""
 echo "── 4.5. Linting tests for byte-level fingerprints ─────────"
 
 if [ -f "$SCRIPT_DIR/scripts/lint_test_fingerprints.sh" ]; then
-    if bash "$SCRIPT_DIR/scripts/lint_test_fingerprints.sh" tests; then
+    bash "$SCRIPT_DIR/scripts/lint_test_fingerprints.sh" "$SCRIPT_DIR/tests"
+    LINT_EXIT=$?
+    if [ "$LINT_EXIT" -eq 0 ]; then
         ok "No byte-level fingerprints in tests/"
+    elif [ "$LINT_EXIT" -eq 2 ]; then
+        warn "No tests/ directory; fingerprint lint skipped"
     else
         fail "Byte-level fingerprint detected in tests/ — see docs/conventions.md#anti-patterns"
         EXIT_CODE=1
