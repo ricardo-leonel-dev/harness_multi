@@ -9,8 +9,9 @@
 # Harness-core files (AGENTS.md + a CLAUDE.md symlink to it, .claude/agents/*.md,
 # .codex/agents/*.toml, init.sh, scripts/*.sh) are copied/relinked unconditionally
 # — re-running install.sh refreshes them. docs/*.md (including docs/specs.md),
-# CHECKPOINTS.md, .claude/settings.json, and specs/ are scaffolded from templates
-# only if they don't already exist — never clobbers project-owned content.
+# CHECKPOINTS.md, .claude/settings.json, specs/, and .harness.json are created
+# only if absent — never clobbers project-owned content. Shared instructions are
+# refreshed; --profile postgres explicitly adds shared SQL tools on each install.
 
 set -u
 TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,10 +34,12 @@ NOTION_STATUS_IN_PROGRESS="In Progress"
 NOTION_STATUS_DONE="Done"
 NOTION_STATUS_SPEC_READY="Spec Ready"
 HUMAN_USER=""
+PROFILE="generic"
 
 usage() {
   cat <<EOF
 Usage: install.sh --slug SLUG [options]
+  --profile NAME               generic (default) or postgres; explicit on each installation
   --slug SLUG                  project slug (required)
   --description TEXT           project description
   --verify-command CMD         shell command init.sh runs to verify the project
@@ -52,7 +55,7 @@ Usage: install.sh --slug SLUG [options]
                                     (default: "Spec Ready"; see docs/specs.md)
   --human-user NAME            name of the human who approves specs in this project (e.g. "Ricardo Aguilar").
                                 Written to .harness.json::human_user; approve-spec uses it as the default for
-                                --by when the leader doesn't pass an explicit name. REQUIRED — install.sh
+                                --by when the leader doesn't pass an explicit name. On first install, install.sh
                                 prompts interactively if --human-user is not passed. Skipping the prompt is
                                 only possible in CI by passing --human-user "...".
 EOF
@@ -60,6 +63,7 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --profile) PROFILE="$2"; shift 2 ;;
     --slug) PROJECT_SLUG="$2"; shift 2 ;;
     --description) DESCRIPTION="$2"; shift 2 ;;
     --verify-command) VERIFY_COMMAND="$2"; shift 2 ;;
@@ -78,6 +82,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+case "$PROFILE" in
+  generic|postgres) ;;
+  *) fail "unknown profile: $PROFILE"; exit 1 ;;
+esac
+
 if [ -z "$PROJECT_SLUG" ]; then
   fail "--slug is required"
   usage
@@ -88,7 +97,8 @@ for tool in sqlite3 jq; do
   command -v "$tool" >/dev/null 2>&1 || { fail "$tool is required but not installed"; exit 1; }
 done
 
-# --human-user is mandatory. If not passed via flag, prompt interactively —
+# --human-user is mandatory for first installs; reinstall preserves configuration.
+# If not passed via flag on first install, prompt interactively —
 # the install does NOT proceed with an empty name. The leader agent prompt
 # reads this from .harness.json when running approve-spec --by, so an empty
 # value would silently fall through to the legacy "user" default and pollute
@@ -96,14 +106,17 @@ done
 # approve-spec attribution accurate across teams. CI callers must pass
 # --human-user "<name>" explicitly OR pipe the name into stdin (e.g.
 # `echo "Name" | bash install.sh --slug ...`).
-if [ -z "$HUMAN_USER" ]; then
+if [ -f "$TARGET_DIR/.harness.json" ]; then
+  # Runtime configuration belongs to the project; reinstall does not replace it.
+  HUMAN_USER="$(jq -r '.human_user // empty' "$TARGET_DIR/.harness.json")"
+elif [ -z "$HUMAN_USER" ]; then
   printf 'human user (the person who will approve specs in this project, e.g. "Ricardo Aguilar"): '
   read -r HUMAN_USER
 fi
 # Trim leading/trailing whitespace (pure POSIX, no subshell)
 HUMAN_USER="${HUMAN_USER#"${HUMAN_USER%%[![:space:]]*}"}"
 HUMAN_USER="${HUMAN_USER%"${HUMAN_USER##*[![:space:]]}"}"
-if [ -z "$HUMAN_USER" ]; then
+if [ ! -f "$TARGET_DIR/.harness.json" ] && [ -z "$HUMAN_USER" ]; then
   fail "--human-user cannot be empty (pass --human-user \"<name>\" or pipe a name into stdin)"
   exit 1
 fi
@@ -132,6 +145,18 @@ mkdir -p "$TARGET_DIR/scripts"
 cp "$TOOLKIT_DIR"/scripts/*.sh "$TARGET_DIR/scripts/"
 chmod +x "$TARGET_DIR/init.sh" "$TARGET_DIR"/scripts/*.sh
 ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*.toml, init.sh, scripts/*.sh"
+
+# Shared instructions are harness-owned and refreshed even in existing projects.
+mkdir -p "$TARGET_DIR/harness/instructions"
+cp "$TOOLKIT_DIR/shared/coverage.md" "$TARGET_DIR/harness/instructions/coverage.md"
+if [ "$PROFILE" = postgres ]; then
+  mkdir -p "$TARGET_DIR/scripts/templates"
+  cp "$TOOLKIT_DIR/profiles/postgres/build_traceability.sh" "$TARGET_DIR/scripts/build_traceability.sh"
+  chmod +x "$TARGET_DIR/scripts/build_traceability.sh"
+  cp "$TOOLKIT_DIR/profiles/postgres/acceptance_test_prologue.sql" "$TARGET_DIR/scripts/templates/acceptance_test_prologue.sql"
+  cp "$TOOLKIT_DIR/profiles/postgres/verification.md" "$TARGET_DIR/harness/instructions/postgres.md"
+  ok "refreshed postgres profile tools and shared instructions"
+fi
 
 mkdir -p "$TARGET_DIR/.claude"
 if [ -f "$TARGET_DIR/.claude/settings.json" ]; then
@@ -198,6 +223,9 @@ fi
 echo ""
 echo "── 4. Writing .harness.json ─────────────────────────────"
 
+if [ -f "$TARGET_DIR/.harness.json" ]; then
+  warn ".harness.json already exists — leaving project runtime configuration as-is (flags do not override it)"
+else
 jq -n \
   --arg version "0.1.0" \
   --arg slug "$PROJECT_SLUG" \
@@ -220,6 +248,7 @@ jq -n \
     human_user: $human_user}' \
   > "$TARGET_DIR/.harness.json"
 ok "wrote .harness.json"
+fi
 
 touch "$TARGET_DIR/.gitignore"
 grep -qxF 'harness.db' "$TARGET_DIR/.gitignore" || echo 'harness.db' >> "$TARGET_DIR/.gitignore"
