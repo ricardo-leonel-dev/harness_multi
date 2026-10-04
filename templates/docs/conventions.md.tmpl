@@ -36,3 +36,26 @@ and how the user-facing layer is expected to surface failures.
 By default, comments are **not** written. They are only allowed when they
 explain a non-obvious *why* (a documented workaround, a subtle invariant).
 Well-named identifiers should do the rest.
+
+## Acceptance test anti-patterns (for DB-schema projects)
+
+When this project ships stored procedures that change frequently (e.g.,
+adding a column triggers updates in every read/write procedure), avoid
+patterns with a high cost-to-signal ratio in acceptance tests.
+
+- **Avoid byte-level fingerprints** of stored procedure bodies as a
+  primary assertion. Concretely: `md5(pg_get_functiondef(...))`,
+  `sha256(pg_get_functiondef(...))`, or any hash-of-body in an
+  acceptance test. They fail on every legitimate change (new column,
+  column reorder, comment, internal rename), forcing unnecessary MD5
+  churn on every feature that touches the function, and create silent
+  stale-MD5 traps when ignored (see the
+  `add_testing_field_to_assets` and
+  `add_template_filtering_to_web_display_asset_queries` interaction in
+  rushr-web-display-db for a concrete example).
+- **Prefer behavior tests**: assert the JSON output's required keys or
+  types (`jsonb_object_keys`, `jsonb_typeof`), or call the procedure
+  with the input you actually care about and check the response.
+- **Mechanical enforcement**: `scripts/lint_test_fingerprints.sh` scans
+  `tests/*.sql` for these patterns and fails the lint gate. Adding a
+  fingerprint test requires updating the linter first.

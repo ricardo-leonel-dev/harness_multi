@@ -35,10 +35,16 @@ pending ──claim-spec──> spec_drafting ──mark-spec-ready──> spec_
 - **`scripts/harness.sh mark-spec-ready`** — closes that session once
   `specs/<name>/{requirements.md,design.md,tasks.md}` all exist on disk; records requirement/task
   counts; moves the feature to `spec_ready`.
+- **Revising a spec in review** — if the human asks for changes after `mark-spec-ready` (and before
+  approval), the `spec_author` re-runs **`scripts/harness.sh claim-spec <target>`** (explicit target
+  only): the feature goes back to `spec_drafting`, the revision is logged in a new session, and
+  `mark-spec-ready` records the new counts. An already-approved spec can't be re-opened this way.
 - **Human approval** — the user reads the 3 files and approves, in conversation. The leader then runs
   **`scripts/harness.sh approve-spec <target> --by <name>`** — this is the actual DB-recorded gate.
   Nothing mechanical can verify a human's judgment, but this at least proves *someone* explicitly
   recorded approval, with a timestamp and a name, rather than the leader silently skipping the step.
+  It recounts requirements/tasks from the files at that moment, so the recorded counts are the ones the
+  human approved.
 - **`scripts/harness.sh claim [TARGET]`** — for an `sdd=1` feature, only succeeds once its spec is
   recorded `approved` (and the 3 files are still present on disk). From here the feature proceeds
   exactly like any non-SDD one: `implementer` then `reviewer`, then `log-out`.
@@ -124,3 +130,18 @@ documents this mapping in `progress/impl_<feature>.md`:
 The `reviewer` does not trust this claim — it independently confirms each named test exists and
 actually exercises the requirement it's mapped to (see `.claude/agents/reviewer.md` / `.codex/agents/
 reviewer.toml`, step 4b), and checks the same `R<n>` coverage as part of `CHECKPOINTS.md`'s C6 group.
+
+## Coverage granularity
+
+Every requirement still needs a concrete, currently-passing test. A compact
+acceptance evidence table may group multiple requirements in one row when the
+named test actually exercises each of them. State the grouping in design.md and
+list every requirement id explicitly. A preservation requirement can use one
+baseline comparison when it checks the complete required surface; separate rows
+for each unchanged item are unnecessary. These choices reduce report repetition,
+not the evidence required or the independent reviewer check.
+
+An evidence index generated from names is only a navigation aid. It neither
+executes tests nor establishes that they exercise the mapped requirements.
+
+See `harness/instructions/coverage.md` for shared guidance on existing installs.

@@ -118,7 +118,7 @@ sqlite3 -json "$DB_PATH" "SELECT s.id, f.name AS feature_name, s.path, s.status,
 done
 
 sqlite3 -json "$DB_PATH" "SELECT sl.id, f.name AS feature_name, sl.agent, sl.plan, sl.next_step, sl.changes,
-  sl.verification, sl.closure, sl.started_at, sl.closed_at, sl.deleted_at
+  sl.verification, sl.closure, sl.started_at, sl.closed_at, sl.paused_at, sl.deleted_at
   FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id
   WHERE sl.project_id='$(sql_escape "$pid")';" | jq -c '.[]' | while IFS= read -r row; do
   sid=$(jq '.id' <<<"$row")
@@ -133,12 +133,14 @@ sqlite3 -json "$DB_PATH" "SELECT sl.id, f.name AS feature_name, sl.agent, sl.pla
     --arg closure "$(jq -r '.closure // ""' <<<"$row")" \
     --arg started_at "$(jq -r '.started_at' <<<"$row")" \
     --arg closed_at "$(jq -r '.closed_at // ""' <<<"$row")" \
+    --arg paused_at "$(jq -r '.paused_at // ""' <<<"$row")" \
     --arg deleted_at "$(jq -r '.deleted_at // ""' <<<"$row")" \
     '{p_project_slug:$slug, p_local_id:$local_id,
       p_feature_name: (if $feature_name == "" then null else $feature_name end),
       p_agent:$agent, p_plan:$plan, p_next_step:$next_step, p_changes:$changes,
       p_verification:$verification, p_closure:$closure, p_started_at:$started_at,
       p_closed_at: (if $closed_at == "" then null else $closed_at end),
+      p_paused_at: (if $paused_at == "" then null else $paused_at end),
       p_deleted_at: (if $deleted_at == "" then null else $deleted_at end)}')
   out=$(rpc upsert_session "$payload") || warn "upsert_session failed for local_id $sid: $out"
 

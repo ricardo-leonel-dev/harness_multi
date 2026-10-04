@@ -41,6 +41,10 @@
 #                                              --agent-model > $HARNESS_AGENT_MODEL > $ANTHROPIC_MODEL; pass --agent
 #                                              with a pre-formatted string (e.g. Codex's "leader -> spec_author
 #                                              (GPT-5)") to take precedence.
+#                                              An explicit TARGET that is spec_ready with a NOT-yet-approved spec
+#                                              is re-opened for revision (back to spec_drafting, spec row back to
+#                                              drafting so approve-spec can't approve it mid-revision); finish
+#                                              with mark-spec-ready as usual. Approved specs are not re-openable.
 #   mark-spec-ready                           close the current spec-drafting session: verifies
 #                                              specs/<name>/{requirements,design,tasks}.md exist, records
 #                                              requirement/task counts, moves the feature to spec_ready
@@ -48,6 +52,9 @@
 #   approve-spec <TARGET> [--by NAME]         record human approval of a spec_ready feature's spec (leader-only,
 #                                              run immediately after the user approves in conversation) — this is
 #                                              the actual DB-enforced precondition claim checks for sdd=1 features.
+#                                              Recounts R/T from the spec files at approval time (warns if they
+#                                              changed since mark-spec-ready), so the recorded counts match what
+#                                              the human actually approved.
 #                                              --by resolution: explicit --by > $HARNESS_HUMAN_USER env >
 #                                              .harness.json::human_user > legacy default "user". This is the ONLY
 #                                              command that stores a literal human name (not an agent string);
@@ -67,7 +74,12 @@
 #                                              (GPT-5)") to take precedence.
 #                                              (best-effort: also pushes notion_status_in_progress to the
 #                                              feature's source Notion page, if it has a source_id)
-#   append-log <entry> [--agent NAME] [--agent-model MODEL]
+#                                              An explicit TARGET that is in_progress/blocked with NO open session
+#                                              (e.g. lost to cancel-session --force) is resumed instead: new session,
+#                                              status in_progress, "RESUMED: previous session <id> was cancelled"
+#                                              logged. Gates are not re-run; any review verdict stays on the old
+#                                              session, so record-review must run again before log-out.
+#   append-log <entry> [--feature TARGET] [--agent NAME] [--agent-model MODEL]
 #                                              append a line to the current open session's log. By default
 #                                              the entry is prefixed with the standardized agent attribution
 #                                              ("Claude (<role> agent by <MODEL>)" when $ANTHROPIC_MODEL is
@@ -75,6 +87,8 @@
 #                                              override the role for this entry; pass --agent-model to pin
 #                                              the model when the auto-detected one is wrong (e.g. handing
 #                                              the entry off between agents with different models).
+#                                              --feature TARGET writes a feature-level note instead (no open
+#                                              session needed); snapshot lists them under the feature's Notes.
 #   set-plan <item> [item...]                 replace the current open session's plan
 #   set-next-step <item> [item...]            replace the current open session's next_step
 #   record-review <approved|changes-requested> [--by human:NAME] [--reviewer-model MODEL] [--notes TEXT]
@@ -108,8 +122,12 @@
 #                                              project dependency requests; fails loudly (not a [WARN]) since the
 #                                              caller must not proceed to block a feature on a card that wasn't
 #                                              actually created
-#   block <TARGET> <reason...>                mark an in_progress feature blocked (leaves its session open)
-#   unblock <TARGET>                          mark a blocked feature in_progress again, resuming its open session
+#   block <TARGET> <reason...>                mark an in_progress feature blocked and pause its session (still
+#                                              open, log/review intact, but no longer holding the project's
+#                                              one-session slot — other features can be claimed meanwhile)
+#   unblock <TARGET>                          mark a blocked feature in_progress again, resuming its paused
+#                                              session; refuses if it has none (use claim TARGET) or if another
+#                                              session is active
 #   cancel-session [--force] <session_id> <reason...>
 #                                              soft-delete an open session that never produced real work (e.g. a
 #                                              claim interrupted before any plan/log/changes), freeing the project's
@@ -119,6 +137,14 @@
 #   reopen <TARGET> <reason...>               mark a done feature in_progress again, opening a fresh session
 #                                              (e.g. it was closed without meeting a checkpoint) — logs a
 #                                              REOPENED: <reason> entry on the new session for the audit trail
+#   supersede <TARGET> --by <TARGET> --reason <text>
+#                                              close a pending/spec_drafting/spec_ready feature (no open session)
+#                                              as absorbed by another one: status 'superseded', records --by and
+#                                              the previous status, logs the reason as a feature note, warns about
+#                                              features whose depends_on still names it (best-effort: pushes
+#                                              notion_status_superseded, default "Done", if source_id is set)
+#   unsupersede <TARGET> <reason...>          undo supersede: restores the recorded previous status (Notion card
+#                                              is left as-is — fix it by hand)
 #   check-blockers                            best-effort: for every blocked feature with a BLOCKED_ON note,
 #                                              check the referenced sibling project's harness.db directly
 
@@ -130,6 +156,19 @@ source "$SCRIPT_DIR/lib.sh"
 
 project_id() {
   db "SELECT id FROM projects WHERE slug = '$(sql_escape "$PROJECT_SLUG")' AND deleted_at IS NULL LIMIT 1;"
+}
+
+# spec_counts <spec_dir> — prints "<requirements_count> <tasks_count>" parsed
+# from <spec_dir>/{requirements,tasks}.md. Shared by mark-spec-ready and
+# approve-spec so the counts recorded at approval time come from the exact
+# same parse as the ones recorded when the spec was marked ready — the files
+# can be revised in between, and what gets recorded as approved must match
+# what the human actually read.
+spec_counts() {
+  local dir="$1" req task
+  req=$(grep -cE '^## R[0-9]+' "$dir/requirements.md" 2>/dev/null)
+  task=$(grep -cE '^- \[[ xX]\] T[0-9]+' "$dir/tasks.md" 2>/dev/null)
+  printf '%s %s' "${req:-0}" "${task:-0}"
 }
 
 cmd_import_features() {
@@ -395,14 +434,22 @@ cmd_claim_spec() {
   # mark-spec-ready needs an open session, reopen only takes 'done', unblock only 'blocked').
   # Re-claiming is idempotent — the status is already spec_drafting, and mark-spec-ready
   # already UPDATEs an existing spec row instead of inserting a duplicate.
+  #
+  # An explicit TARGET may also be 'spec_ready' as long as its spec is NOT yet approved:
+  # that's the revision path (the human asks for changes after mark-spec-ready). Without
+  # it, a revised spec had no way back into the DB — the recorded R/T counts went stale
+  # and the revision never appeared in any session log. It is deliberately explicit-only:
+  # the no-TARGET default must never grab a spec that is sitting in review. Once
+  # approved, the spec is frozen here; changing it then is a new decision for the human.
+  local revisable="(status IN ('pending','spec_drafting') OR (status='spec_ready' AND id NOT IN (SELECT feature_id FROM specs WHERE status='approved' AND deleted_at IS NULL)))"
   local update_sql
   if [ -n "$target" ]; then
     if [[ "$target" =~ ^[0-9]+$ ]]; then
       update_sql="UPDATE features SET status='spec_drafting', updated_at='$now'
-WHERE project_id='$(sql_escape "$pid")' AND status IN ('pending','spec_drafting') AND sdd=1 AND deleted_at IS NULL AND feature_number=$target"
+WHERE project_id='$(sql_escape "$pid")' AND $revisable AND sdd=1 AND deleted_at IS NULL AND feature_number=$target"
     else
       update_sql="UPDATE features SET status='spec_drafting', updated_at='$now'
-WHERE project_id='$(sql_escape "$pid")' AND status IN ('pending','spec_drafting') AND sdd=1 AND deleted_at IS NULL AND name='$(sql_escape "$target")'"
+WHERE project_id='$(sql_escape "$pid")' AND $revisable AND sdd=1 AND deleted_at IS NULL AND name='$(sql_escape "$target")'"
     fi
   else
     update_sql="UPDATE features SET status='spec_drafting', updated_at='$now'
@@ -416,7 +463,7 @@ WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND 
     exit 1
   fi
   if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
-    fail "not claimable for spec drafting: no matching pending/spec_drafting sdd=1 feature (already spec_ready or approved? or sdd not set — see 'add-feature --sdd')"
+    fail "not claimable for spec drafting: no matching pending/spec_drafting sdd=1 feature (a spec_ready one is only re-claimable by explicit TARGET, and only while its spec is not yet approved; or sdd not set — see 'add-feature --sdd')"
     exit 1
   fi
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
@@ -427,6 +474,22 @@ WHERE id = (SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND 
 
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
 VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")', '$now');"
+
+  # Revision of a spec that was already marked ready: pull its specs row back
+  # to 'drafting' so approve-spec (which only matches status='ready') can't
+  # approve it mid-revision, and log the counts it had so the revision is
+  # visible in this session's history.
+  local prev_spec
+  prev_spec=$(sqlite3 -json "$DB_PATH" "UPDATE specs SET status='drafting', updated_at='$now'
+WHERE feature_id=$feature_id AND status='ready' AND deleted_at IS NULL
+RETURNING requirements_count, tasks_count;")
+  if [ -n "$prev_spec" ] && [ "$prev_spec" != "[]" ]; then
+    local sid; sid="$(current_session_id)"
+    local prev_counts; prev_counts=$(jq -r '.[0] | "R=\(.requirements_count), T=\(.tasks_count)"' <<<"$prev_spec")
+    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[$agent_attribution] SPEC REVISION: re-opened a spec_ready spec for revision (was $prev_counts)")', '$now');"
+    ok "re-opened spec for revision: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated") (was $prev_counts) — run 'mark-spec-ready' when done"
+    return 0
+  fi
   ok "claimed for spec drafting: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 }
 
@@ -434,10 +497,11 @@ cmd_mark_spec_ready() {
   local sid; sid="$(current_session_id)"
   [ -n "$sid" ] || { fail "no open session — run 'claim-spec' first"; exit 1; }
 
-  local fid name status_now
+  local fid name fnum status_now
   fid=$(db "SELECT feature_id FROM session_log WHERE id=$sid;")
   [ -n "$fid" ] || { fail "open session has no associated feature"; exit 1; }
   name=$(db "SELECT name FROM features WHERE id=$fid;")
+  fnum=$(db "SELECT feature_number FROM features WHERE id=$fid;")
   status_now=$(db "SELECT status FROM features WHERE id=$fid;")
   if [ "$status_now" != "spec_drafting" ]; then
     fail "feature $name is not in spec_drafting (status=$status_now) — mark-spec-ready only applies right after claim-spec"
@@ -450,16 +514,18 @@ cmd_mark_spec_ready() {
   done
 
   local req_count task_count agent_str
-  req_count=$(grep -cE '^## R[0-9]+' "$spec_dir/requirements.md" 2>/dev/null)
-  task_count=$(grep -cE '^- \[[ xX]\] T[0-9]+' "$spec_dir/tasks.md" 2>/dev/null)
+  read -r req_count task_count <<<"$(spec_counts "$spec_dir")"
   agent_str=$(db "SELECT agent FROM session_log WHERE id=$sid;")
 
   local now; now="$(now_iso)"
   local existing_spec_id
   existing_spec_id=$(db "SELECT id FROM specs WHERE feature_id=$fid AND deleted_at IS NULL;")
 
-  local spec_write_sql
+  local spec_write_sql revised_note=""
   if [ -n "$existing_spec_id" ]; then
+    local prev_counts
+    prev_counts=$(db "SELECT 'R=' || IFNULL(requirements_count, '?') || ', T=' || IFNULL(tasks_count, '?') FROM specs WHERE id=$existing_spec_id;")
+    [ "$prev_counts" != "R=$req_count, T=$task_count" ] && revised_note=", was $prev_counts"
     spec_write_sql="UPDATE specs SET status='ready', requirements_count=$req_count, tasks_count=$task_count,
   drafted_by='$(sql_escape "$agent_str")', ready_at='$now', updated_at='$now' WHERE id=$existing_spec_id;"
   else
@@ -475,7 +541,7 @@ UPDATE features SET status='spec_ready', updated_at='$now' WHERE id=$fid;
 $spec_write_sql
 COMMIT;
 SQL
-  ok "spec ready for review: $spec_dir (feature $fid, R=$req_count, T=$task_count)"
+  ok "spec ready for review: $spec_dir (feature $fnum $name, R=$req_count, T=$task_count$revised_note)"
 
   local source_id; source_id=$(db "SELECT source_id FROM features WHERE id=$fid;")
   if [ -n "$source_id" ]; then
@@ -526,11 +592,34 @@ cmd_approve_spec() {
   fid=$(db "SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
   [ -n "$fid" ] || { fail "not approvable: no matching feature $target"; exit 1; }
 
+  # Recount from the files as they are NOW, not as they were at
+  # mark-spec-ready — they may have been edited since, and the counts stored
+  # as approved must describe what the human actually read. A missing ready
+  # spec falls through to the UPDATE below, which reports it.
+  local spec_row count_sql="" counts_note=""
+  spec_row=$(sqlite3 -json "$DB_PATH" "SELECT path, requirements_count, tasks_count FROM specs
+WHERE feature_id=$fid AND status='ready' AND deleted_at IS NULL;")
+  if [ -n "$spec_row" ] && [ "$spec_row" != "[]" ]; then
+    local spec_dir prev_req prev_task req_count task_count
+    spec_dir=$(jq -r '.[0].path' <<<"$spec_row")
+    prev_req=$(jq -r '.[0].requirements_count // "?"' <<<"$spec_row")
+    prev_task=$(jq -r '.[0].tasks_count // "?"' <<<"$spec_row")
+    for f in requirements.md design.md tasks.md; do
+      [ -f "$spec_dir/$f" ] || { fail "not approvable: $spec_dir/$f is missing on disk"; exit 1; }
+    done
+    read -r req_count task_count <<<"$(spec_counts "$spec_dir")"
+    count_sql=", requirements_count=$req_count, tasks_count=$task_count"
+    counts_note="R=$req_count, T=$task_count"
+    if [ "$prev_req" != "$req_count" ] || [ "$prev_task" != "$task_count" ]; then
+      warn "spec counts changed since mark-spec-ready: R $prev_req→$req_count, T $prev_task→$task_count — recording the current ones"
+    fi
+  fi
+
   # UPDATE ... RETURNING against status='ready' is the actual gate here — a
   # second approve-spec, or one run before mark-spec-ready, matches nothing
   # and fails cleanly rather than silently re-stamping approved_at.
   local updated
-  updated=$(sqlite3 -json "$DB_PATH" "UPDATE specs SET status='approved', approved_at='$now', approved_by='$(sql_escape "$by")', updated_at='$now'
+  updated=$(sqlite3 -json "$DB_PATH" "UPDATE specs SET status='approved', approved_at='$now', approved_by='$(sql_escape "$by")', updated_at='$now'$count_sql
 WHERE feature_id=$fid AND status='ready' AND deleted_at IS NULL
 RETURNING id, feature_id;" 2>&1)
   if [ $? -ne 0 ]; then
@@ -541,7 +630,7 @@ RETURNING id, feature_id;" 2>&1)
     fail "not approvable: no 'ready' spec found for feature $target (already approved, or not yet marked ready — see 'mark-spec-ready')"
     exit 1
   fi
-  ok "approved spec for feature $target (by: $by)"
+  ok "approved spec for feature $target (by: $by${counts_note:+, $counts_note})"
 }
 
 cmd_claim() {
@@ -588,6 +677,16 @@ WHERE $target_where;")
     name_now=$(jq -r '.[0].name' <<<"$check_row")
     spec_status=$(jq -r '.[0].spec_status // "none"' <<<"$check_row")
     depends_on_now=$(jq -r '.[0].depends_on // "[]"' <<<"$check_row")
+
+    if [ "$status_now" = "superseded" ]; then
+      fail "feature $name_now is superseded — run 'unsupersede $name_now <reason>' first if it really needs its own work"
+      exit 1
+    fi
+
+    if [ -n "$target" ] && { [ "$status_now" = "in_progress" ] || [ "$status_now" = "blocked" ]; }; then
+      claim_resume "$(jq -r '.[0].id' <<<"$check_row")" "$agent" "$agent_model"
+      return
+    fi
 
     # Local (same-project) dependency gate: every name listed in depends_on
     # must belong to a feature that is already 'done'. This is what would
@@ -639,6 +738,15 @@ WHERE $target_where;")
   # dependencies declared.
   local deps_gate="NOT EXISTS (SELECT 1 FROM json_each(f.depends_on) dep WHERE dep.value NOT IN (SELECT name FROM features d2 WHERE d2.project_id = f.project_id AND d2.status = 'done' AND d2.deleted_at IS NULL))"
 
+  # Checked before the feature UPDATE: otherwise a claim while another session
+  # is active (e.g. a spec_drafting one) flips the feature to in_progress and
+  # only then fails on the session INSERT, leaving it in_progress sessionless.
+  local active_sid; active_sid="$(current_session_id)"
+  if [ -n "$active_sid" ]; then
+    fail "session $active_sid is already open — log it out or block its feature before claiming another"
+    exit 1
+  fi
+
   local update_sql
   if [ -n "$target" ]; then
     if [[ "$target" =~ ^[0-9]+$ ]]; then
@@ -686,24 +794,138 @@ VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")
   fi
 }
 
+# The project's active session. A paused session (its feature is blocked) is
+# still open but not current: nothing but unblock/cancel-session acts on it.
 current_session_id() {
   local pid; pid="$(project_id)"
-  db "SELECT id FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL LIMIT 1;"
+  db "SELECT id FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL LIMIT 1;"
+}
+
+# claim_resume <feature_id> <agent> <agent_model> — the explicit-claim path for
+# an in_progress/blocked feature that has lost its session (e.g. to
+# `cancel-session --force`). Without it nothing could reopen such a feature:
+# claim only took pending/spec_ready, reopen only done, unblock never opened a
+# session, and log-out needs one. The dependency/spec gates are not re-run —
+# the feature already passed them when it was first claimed.
+claim_resume() {
+  local fid="$1" agent="$2" agent_model="$3"
+  local pid; pid="$(project_id)"
+  local now; now="$(now_iso)"
+
+  local open_row
+  open_row=$(sqlite3 -json "$DB_PATH" "SELECT id, paused_at FROM session_log
+WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL LIMIT 1;")
+  if [ -n "$open_row" ] && [ "$open_row" != "[]" ]; then
+    local open_sid; open_sid=$(jq -r '.[0].id' <<<"$open_row")
+    if [ -n "$(jq -r '.[0].paused_at // empty' <<<"$open_row")" ]; then
+      fail "feature still has paused session $open_sid — run 'unblock <feature>' to resume it instead of claiming"
+    else
+      fail "feature is already in progress with open session $open_sid — nothing to claim"
+    fi
+    exit 1
+  fi
+  local active_sid; active_sid="$(current_session_id)"
+  if [ -n "$active_sid" ]; then
+    fail "session $active_sid is already open — log it out, block its feature, or cancel it before resuming this one"
+    exit 1
+  fi
+
+  local prev_sid prev_note resumed
+  prev_sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 1;")
+  if [ -n "$prev_sid" ]; then
+    prev_note=$(db "SELECT entry FROM session_log_entries WHERE session_id=$prev_sid AND entry LIKE 'CANCELLED:%' ORDER BY id DESC LIMIT 1;")
+    resumed="RESUMED: previous session $prev_sid was cancelled${prev_note:+ ($prev_note)}"
+  else
+    resumed="RESUMED: feature had no open session and no cancelled session on record"
+  fi
+
+  local agent_attribution
+  agent_attribution="$(harness_agent_attribution "$agent" "" "$agent_model")"
+
+  # changes() gates each INSERT on the previous statement having matched, so
+  # a feature whose status or sessions changed since the checks above gets no
+  # session instead of a stray one; .bail rolls back on an index conflict.
+  local out
+  out=$(sqlite3 "$DB_PATH" <<SQL 2>&1
+.bail on
+BEGIN;
+UPDATE features SET status='in_progress', updated_at='$now'
+  WHERE id=$fid AND status IN ('in_progress','blocked') AND deleted_at IS NULL
+    AND NOT EXISTS (SELECT 1 FROM session_log WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL);
+INSERT INTO session_log (project_id, feature_id, agent, started_at)
+  SELECT '$(sql_escape "$pid")', $fid, '$(sql_escape "$agent_attribution")', '$now' WHERE changes() = 1;
+INSERT INTO session_log_entries (session_id, entry, created_at)
+  SELECT last_insert_rowid(), '$(sql_escape "$resumed")', '$now' WHERE changes() = 1;
+COMMIT;
+SQL
+)
+  if [ $? -ne 0 ]; then
+    fail "resume failed (is another feature already in_progress?): $out"
+    exit 1
+  fi
+  local new_sid
+  new_sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND started_at='$now' AND closed_at IS NULL AND deleted_at IS NULL LIMIT 1;")
+  if [ -z "$new_sid" ]; then
+    fail "resume failed — feature state changed between the check and the claim; re-run 'status' and try again"
+    exit 1
+  fi
+
+  local row
+  row=$(sqlite3 -json "$DB_PATH" "SELECT feature_number, name, title, source_id FROM features WHERE id=$fid;")
+  ok "resumed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$row") (new session $new_sid; ${resumed#RESUMED: })"
+  warn "any review verdict stayed on the old session — record-review must run again on session $new_sid before log-out"
+
+  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$row")
+  if [ -n "$source_id" ]; then
+    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_in_progress' 'In Progress')"
+  fi
 }
 
 cmd_append_log() {
-  local entry="${1:?usage: append-log <entry> [--agent NAME] [--agent-model MODEL]}"
-  shift
-  local explicit_agent="" agent_model=""
+  local usage="usage: append-log <entry> [--feature TARGET] [--agent NAME] [--agent-model MODEL]"
+  local entry="" feature_target="" explicit_agent="" agent_model=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --agent) explicit_agent="$2"; shift 2 ;;
       --agent-model) agent_model="$2"; shift 2 ;;
-      *) fail "unknown argument: $1"; exit 1 ;;
+      --feature) feature_target="$2"; shift 2 ;;
+      *)
+        [ -z "$entry" ] || { fail "unknown argument: $1"; exit 1; }
+        entry="$1"; shift
+        ;;
     esac
   done
+  [ -n "$entry" ] || { fail "$usage"; exit 1; }
+
+  # --feature writes a feature-level note instead of a session entry, so it
+  # works with no open session (e.g. "spec revised per the user's answers"
+  # after mark-spec-ready, or a note on a feature that never had a session).
+  if [ -n "$feature_target" ]; then
+    local pid; pid="$(project_id)"
+    [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+    local where
+    if [[ "$feature_target" =~ ^[0-9]+$ ]]; then
+      where="feature_number=$feature_target"
+    else
+      where="name='$(sql_escape "$feature_target")'"
+    fi
+    local frow
+    frow=$(sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name FROM features
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
+    if [ -z "$frow" ] || [ "$frow" = "[]" ]; then
+      fail "no matching feature $feature_target"
+      exit 1
+    fi
+    local attribution
+    attribution="$(harness_agent_attribution "${explicit_agent:-leader}" "" "$agent_model")"
+    db_exec "INSERT INTO feature_notes (feature_id, entry, created_at)
+VALUES ($(jq -r '.[0].id' <<<"$frow"), '$(sql_escape "[$attribution] $entry")', '$(now_iso)');"
+    ok "appended note to feature $(jq -r '.[0] | "\(.feature_number) \(.name)"' <<<"$frow") (by: $attribution)"
+    return 0
+  fi
+
   local sid; sid="$(current_session_id)"
-  [ -n "$sid" ] || { fail "no open session — run 'claim' first"; exit 1; }
+  [ -n "$sid" ] || { fail "no open session — run 'claim' first, or pass --feature <target> to write a feature-level note"; exit 1; }
 
   # Determine the role for attribution: explicit --agent wins, else fall back to
   # the session's stored agent (set when claim/claim-spec opened the session),
@@ -864,9 +1086,7 @@ cmd_block() {
 
   # Same "UPDATE ... RETURNING or fail cleanly" shape as cmd_claim — only an
   # in_progress feature can be blocked (mirrors: only a pending one can be
-  # claimed). The session stays open (no closed_at write) — same "leave it
-  # for the next session to pick up" idiom AGENTS.md already documents for
-  # getting stuck, just with status='blocked' instead of 'in_progress'.
+  # claimed).
   local updated
   updated=$(sqlite3 -json "$DB_PATH" "UPDATE features SET status='blocked', updated_at='$now'
 WHERE project_id='$(sql_escape "$pid")' AND status='in_progress' AND deleted_at IS NULL AND $where
@@ -879,13 +1099,24 @@ RETURNING id, feature_number, name, title;" 2>&1)
     fail "not blockable: no matching in_progress feature"
     exit 1
   fi
+  local fid; fid=$(jq -r '.[0].id' <<<"$updated")
 
-  local sid; sid="$(current_session_id)"
+  # The feature's own session is paused, not closed: it stays open (log, plan
+  # and review verdict intact) for unblock to resume, but frees the project's
+  # one-session slot so other work can be claimed meanwhile. The reason goes
+  # on that session — not on whatever session happens to be current — so
+  # check-blockers finds its BLOCKED_ON note.
+  local sid
+  sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL LIMIT 1;")
   if [ -n "$sid" ]; then
-    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$reason")', '$now');"
+    db_exec "UPDATE session_log SET paused_at='$now' WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$reason")', '$now');"
+    ok "blocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated") (session $sid paused)"
+  else
+    db_exec "INSERT INTO feature_notes (feature_id, entry, created_at) VALUES ($fid, '$(sql_escape "$reason")', '$now');"
+    ok "blocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
+    warn "feature had no open session — reason saved as a feature note; after unblocking, 'claim <feature>' opens a new session"
   fi
-
-  ok "blocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 }
 
 cmd_unblock() {
@@ -902,22 +1133,48 @@ cmd_unblock() {
     where="name='$(sql_escape "$target")'"
   fi
 
-  # Respects the same one_in_progress_per_project unique index cmd_claim
-  # does — if another feature is already in_progress, the UPDATE fails and
-  # we report that clearly instead of surfacing SQLite's raw constraint error.
-  local updated
-  updated=$(sqlite3 -json "$DB_PATH" "UPDATE features SET status='in_progress', updated_at='$now'
-WHERE project_id='$(sql_escape "$pid")' AND status='blocked' AND deleted_at IS NULL AND $where
-RETURNING id, feature_number, name, title;" 2>&1)
-  if [ $? -ne 0 ]; then
-    fail "unblock failed (is another feature already in_progress?): $updated"
-    exit 1
-  fi
-  if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
+  local row
+  row=$(sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title FROM features
+WHERE project_id='$(sql_escape "$pid")' AND status='blocked' AND deleted_at IS NULL AND $where;")
+  if [ "$row" = "[]" ] || [ -z "$row" ]; then
     fail "not unblockable: no matching blocked feature"
     exit 1
   fi
-  ok "unblocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
+  local fid fname; fid=$(jq -r '.[0].id' <<<"$row"); fname=$(jq -r '.[0].name' <<<"$row")
+
+  # unblock resumes the feature's session; it never opens one. Flipping a
+  # sessionless feature to in_progress (as it used to) leaves it stranded:
+  # nothing can log it out. Point at claim, which opens a fresh session.
+  local sid
+  sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL LIMIT 1;")
+  if [ -z "$sid" ]; then
+    fail "feature $fname has no open session to resume (was it cancelled?) — run 'scripts/harness.sh claim $fname' instead: it opens a new session and logs RESUMED"
+    exit 1
+  fi
+
+  local active_sid; active_sid="$(current_session_id)"
+  if [ -n "$active_sid" ] && [ "$active_sid" != "$sid" ]; then
+    fail "session $active_sid is already open — log it out or block its feature before unblocking $fname"
+    exit 1
+  fi
+
+  # Respects the same unique indexes cmd_claim does (one in_progress feature,
+  # one active session); .bail rolls both statements back together.
+  local out
+  out=$(sqlite3 "$DB_PATH" <<SQL 2>&1
+.bail on
+BEGIN;
+UPDATE features SET status='in_progress', updated_at='$now' WHERE id=$fid AND status='blocked';
+UPDATE session_log SET paused_at=NULL WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, 'UNBLOCKED: session resumed', '$now');
+COMMIT;
+SQL
+)
+  if [ $? -ne 0 ]; then
+    fail "unblock failed (is another feature already in_progress?): $out"
+    exit 1
+  fi
+  ok "unblocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$row") (session $sid resumed)"
 }
 
 cmd_cancel_session() {
@@ -1027,6 +1284,140 @@ VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
   fi
 }
 
+cmd_supersede() {
+  local usage="usage: supersede <feature_number|name> --by <feature_number|name> --reason <text>"
+  local target="" by_target="" reason=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by) by_target="$2"; shift 2 ;;
+      --reason) reason="$2"; shift 2 ;;
+      *)
+        [ -z "$target" ] || { fail "unknown argument: $1"; exit 1; }
+        target="$1"; shift
+        ;;
+    esac
+  done
+  if [ -z "$target" ] || [ -z "$by_target" ] || [ -z "$reason" ]; then
+    fail "$usage"
+    exit 1
+  fi
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local now; now="$(now_iso)"
+
+  local where by_where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then where="feature_number=$target"; else where="name='$(sql_escape "$target")'"; fi
+  if [[ "$by_target" =~ ^[0-9]+$ ]]; then by_where="feature_number=$by_target"; else by_where="name='$(sql_escape "$by_target")'"; fi
+
+  local row by_row
+  row=$(sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, status, source_id FROM features
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
+  [ -n "$row" ] && [ "$row" != "[]" ] || { fail "not supersedable: no matching feature $target"; exit 1; }
+  by_row=$(sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, status FROM features
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $by_where;")
+  [ -n "$by_row" ] && [ "$by_row" != "[]" ] || { fail "no matching feature $by_target for --by"; exit 1; }
+
+  local fid fnum fname status_now by_fid by_label
+  fid=$(jq -r '.[0].id' <<<"$row")
+  fnum=$(jq -r '.[0].feature_number' <<<"$row")
+  fname=$(jq -r '.[0].name' <<<"$row")
+  status_now=$(jq -r '.[0].status' <<<"$row")
+  by_fid=$(jq -r '.[0].id' <<<"$by_row")
+  by_label=$(jq -r '.[0] | "\(.feature_number) \(.name)"' <<<"$by_row")
+  [ "$fid" != "$by_fid" ] || { fail "feature $fname cannot supersede itself"; exit 1; }
+  if [ "$(jq -r '.[0].status' <<<"$by_row")" = "superseded" ]; then
+    fail "feature $by_label is itself superseded — pass the feature that actually carries the work"
+    exit 1
+  fi
+
+  # Only features with no work in flight: in_progress/blocked always hold the
+  # project's open session, and a spec_drafting one might. done is final.
+  # Anything with an open session must be closed through its own lifecycle
+  # (log-out, or block + a later decision) before it can be superseded.
+  case "$status_now" in
+    pending|spec_drafting|spec_ready) ;;
+    *) fail "not supersedable: feature $fnum $fname is '$status_now' (only pending/spec_drafting/spec_ready)"; exit 1 ;;
+  esac
+  local open_on_it
+  open_on_it=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL LIMIT 1;")
+  [ -z "$open_on_it" ] || { fail "not supersedable: session $open_on_it is still open on feature $fnum $fname — close it first"; exit 1; }
+
+  local updated
+  updated=$(sqlite3 -json "$DB_PATH" "UPDATE features SET status='superseded', superseded_by='$(sql_escape "$(jq -r '.[0].name' <<<"$by_row")")',
+  superseded_from=status, updated_at='$now'
+WHERE id=$fid AND status='$(sql_escape "$status_now")' AND deleted_at IS NULL
+RETURNING id;" 2>&1)
+  if [ $? -ne 0 ]; then
+    fail "supersede failed: $updated"
+    exit 1
+  fi
+  if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
+    fail "supersede failed for feature $fnum $fname — state changed between check and update; re-run 'status' and try again"
+    exit 1
+  fi
+
+  local attribution; attribution="$(harness_agent_attribution "${HARNESS_AGENT:-leader}" "" "")"
+  db_exec "INSERT INTO feature_notes (feature_id, entry, created_at)
+VALUES ($fid, '$(sql_escape "[$attribution] SUPERSEDED by $by_label (was $status_now): $reason")', '$now');"
+  ok "superseded: $fnum $fname → $by_label (was $status_now)"
+
+  # A dependent can never be claimed while its depends_on names a feature
+  # that will never be 'done' — don't rewrite it silently, just say so.
+  local dependents
+  dependents=$(db "SELECT f.feature_number || ' ' || f.name FROM features f, json_each(f.depends_on) dep
+WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.status <> 'done' AND dep.value='$(sql_escape "$fname")';")
+  if [ -n "$dependents" ]; then
+    warn "these features depend on $fname and can't be claimed until their depends_on is fixed (e.g. point them at $(jq -r '.[0].name' <<<"$by_row") with 'set-depends-on'): $(tr '\n' ',' <<<"$dependents" | sed 's/,$//; s/,/, /g')"
+  fi
+
+  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$row")
+  if [ -n "$source_id" ]; then
+    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_superseded' 'Done')"
+  fi
+}
+
+cmd_unsupersede() {
+  local target="${1:?usage: unsupersede <feature_number|name> <reason...>}"; shift
+  local reason="$*"
+  [ -n "$reason" ] || { fail "usage: unsupersede <feature_number|name> <reason...>"; exit 1; }
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local now; now="$(now_iso)"
+
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then where="feature_number=$target"; else where="name='$(sql_escape "$target")'"; fi
+
+  # Restores the exact status supersede recorded (pending/spec_drafting/
+  # spec_ready — none of which hold a session, so no index can conflict).
+  local updated
+  updated=$(sqlite3 -json "$DB_PATH" "UPDATE features SET status=COALESCE(superseded_from, 'pending'),
+  superseded_by=NULL, superseded_from=NULL, updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND status='superseded' AND deleted_at IS NULL AND $where
+RETURNING id, feature_number, name, status, source_id;" 2>&1)
+  if [ $? -ne 0 ]; then
+    fail "unsupersede failed: $updated"
+    exit 1
+  fi
+  if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
+    fail "not unsupersedable: no matching superseded feature"
+    exit 1
+  fi
+
+  local fid status_back
+  fid=$(jq -r '.[0].id' <<<"$updated")
+  status_back=$(jq -r '.[0].status' <<<"$updated")
+  local attribution; attribution="$(harness_agent_attribution "${HARNESS_AGENT:-leader}" "" "")"
+  db_exec "INSERT INTO feature_notes (feature_id, entry, created_at)
+VALUES ($fid, '$(sql_escape "[$attribution] UNSUPERSEDED (back to $status_back): $reason")', '$now');"
+  ok "unsuperseded: $(jq -r '.[0] | "\(.feature_number) \(.name)"' <<<"$updated") (back to $status_back)"
+
+  if [ -n "$(jq -r '.[0].source_id // empty' <<<"$updated")" ]; then
+    warn "its Notion card was not changed — move it back to the right column by hand"
+  fi
+}
+
 cmd_notion_create_feature() {
   bash "$SCRIPT_DIR/notion_create_feature.sh" "$@"
 }
@@ -1055,10 +1446,15 @@ WHERE project_id='$(sql_escape "$pid")' AND status='blocked' AND deleted_at IS N
     # feature (block writes one, see cmd_block's caller in the
     # cross-project-dependency flow documented in AGENTS.md).
     local note
-    note=$(sqlite3 "$DB_PATH" "SELECT sle.entry FROM session_log_entries sle
-JOIN session_log sl ON sl.id = sle.session_id
-WHERE sl.feature_id=$fid AND sle.deleted_at IS NULL AND sle.entry LIKE '%BLOCKED_ON:%'
-ORDER BY sle.created_at DESC LIMIT 1;")
+    # block writes it as a feature note instead when the feature had no session.
+    note=$(sqlite3 "$DB_PATH" "SELECT entry FROM (
+  SELECT sle.entry, sle.created_at FROM session_log_entries sle
+  JOIN session_log sl ON sl.id = sle.session_id
+  WHERE sl.feature_id=$fid AND sle.deleted_at IS NULL AND sle.entry LIKE '%BLOCKED_ON:%'
+  UNION ALL
+  SELECT entry, created_at FROM feature_notes
+  WHERE feature_id=$fid AND deleted_at IS NULL AND entry LIKE '%BLOCKED_ON:%'
+) ORDER BY created_at DESC LIMIT 1;")
 
     if [ -z "$note" ]; then
       warn "$fnum $fname is blocked but has no BLOCKED_ON note — can't check automatically"
@@ -1105,11 +1501,18 @@ cmd_status() {
   echo "project: $PROJECT_SLUG ($pid)"
   echo "--- features ---"
   db -header -column "SELECT f.feature_number, f.name, f.status, f.sdd,
-  s.status AS spec_status, s.requirements_count AS reqs, s.tasks_count AS tasks, s.approved_by
+  s.status AS spec_status, s.requirements_count AS reqs, s.tasks_count AS tasks, s.approved_by,
+  f.superseded_by
 FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
 WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL ORDER BY f.feature_number;"
   echo "--- open session ---"
-  db -header -column "SELECT id, agent, started_at, review_status, reviewed_by FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL;"
+  db -header -column "SELECT id, agent, started_at, review_status, reviewed_by FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;"
+  local paused
+  paused=$(db -header -column "SELECT sl.id, f.feature_number, f.name AS feature, sl.paused_at, sl.review_status FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id WHERE sl.project_id='$(sql_escape "$pid")' AND sl.closed_at IS NULL AND sl.deleted_at IS NULL AND sl.paused_at IS NOT NULL;")
+  if [ -n "$paused" ]; then
+    echo "--- paused sessions (blocked features; resume with unblock) ---"
+    echo "$paused"
+  fi
 }
 
 cmd_delete_feature() {
@@ -1193,6 +1596,8 @@ main() {
     unblock) cmd_unblock "$@" ;;
     cancel-session) cmd_cancel_session "$@" ;;
     reopen) cmd_reopen "$@" ;;
+    supersede) cmd_supersede "$@" ;;
+    unsupersede) cmd_unsupersede "$@" ;;
     check-blockers) cmd_check_blockers ;;
     *)
       fail "unknown subcommand: $sub"

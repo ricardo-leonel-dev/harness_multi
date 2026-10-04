@@ -165,6 +165,89 @@ if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|depends_on|';
   sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]';"
 fi
 
+# Adds the 'superseded' feature status (+ superseded_by/superseded_from) and
+# the feature_notes table. 'superseded' closes a feature that another one
+# absorbed without soft-deleting it: delete-feature records no reason, has
+# no inverse, and never reaches Notion. feature_notes gives append-log
+# --feature a place to write when no session is open. Same 12-step rebuild
+# as the sdd migration above, since the status CHECK has to change.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|superseded_by|'; then
+  sqlite3 "$DB_PATH" <<'SQL'
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+
+CREATE TABLE features_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  feature_number INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  acceptance TEXT NOT NULL DEFAULT '[]',
+  sdd INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'spec_drafting', 'spec_ready', 'in_progress', 'done', 'blocked', 'superseded')),
+  source_id TEXT,
+  depends_on TEXT NOT NULL DEFAULT '[]',
+  superseded_by TEXT,
+  superseded_from TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+
+INSERT INTO features_new (id, project_id, feature_number, name, title, description, acceptance, sdd, status, source_id, depends_on, created_at, updated_at, deleted_at)
+  SELECT id, project_id, feature_number, name, title, description, acceptance, sdd, status, source_id, depends_on, created_at, updated_at, deleted_at
+  FROM features;
+
+DROP TABLE features;
+ALTER TABLE features_new RENAME TO features;
+
+CREATE UNIQUE INDEX features_number_active ON features(project_id, feature_number) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX features_name_active ON features(project_id, name) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX features_source_id_active ON features(project_id, source_id)
+  WHERE deleted_at IS NULL AND source_id IS NOT NULL;
+CREATE UNIQUE INDEX one_in_progress_per_project ON features(project_id)
+  WHERE status = 'in_progress' AND deleted_at IS NULL;
+CREATE INDEX idx_features_project_status ON features(project_id, status);
+
+CREATE TABLE IF NOT EXISTS feature_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+  entry TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_feature_notes_feature ON feature_notes(feature_id, created_at);
+
+COMMIT;
+PRAGMA foreign_key_check;
+PRAGMA foreign_keys=ON;
+SQL
+fi
+
+# Adds session_log.paused_at. `block` used to leave its session open, so a
+# blocked feature held the project's only session slot and the sole way to
+# start other work was `cancel-session --force` on real, even already-approved
+# work. A paused session keeps closed_at NULL (it is not history) but drops
+# out of one_open_session_per_project; `unblock` clears paused_at and resumes
+# it. Open sessions of features that are already blocked are paused here too,
+# so existing installs free their slot on the first run after upgrading.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(session_log);" | grep -q '|paused_at|'; then
+  sqlite3 "$DB_PATH" <<'SQL'
+.bail on
+BEGIN TRANSACTION;
+ALTER TABLE session_log ADD COLUMN paused_at TEXT;
+DROP INDEX IF EXISTS one_open_session_per_project;
+CREATE UNIQUE INDEX one_open_session_per_project ON session_log(project_id)
+  WHERE closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;
+UPDATE session_log SET paused_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE closed_at IS NULL AND deleted_at IS NULL
+    AND feature_id IN (SELECT id FROM features WHERE status = 'blocked' AND deleted_at IS NULL);
+COMMIT;
+SQL
+fi
+
 db() {
   sqlite3 "$DB_PATH" "$@"
 }
@@ -218,12 +301,32 @@ json_array() {
 #   5. $CODEX_MODEL      → prefix "Codex" (set by Codex CLI in some versions;
 #      not all Codex versions export this — pass --agent-model explicitly or
 #      rely on the Codex chain-string convention if it doesn't).
-#   6. Fall back to $HARNESS_AGENT (legacy env var) or "unknown" — no prefix.
+#   6. No model known → the input as-is if it was already formatted, else the
+#      role itself, else $HARNESS_AGENT (legacy env var),
+#      else "unknown" — no prefix.
+#
+# $role is normalized first, because callers pass whatever --agent or the
+# session's stored agent holds, not always a bare role:
+#   - an already-formatted attribution ("Claude (leader agent by X)") is
+#     unwrapped to its role, so re-formatting it doesn't nest it
+#     ("Claude (Claude (leader agent by X) agent by X)" — what append-log used
+#     to write, since it passes the session's stored agent as the role);
+#   - anything else that isn't a bare role token (e.g. Codex's
+#     "leader -> implementer (GPT-5)" chain passed via --agent) is treated as
+#     $explicit and returned as-is, as claim/claim-spec's docs promise.
 harness_agent_attribution() {
   local role="$1"
   local explicit="${2:-}"
   local prefix="Claude"
   local model="${3:-}"
+  local formatted_re='^(Claude|Codex) \((.*) agent by .*\)$' formatted=""
+  while [[ "$role" =~ $formatted_re ]]; do
+    formatted="$role"
+    role="${BASH_REMATCH[2]}"
+  done
+  if [ -z "$explicit" ] && [ -n "$role" ] && ! [[ "$role" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    explicit="$role"
+  fi
   if [ -z "$model" ] && [ -n "${HARNESS_AGENT_MODEL:-}" ]; then
     model="$HARNESS_AGENT_MODEL"
   fi
@@ -241,7 +344,9 @@ harness_agent_attribution() {
   elif [ -n "$model" ]; then
     printf '%s (%s agent by %s)' "$prefix" "$role" "$model"
   else
-    printf '%s' "${HARNESS_AGENT:-unknown}"
+    # With no model to re-format with, an already-formatted input is kept
+    # (innermost level), so its original model isn't lost.
+    printf '%s' "${formatted:-${role:-${HARNESS_AGENT:-unknown}}}"
   fi
 }
 

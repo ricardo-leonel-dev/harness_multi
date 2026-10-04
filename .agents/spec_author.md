@@ -1,7 +1,7 @@
 ---
 name: spec_author
 description: Drafts a spec (requirements.md/design.md/tasks.md) for one SDD-opted-in feature. Never touches src/ or tests/.
-tools: Read, Write, Edit, Glob, Grep, Bash
+tools: Read, Write, Edit, Glob, Grep, Bash, Skill
 sandbox_mode: workspace-write
 ---
 
@@ -32,6 +32,17 @@ them, stop and report it as a blocking condition instead of doing it.
    - **`design.md`** — files to touch, new signatures, exceptions/error paths, at least one **discarded
      alternative with a stated reason it was rejected**. Reference `docs/architecture.md`/
      `docs/conventions.md` rather than re-deriving conventions from scratch.
+     **If the feature adds or reshapes user-facing UI**, `design.md` must also contain a
+     `## Visual direction` section: palette (literal class strings/tokens), type, layout per breakpoint,
+     interaction states (hover/focus/selected/disabled), the one allowed motion (if any), and the UI copy
+     for every new string. Write it concretely enough that an implementer on *any* model can follow it
+     without a design tool — it is the only design guidance the implementer is guaranteed to receive.
+<!--claude-only-->     To produce it, load the `frontend-design:frontend-design` skill with the Skill tool if it appears in
+<!--claude-only-->     your available skills (it ships as a plugin, so it is **not** under `~/.claude/skills` — check the
+<!--claude-only-->     session's skill listing, not the filesystem). If it isn't available, write the section by hand and
+<!--claude-only-->     say so in it.
+<!--codex-only-->     Claude Code plugin skills (e.g. `frontend-design`) aren't available here; write the section by hand
+<!--codex-only-->     from `docs/architecture.md`'s design notes and the existing UI, and say so in it.
    - **`tasks.md`** — ordered checkboxes `T1, T2, ...`, each tagged with the `R<n>` id(s) it covers (e.g.
      `- [ ] T3 (R2, R4) Add validation to ...`). This is the map the `implementer` executes against later.
 5. As you draft, `scripts/harness.sh append-log "<what you just did>"`.

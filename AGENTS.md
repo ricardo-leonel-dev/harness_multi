@@ -131,6 +131,8 @@ return only the reference, not the content — never the full content in chat.
 | `scripts/notion_create_feature.sh` | Creates a new Notion page (feature card) — used for cross-project dependency requests (§8) | Setting up or troubleshooting cross-project requests |
 | `docs/architecture.md`    | What "doing a good job" means in this project                            | Before implementing                   |
 | `docs/conventions.md`     | Style rules, naming conventions, structure                               | Before writing code                   |
+| `harness/instructions/coverage.md` | Harness-owned shared coverage guidance (refreshed on reinstall) | Before preparing evidence |
+| `harness/instructions/postgres.md` | Optional postgres profile tools and transactional SQL guidance | Before database verification, when present |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
 | `docs/specs.md`           | Spec-driven development: EARS format, file layout, traceability (§9)     | Before drafting, implementing, or reviewing an `sdd=1` feature |
 | `specs/<name>/{requirements,design,tasks}.md` | Spec content for `sdd=1` features — git-tracked, human/agent-authored (not generated) | Before implementing or reviewing an `sdd=1` feature |
@@ -139,6 +141,10 @@ return only the reference, not the content — never the full content in chat.
 | `.codex/agents/`          | Codex CLI custom agent definitions (leader, implementer, reviewer, spec_author) | Codex CLI: if you orchestrate work    |
 | `src/`                    | Application code                                                          | To implement                          |
 | `tests/`                  | Automated tests                                                           | To verify                             |
+
+Read the shared instructions above when present, alongside project-specific docs.
+Update harness-owned scripts/instructions in the source toolkit; installed project
+docs, specs, tests, CHECKPOINTS.md and .harness.json belong to the project.
 
 ## 3. Hard Rules (non-negotiable)
 
@@ -239,6 +245,15 @@ This is not a substitute for the normal implementer → reviewer flow — it exi
 Route future work on this same feature through `claim`/`record-review`/`log-out` normally; this section is for the
 one-time reconciliation, not an alternate lifecycle.
 
+### Notes Outside a Session, and Absorbed Features
+
+- `scripts/harness.sh append-log --feature <target> "<note>"` writes a feature-level note when no session is open
+  (e.g. after `mark-spec-ready`, or on a feature that never had a session); `state/features/` shows them.
+- When one feature's scope is fully covered by another, don't `delete-feature` it — propose to the user, then run
+  `scripts/harness.sh supersede <target> --by <other> --reason "<why>"` (only `pending`/`spec_drafting`/`spec_ready`
+  with no open session). It records the reason, pushes `notion_status_superseded` (default `Done`) if linked to
+  Notion, and is reversible with `unsupersede <target> <reason>`. Fix any `depends_on` it warns about.
+
 ## 6. If you get stuck
 
 - Reread the relevant section of `docs/`.
@@ -284,9 +299,9 @@ routed through Notion, the same shared task board `notion-check`/`notion-import`
    scripts/harness.sh block <current-feature> "waiting on <target-project-slug>: BLOCKED_ON: path=<absolute path \
      to the target project's directory> feature=<predicted_name> notion_page=<url>"
    ```
-   This sets the feature's status to `blocked` (a real status the schema has always supported, just newly wired
-   up) and leaves the session open — same "leave it for the next session" idiom as §6, just with `blocked` instead
-   of `in_progress`.
+   This sets the feature's status to `blocked` and **pauses** its session: the session stays open (log, plan and
+   any review verdict intact) but no longer holds the project's single session slot, so other pending features
+   can be claimed while this one waits. `unblock` later resumes that same session.
 4. Report to the user what was created and that the feature is now blocked, then end the session.
 5. The user flips the Notion card to `Ready` whenever they want work to start there — **nothing changes** on the
    target project's side: its own `notion-check`/`notion-import`/`claim`/`log-out` flow (§0's "Notion Task Intake"
@@ -295,8 +310,16 @@ routed through Notion, the same shared task board `notion-check`/`notion-import`
 6. **Resuming happens on your next session in *this* project** (Startup Protocol step 5): `check-blockers` reads
    every `blocked` feature's `BLOCKED_ON` note and queries the target project's `harness.db` *directly* (not
    Notion — faster, and doesn't depend on that project's own Notion push-back having succeeded). If the dependency
-   is `done`, run `scripts/harness.sh unblock <feature>` and continue it; if not, report its current status and
-   work on something else pending instead.
+   is `done`, run `scripts/harness.sh unblock <feature>` and continue it (it refuses while another session is
+   active — finish or block that one first); if not, report its current status and work on something else pending
+   instead.
+
+**A feature that lost its session.** If a `blocked` or `in_progress` feature has no open session (e.g. it was
+removed with `cancel-session --force`), `unblock` refuses — it only resumes sessions, it never opens one. Run
+`scripts/harness.sh claim <feature>` with the feature named explicitly: it opens a new session, sets the feature
+to `in_progress` and logs `RESUMED: previous session <id> was cancelled`. Review verdicts don't carry over, so the
+`reviewer` must run `record-review` again on the new session before `log-out`. Never use `cancel-session --force`
+just to free the slot for other work — `block` does that now without discarding anything.
 
 There is deliberately no background polling or scheduled agent here — resuming is tied to opening a session in
 this project again, consistent with how every other best-effort integration in this harness works (session-based,
@@ -324,6 +347,10 @@ reachable from `in_progress`, unchanged). The transitions are driven by `scripts
    doc comment for the full resolution order, and `record-review` for the contrasting rule (rejects bare human
    names because the reviewer is a subagent, not the human).
 4. `claim` — now works for the feature exactly like any other, launching `implementer` then `reviewer` as usual.
+
+If the user asks for spec changes between steps 2 and 3, launch the `spec_author` again on that feature: an explicit
+`claim-spec <target>` on a `spec_ready` feature whose spec isn't approved yet re-opens it (`spec_drafting`, new
+session), and it finishes with `mark-spec-ready` as before. `approve-spec` recounts `R<n>`/`T<n>` from the files.
 
 Spec content lives as git-tracked files, not database rows — `specs/<name>/` is authored the same way `src/`/
 `tests/` are, never gitignored, never regenerated by `snapshot.sh`. See `docs/specs.md` for the EARS requirement
