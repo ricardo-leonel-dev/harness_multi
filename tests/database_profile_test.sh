@@ -22,7 +22,9 @@ done
 cp -R "$P/docs" "$WORK/docs"
 install_into "$P" --profile postgres --verify-command false --human-user Replacement </dev/null
 cmp "$WORK/config" "$P/.harness.json"
-for f in architecture conventions verification specs; do cmp "$WORK/docs/$f.md" "$P/docs/$f.md"; done
+for f in architecture conventions verification; do cmp "$WORK/docs/$f.md" "$P/docs/$f.md"; done
+# docs/specs.md is harness-owned: a reinstall refreshes it from the toolkit.
+cmp "$TOOLKIT/templates/docs/specs.md.tmpl" "$P/docs/specs.md"
 for f in CHECKPOINTS.md tests/custom.sql specs/custom/requirements.md .claude/settings.json; do
   [ "$(cat "$P/$f")" = "project-owned sentinel $f" ]
 done

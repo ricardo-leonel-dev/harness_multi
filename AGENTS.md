@@ -123,7 +123,7 @@ return only the reference, not the content — never the full content in chat.
 | File / Folder            | What it contains                                                          | When to read it                       |
 | ------------------------- | --------------------------------------------------------------------------- | ---------------------------------------- |
 | `harness.db`              | SQLite — the source of truth for features and session state (gitignored) | Never read/write it directly; go through `scripts/harness.sh` |
-| `state/`                  | Generated, git-tracked markdown snapshot of `harness.db` (read-only)     | For human review / `git diff`; never hand-edit |
+| `state/`                  | Generated markdown snapshot of `harness.db` (read-only, local — excluded from git) | For human review; never hand-edit, never commit |
 | `.harness.json`           | Runtime config: db path, verify command, mirror env var names, Notion database id + token env var | If you need to know the verify command or project slug |
 | `scripts/harness.sh`      | The single entry point for reading/writing harness state                 | Every time you claim, log, or log-out |
 | `scripts/notion_check.sh` | Best-effort curl+jq Notion task check (see "Notion Task Intake" above)   | Setting up or troubleshooting Notion task intake      |
@@ -134,7 +134,7 @@ return only the reference, not the content — never the full content in chat.
 | `harness/instructions/coverage.md` | Harness-owned shared coverage guidance (refreshed on reinstall) | Before preparing evidence |
 | `harness/instructions/postgres.md` | Optional postgres profile tools and transactional SQL guidance | Before database verification, when present |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
-| `docs/specs.md`           | Spec-driven development: EARS format, file layout, traceability (§9)     | Before drafting, implementing, or reviewing an `sdd=1` feature |
+| `docs/specs.md`           | Harness-owned spec-driven development guide: EARS format, file layout, traceability (§9) (refreshed on reinstall) | Before drafting, implementing, or reviewing an `sdd=1` feature |
 | `specs/<name>/{requirements,design,tasks}.md` | Spec content for `sdd=1` features — git-tracked, human/agent-authored (not generated) | Before implementing or reviewing an `sdd=1` feature |
 | `CHECKPOINTS.md`          | Objective criteria for "correct end state"                               | For self-assessment                   |
 | `.claude/agents/`         | Claude Code subagent definitions (leader, implementer, reviewer, spec_author) | Claude Code: if you orchestrate work  |
@@ -145,6 +145,8 @@ return only the reference, not the content — never the full content in chat.
 Read the shared instructions above when present, alongside project-specific docs.
 Update harness-owned scripts/instructions in the source toolkit; installed project
 docs, specs, tests, CHECKPOINTS.md and .harness.json belong to the project.
+`install.sh` lists every harness-owned file (and `state/`) in the repository's
+`.git/info/exclude`: never `git add` them — only project-owned content is committed.
 
 ## 3. Hard Rules (non-negotiable)
 

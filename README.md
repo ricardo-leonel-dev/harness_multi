@@ -65,8 +65,19 @@ bash /path/to/this-toolkit/install.sh \
 
 This creates `harness.db`, scaffolds `docs/*.md` and `CHECKPOINTS.md` (fill in
 their TODOs), writes `.harness.json`, and copies the agent workflow files in.
-Re-running `install.sh` refreshes the harness-core files but never overwrites
-your project's own `docs/*.md` or `CHECKPOINTS.md`.
+Re-running `install.sh` refreshes the harness-core files (including
+`docs/specs.md`, which has no project-specific content) but never overwrites
+your project's own `docs/{architecture,conventions,verification}.md` or
+`CHECKPOINTS.md`.
+
+Everything the harness owns — `AGENTS.md`, `CLAUDE.md`, the agent definitions,
+`init.sh`, `scripts/*.sh`, `harness/`, `docs/specs.md`, `harness.db` and the
+`state/` snapshot — is listed in the repository's `.git/info/exclude` (local,
+never committed), inside a block keyed by the project's path so several
+installs can share one repository. Only project-owned content reaches git:
+`docs/{architecture,conventions,verification}.md`, `CHECKPOINTS.md`, `specs/`,
+`src/` and `tests/`. If some of those harness files were committed before,
+`install.sh` lists them so you can untrack them with `git rm -r --cached`.
 
 Optionally pass `--features-seed features.seed.json` (see
 `templates/features.seed.json.tmpl`) to bulk-load an initial feature list.
