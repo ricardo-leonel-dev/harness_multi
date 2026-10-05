@@ -43,6 +43,7 @@ implement directly.
    startup) — see "Cross-Project Dependencies" (§8) for what this does and when a `blocked` feature can resume.
 6. Apply the escalation table from `.claude/agents/leader.md` (Claude Code) or `.codex/agents/leader.toml` (Codex
    CLI).
+7. **Time discipline (F21 retro):** no re-verify what the implementer already verified; launch the reviewer within 60s of "ready"; on claim, log `BUDGET: <Xm impl> + <Ym review>` and interrupt at 2x budget. Anti-patterns to avoid: do not search for DB config when evidence is fresh in logs; do not re-run `run_tests.sh` yourself; do not re-read the spec line-by-line before delegating.
 
 ### Explicit Feature Selection
 
