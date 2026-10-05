@@ -45,3 +45,49 @@ no access to the local source tree.
 Do not replace repeated definitions with local file includes to reduce report or
 generation length. Group report evidence when appropriate using
 `harness/instructions/coverage.md`; each requirement still needs passing evidence.
+
+## Avoid byte-level fingerprints in acceptance tests
+
+Do not assert `md5(pg_get_functiondef(...))`, `sha256(pg_get_functiondef(...))`,
+or any hash-of-body as a primary acceptance check. They fail on every
+legitimate modification to the function body — adding a column, reordering
+SELECT columns, adding a comment, renaming an internal variable — forcing
+unnecessary churn on every feature that touches the function. When the
+expected hash is forgotten in that churn, the test silently lies: a future
+incidental refactor can re-match the stale hash and the test passes while
+the function it claims to verify has drifted. `scripts/lint_test_fingerprints.sh`
+scans `tests/*.sql` for these patterns on every `init.sh` run and fails the
+lint gate; adding a fingerprint test requires updating the linter first.
+Prefer behavioral assertions: assert the JSON output's required keys or
+types (`jsonb_object_keys`, `jsonb_typeof`), or call the procedure with the
+input you care about and check the response. Real regressions (renamed
+public field, broken join) still surface in other tests; the fingerprint
+adds friction without proportionate signal.
+
+## Pre-existing test failures: the baseline cache
+
+DB-schema projects accumulate pre-existing test failures over time as the
+schema evolves: stored procedure bodies drift in ways that make old
+acceptance assertions stale (e.g. a fixture row count that the original
+test assumed to be zero), feature work retroactively changes a column type
+that an older test then asserts incorrectly, or a function gets renamed.
+When a test suite has 5–10 of these stale failures, every implementer
+spends 5–15 minutes per task proving "this is not mine" via `git stash`
+plus a re-run, even though the work has nothing to do with those tests.
+
+`scripts/run_tests.sh` ships a baseline cache to break that cycle:
+
+- Run `bash scripts/run_tests.sh --all --baseline-write progress/.test_baseline`
+  once when you accept a known-stale set. The script writes the basenames
+  of currently failing tests to that file (one per line, `#` comments).
+- From then on, run `bash scripts/run_tests.sh --all --baseline progress/.test_baseline`.
+  Tests that fail and ARE in the baseline are reported as `[STALE]`
+  (informational, no exit code bump). Tests that fail and are NOT in
+  the baseline are `[REGRESSION]` (non-zero exit, blocks log-out).
+- Re-run `--baseline-write` whenever a previously-stale test is actually
+  fixed, to refresh the captured set.
+
+The implementer's dev loop should still use `--changed` (or
+`--changed --baseline`) for fast iteration on the in-progress feature.
+The reviewer runs `--all --baseline` at log-out time to verify no
+regressions; pre-existing failures do not block sign-off.

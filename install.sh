@@ -156,6 +156,8 @@ if [ "$PROFILE" = postgres ]; then
   cp "$TOOLKIT_DIR/profiles/postgres/build_traceability.sh" "$TARGET_DIR/scripts/build_traceability.sh"
   chmod +x "$TARGET_DIR/scripts/build_traceability.sh"
   cp "$TOOLKIT_DIR/profiles/postgres/acceptance_test_prologue.sql" "$TARGET_DIR/scripts/templates/acceptance_test_prologue.sql"
+  cp "$TOOLKIT_DIR/profiles/postgres/run_tests.sh" "$TARGET_DIR/scripts/run_tests.sh"
+  chmod +x "$TARGET_DIR/scripts/run_tests.sh"
   cp "$TOOLKIT_DIR/profiles/postgres/verification.md" "$TARGET_DIR/harness/instructions/postgres.md"
   ok "refreshed postgres profile tools and shared instructions"
 fi
