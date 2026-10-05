@@ -25,6 +25,17 @@
 #                            line, # comments). Combined with --baseline,
 #                            this lets a human periodically refresh the
 #                            known-stale set.
+#   --no-baseline            skip auto-loading progress/.test_baseline even
+#                            if it exists (the harness auto-loads it when no
+#                            --baseline flag is passed, so this is the
+#                            explicit override for callers that want every
+#                            failure to be a hard [FAIL]).
+#
+# Auto-load: when no --baseline flag is passed AND --no-baseline is not set,
+# the harness auto-loads progress/.test_baseline if the file exists. This
+# makes the baseline cache the default behavior in DB-schema projects once a
+# baseline has been captured - implementers no longer need to remember a flag
+# to avoid getting stuck on pre-existing test failures.
 #
 # Token-saving design (see Anti-Telephone Rule, AGENTS.md §0): psql's own
 # chatter (DO/BEGIN/ROLLBACK command tags, NOTICEs) is suppressed and the
@@ -55,16 +66,21 @@ while [ $# -gt 0 ]; do
     --base) shift; BASE_OVERRIDE="${1:-}" ;;
     --baseline) shift; BASELINE_FILE="${1:-}" ;;
     --baseline-write) shift; BASELINE_WRITE_FILE="${1:-}" ;;
+    --no-baseline) BASELINE_FILE="__disabled__" ;;
     -h|--help)
-      echo "Usage: $0 [--changed [--base <git-ref>] | --all] [--baseline <path>] [--baseline-write <path>]"
+      echo "Usage: $0 [--changed [--base <git-ref>] | --all] [--baseline <path>] [--baseline-write <path>] [--no-baseline]"
       echo ""
       echo "  --baseline <path>        load pre-existing failures from <path>; failures in the"
       echo "                           baseline are reported as [STALE] (informational) instead"
       echo "                           of [FAIL] (blocker). Tests failing that were NOT in the"
       echo "                           baseline are reported as [REGRESSION] and cause a"
       echo "                           non-zero exit. See docs/verification.md."
+      echo "                           Auto-loaded from progress/.test_baseline when no flag"
+      echo "                           is passed and the file exists."
       echo "  --baseline-write <path>  after the run, write the list of currently failing test"
       echo "                           files to <path> (one basename per line, # comments)."
+      echo "  --no-baseline            skip the auto-load of progress/.test_baseline; treat"
+      echo "                           every failure as a hard [FAIL] (non-zero exit)."
       exit 0
       ;;
     *)
@@ -78,6 +94,18 @@ done
 if [ ! -x "$PSQL_BIN" ]; then
   echo "[FAIL]  psql binary not found/executable at $PSQL_BIN (set \$PSQL_BIN to override)" >&2
   exit 1
+fi
+
+# Auto-load baseline: if the caller did not pass --baseline or --no-baseline,
+# and progress/.test_baseline exists in the project, treat it as the baseline.
+# This is the default behavior for DB-schema projects once a baseline has
+# been captured (see header doc comment).
+if [ "$BASELINE_FILE" = "" ] && [ -f "progress/.test_baseline" ]; then
+  BASELINE_FILE="progress/.test_baseline"
+  echo "[INFO]  auto-loading baseline: progress/.test_baseline (use --no-baseline to skip)"
+elif [ "$BASELINE_FILE" = "__disabled__" ]; then
+  BASELINE_FILE=""
+  echo "[INFO]  --no-baseline set; skipping auto-load of progress/.test_baseline"
 fi
 
 # Collect the list of test files to run into $TEST_FILES.
