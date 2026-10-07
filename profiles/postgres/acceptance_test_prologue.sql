@@ -2,6 +2,12 @@
 -- BEFORE the final ROLLBACK. Run with psql -X -v ON_ERROR_STOP=1 -f PATH.
 -- No runner-specific wrapper is required. Never COMMIT test fixtures.
 \set ON_ERROR_STOP on
+-- If the project has test_helpers enabled, the schema holding the 6
+-- generic PL/pgSQL fixtures (harness_test_helpers by default) is
+-- prepended to search_path so the functions are directly callable by
+-- their short name. public is kept second so other project schemas
+-- remain visible.
+SET search_path TO harness_test_helpers, public;
 \set test_schema '<SCHEMA>'
 \set test_table '<TABLE>'
 \set expect_table 'true'
