@@ -112,7 +112,8 @@
 #                                              unless record-review has recorded 'approved' on this session
 #                                              (best-effort: also pushes notion_status_done to the
 #                                              feature's source Notion page, if it has a source_id)
-#   delete-feature <TARGET>                   soft-delete a feature (sets deleted_at)
+#   delete-feature <TARGET>                   soft-delete a feature and its specs (sets deleted_at) — refuses
+#                                              while the feature has an open or paused session
 #   status                                     print current project/feature/session state
 #   snapshot                                   regenerate state/*.md from harness.db
 #   sync                                       best-effort push to the Postgres mirror
@@ -1526,9 +1527,27 @@ cmd_delete_feature() {
   else
     where="name='$(sql_escape "$target")'"
   fi
-  db_exec "UPDATE features SET deleted_at='$now', updated_at='$now'
-WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;"
-  ok "soft-deleted feature $target"
+  local fid
+  fid=$(db "SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where LIMIT 1;")
+  if [ -z "$fid" ]; then
+    fail "no active feature matches: $target"
+    exit 1
+  fi
+  # An open (or paused) session would be left pointing at a deleted feature,
+  # and nothing in the harness could close it cleanly afterwards.
+  local open_sid
+  open_sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL LIMIT 1;")
+  if [ -n "$open_sid" ]; then
+    fail "feature $target still has open session $open_sid — finish it with log-out, or run 'cancel-session --force $open_sid <reason>' first"
+    exit 1
+  fi
+  # Soft-delete its specs with it: a live spec on a deleted feature keeps the
+  # mirror's one-active-spec-per-feature slot taken if the name is reused.
+  db_exec "BEGIN;
+UPDATE features SET deleted_at='$now', updated_at='$now' WHERE id=$fid;
+UPDATE specs SET deleted_at='$now', updated_at='$now' WHERE feature_id=$fid AND deleted_at IS NULL;
+COMMIT;"
+  ok "soft-deleted feature $target (and its specs)"
 }
 
 cmd_snapshot() {

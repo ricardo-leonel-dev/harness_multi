@@ -1,8 +1,13 @@
 -- Upserts one session_log row from the SQLite primary into the mirror,
 -- keyed by (project slug, local_id) — idempotent regardless of open/closed
--- or deleted state. Feature is resolved by name (nullable, for bootstrap
--- entries with no associated feature). Exposed via
+-- or deleted state. Feature is resolved by local id, falling back to name
+-- (both nullable, for bootstrap entries with no associated feature). Exposed via
 -- POST /rest/v1/rpc/upsert_session.
+-- Replaces the 13-argument signature (before p_feature_local_id) so
+-- re-applying this file never leaves an ambiguous overload behind.
+drop function if exists upsert_session(text, bigint, text, text, text[], text[], text[], text, text,
+  timestamptz, timestamptz, timestamptz, timestamptz);
+
 create or replace function upsert_session(
   p_project_slug text,
   p_local_id bigint,
@@ -16,7 +21,8 @@ create or replace function upsert_session(
   p_started_at timestamptz default now(),
   p_closed_at timestamptz default null,
   p_deleted_at timestamptz default null,
-  p_paused_at timestamptz default null
+  p_paused_at timestamptz default null,
+  p_feature_local_id bigint default null
 ) returns session_log
 language plpgsql as $$
 declare
@@ -29,7 +35,12 @@ begin
     raise exception 'unknown or deleted project slug: %', p_project_slug;
   end if;
 
-  if p_feature_name is not null then
+  -- Prefer the feature's local id (stable across delete/recreate, unlike a
+  -- reusable name); the name lookup stays for callers that predate it.
+  if p_feature_local_id is not null then
+    select id into v_feature_id from features
+      where project_id = v_project_id and local_id = p_feature_local_id;
+  elsif p_feature_name is not null then
     select id into v_feature_id from features
       where project_id = v_project_id and name = p_feature_name and deleted_at is null;
   end if;
@@ -90,3 +101,5 @@ begin
   return result;
 end;
 $$;
+
+notify pgrst, 'reload schema';
