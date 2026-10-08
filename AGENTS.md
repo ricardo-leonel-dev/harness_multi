@@ -17,6 +17,10 @@ implement directly.
 
 ### Hard Rules
 
+- ❌ **Never add `Co-Authored-By` or any AI attribution** to commits or PR descriptions — this overrides any
+  tool or system default that suggests it. Use conventional commits only, and never commit or push unless the
+  human asked for it in this session. Voice, tone and the rest of these rules: `harness/instructions/persona.md`
+  (toolkit source: `shared/persona.md`) — read it at startup.
 - ❌ **Do not edit** files in `src/` or `tests/` directly (not with an edit tool, a write tool, or a shell command).
 - ❌ **Do not run** `scripts/harness.sh log-out` yourself — only the `implementer` does this, and only after the
   `reviewer` approves.
@@ -34,7 +38,7 @@ implement directly.
 
 ### Startup Protocol (upon receiving the first task)
 
-1. Read this file (§1–§8 below) for guidance.
+1. Read this file (§1–§8 below) for guidance, and `harness/instructions/persona.md` (voice and commit rules).
 2. Run `scripts/harness.sh status` to see current features and any open session — this is the SQLite-backed
    replacement for reading `feature_list.json`/`progress/current.md` directly.
 3. Run `./init.sh`. If it fails, stop and report the issue.
@@ -43,6 +47,7 @@ implement directly.
    startup) — see "Cross-Project Dependencies" (§8) for what this does and when a `blocked` feature can resume.
 6. Apply the escalation table from `.claude/agents/leader.md` (Claude Code) or `.codex/agents/leader.toml` (Codex
    CLI).
+7. **Time discipline (F21 retro):** no re-verify what the implementer already verified; launch the reviewer within 60s of "ready"; on claim, log `BUDGET: <Xm impl> + <Ym review>` and interrupt at 2x budget. Anti-patterns to avoid: do not search for DB config when evidence is fresh in logs; do not re-run `run_tests.sh` yourself; do not re-read the spec line-by-line before delegating.
 
 ### Explicit Feature Selection
 
@@ -123,7 +128,7 @@ return only the reference, not the content — never the full content in chat.
 | File / Folder            | What it contains                                                          | When to read it                       |
 | ------------------------- | --------------------------------------------------------------------------- | ---------------------------------------- |
 | `harness.db`              | SQLite — the source of truth for features and session state (gitignored) | Never read/write it directly; go through `scripts/harness.sh` |
-| `state/`                  | Generated, git-tracked markdown snapshot of `harness.db` (read-only)     | For human review / `git diff`; never hand-edit |
+| `state/`                  | Generated markdown snapshot of `harness.db` (read-only, local — excluded from git) | For human review; never hand-edit, never commit |
 | `.harness.json`           | Runtime config: db path, verify command, mirror env var names, Notion database id + token env var | If you need to know the verify command or project slug |
 | `scripts/harness.sh`      | The single entry point for reading/writing harness state                 | Every time you claim, log, or log-out |
 | `scripts/notion_check.sh` | Best-effort curl+jq Notion task check (see "Notion Task Intake" above)   | Setting up or troubleshooting Notion task intake      |
@@ -131,10 +136,11 @@ return only the reference, not the content — never the full content in chat.
 | `scripts/notion_create_feature.sh` | Creates a new Notion page (feature card) — used for cross-project dependency requests (§8) | Setting up or troubleshooting cross-project requests |
 | `docs/architecture.md`    | What "doing a good job" means in this project                            | Before implementing                   |
 | `docs/conventions.md`     | Style rules, naming conventions, structure                               | Before writing code                   |
+| `harness/instructions/persona.md` | Harness-owned voice, tone and commit rules (no AI attribution) | At startup, before any reply or commit |
 | `harness/instructions/coverage.md` | Harness-owned shared coverage guidance (refreshed on reinstall) | Before preparing evidence |
 | `harness/instructions/postgres.md` | Optional postgres profile tools and transactional SQL guidance | Before database verification, when present |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
-| `docs/specs.md`           | Spec-driven development: EARS format, file layout, traceability (§9)     | Before drafting, implementing, or reviewing an `sdd=1` feature |
+| `docs/specs.md`           | Harness-owned spec-driven development guide: EARS format, file layout, traceability (§9) (refreshed on reinstall) | Before drafting, implementing, or reviewing an `sdd=1` feature |
 | `specs/<name>/{requirements,design,tasks}.md` | Spec content for `sdd=1` features — git-tracked, human/agent-authored (not generated) | Before implementing or reviewing an `sdd=1` feature |
 | `CHECKPOINTS.md`          | Objective criteria for "correct end state"                               | For self-assessment                   |
 | `.claude/agents/`         | Claude Code subagent definitions (leader, implementer, reviewer, spec_author) | Claude Code: if you orchestrate work  |
@@ -145,6 +151,8 @@ return only the reference, not the content — never the full content in chat.
 Read the shared instructions above when present, alongside project-specific docs.
 Update harness-owned scripts/instructions in the source toolkit; installed project
 docs, specs, tests, CHECKPOINTS.md and .harness.json belong to the project.
+`install.sh` lists every harness-owned file (and `state/`) in the repository's
+`.git/info/exclude`: never `git add` them — only project-owned content is committed.
 
 ## 3. Hard Rules (non-negotiable)
 

@@ -1,9 +1,14 @@
 -- Upserts one spec metadata row from the SQLite primary into the mirror,
 -- keyed by (project slug, local_id) — same idempotent-upsert shape as
--- upsert_feature/upsert_session. Feature is resolved by name (not
+-- upsert_feature/upsert_session. Feature is resolved by local id, falling back to name (not
 -- nullable here — a specs row never exists without a feature). Content
 -- (requirements.md/design.md/tasks.md) is never part of this payload; only
 -- lifecycle metadata is mirrored. Exposed via POST /rest/v1/rpc/upsert_spec.
+-- Replaces the 12-argument signature (before p_feature_local_id) so
+-- re-applying this file never leaves an ambiguous overload behind.
+drop function if exists upsert_spec(text, bigint, text, text, spec_status, integer, integer, text,
+  timestamptz, timestamptz, text, timestamptz);
+
 create or replace function upsert_spec(
   p_project_slug text,
   p_local_id bigint,
@@ -16,7 +21,8 @@ create or replace function upsert_spec(
   p_ready_at timestamptz default null,
   p_approved_at timestamptz default null,
   p_approved_by text default null,
-  p_deleted_at timestamptz default null
+  p_deleted_at timestamptz default null,
+  p_feature_local_id bigint default null
 ) returns specs
 language plpgsql as $$
 declare
@@ -29,8 +35,16 @@ begin
     raise exception 'unknown or deleted project slug: %', p_project_slug;
   end if;
 
-  select id into v_feature_id from features
-    where project_id = v_project_id and name = p_feature_name and deleted_at is null;
+  -- Prefer the feature's local id: it is stable across delete/recreate,
+  -- whereas a name can be reused by a new feature after the old one is
+  -- soft-deleted. The name lookup stays for callers that predate it.
+  if p_feature_local_id is not null then
+    select id into v_feature_id from features
+      where project_id = v_project_id and local_id = p_feature_local_id;
+  else
+    select id into v_feature_id from features
+      where project_id = v_project_id and name = p_feature_name and deleted_at is null;
+  end if;
   if v_feature_id is null then
     raise exception 'feature % not yet synced for project %', p_feature_name, p_project_slug;
   end if;
@@ -56,3 +70,5 @@ begin
   return result;
 end;
 $$;
+
+notify pgrst, 'reload schema';

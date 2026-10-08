@@ -65,8 +65,19 @@ bash /path/to/this-toolkit/install.sh \
 
 This creates `harness.db`, scaffolds `docs/*.md` and `CHECKPOINTS.md` (fill in
 their TODOs), writes `.harness.json`, and copies the agent workflow files in.
-Re-running `install.sh` refreshes the harness-core files but never overwrites
-your project's own `docs/*.md` or `CHECKPOINTS.md`.
+Re-running `install.sh` refreshes the harness-core files (including
+`docs/specs.md`, which has no project-specific content) but never overwrites
+your project's own `docs/{architecture,conventions,verification}.md` or
+`CHECKPOINTS.md`.
+
+Everything the harness owns — `AGENTS.md`, `CLAUDE.md`, the agent definitions,
+`init.sh`, `scripts/*.sh`, `harness/`, `docs/specs.md`, `harness.db` and the
+`state/` snapshot — is listed in the repository's `.git/info/exclude` (local,
+never committed), inside a block keyed by the project's path so several
+installs can share one repository. Only project-owned content reaches git:
+`docs/{architecture,conventions,verification}.md`, `CHECKPOINTS.md`, `specs/`,
+`src/` and `tests/`. If some of those harness files were committed before,
+`install.sh` lists them so you can untrack them with `git rm -r --cached`.
 
 Optionally pass `--features-seed features.seed.json` (see
 `templates/features.seed.json.tmpl`) to bulk-load an initial feature list.
@@ -122,6 +133,16 @@ without a restart), then re-apply `db/rpc/upsert_feature.sql` (updated) and
 the new `db/rpc/upsert_spec.sql`. Local `docker compose` stacks don't need
 this — `docker compose down -v && docker compose up -d` re-applies
 everything from the current, already-updated `db/schema.postgres.sql`.
+
+**Mirror deployed before specs/sessions were resolved by feature local id?**
+Re-apply `db/rpc/upsert_spec.sql` and `db/rpc/upsert_session.sql` (each drops
+its previous signature first, then reloads PostgREST's schema cache). Before
+this, both RPCs found the feature by name, so a spec or session of a
+soft-deleted feature attached itself to a new feature that reused the name —
+and that stale spec could take the one-active-spec-per-feature slot, making
+the new feature's spec fail to sync (HTTP 409 on `specs_feature_active`). The
+updated RPCs also accept the old payload (no `p_feature_local_id`), so apply
+them before propagating the new `scripts/sync_postgres.sh`, never after.
 
 ## Notion task intake (optional)
 
@@ -245,4 +266,7 @@ for discovery. Standalone migration diffs must remain self-contained for externa
 deployment. No timing savings are claimed until measured in actual projects.
 
 Run isolated regressions with `bash tests/database_profile_test.sh` and
-`bash tests/session_resume_test.sh`.
+`bash tests/session_resume_test.sh`. `bash tests/test_helpers_regression_test.sh`
+covers the postgres test_helpers; its SQL cases run only when
+`HARNESS_TEST_PG_DSN` points at a dev database (inside a rolled-back
+transaction), and are skipped otherwise.

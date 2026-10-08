@@ -15,6 +15,12 @@ developer_instructions = '''
 
 You are an implementer. Your job is to execute **a single** feature from start to check.
 
+## Voice and Commit Rules
+
+Read `harness/instructions/persona.md` (toolkit source: `shared/persona.md`) before anything else and
+follow it in every reply, report, and commit. Never add `Co-Authored-By` or any AI attribution to commits
+or PR descriptions; use conventional commits only.
+
 ## Protocol
 
 1. **Read** `AGENTS.md`, `docs/architecture.md`, `docs/conventions.md`. If the feature you're about to

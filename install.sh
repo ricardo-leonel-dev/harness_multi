@@ -8,10 +8,12 @@
 #
 # Harness-core files (AGENTS.md + a CLAUDE.md symlink to it, .claude/agents/*.md,
 # .codex/agents/*.toml, init.sh, scripts/*.sh) are copied/relinked unconditionally
-# — re-running install.sh refreshes them. docs/*.md (including docs/specs.md),
+# — re-running install.sh refreshes them. docs/{architecture,conventions,verification}.md,
 # CHECKPOINTS.md, .claude/settings.json, specs/, and .harness.json are created
-# only if absent — never clobbers project-owned content. Shared instructions are
-# refreshed; --profile postgres explicitly adds shared SQL tools on each install.
+# only if absent — never clobbers project-owned content. Shared instructions and
+# docs/specs.md are refreshed; --profile postgres explicitly adds shared SQL tools
+# on each install. Harness-owned files and the state/ snapshot are listed in the
+# repository's .git/info/exclude so they never reach the project's history.
 
 set -u
 TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -149,13 +151,23 @@ ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*
 # Shared instructions are harness-owned and refreshed even in existing projects.
 mkdir -p "$TARGET_DIR/harness/instructions"
 cp "$TOOLKIT_DIR/shared/coverage.md" "$TARGET_DIR/harness/instructions/coverage.md"
+cp "$TOOLKIT_DIR/shared/persona.md" "$TARGET_DIR/harness/instructions/persona.md"
 if [ "$PROFILE" = postgres ]; then
   mkdir -p "$TARGET_DIR/scripts/templates"
   cp "$TOOLKIT_DIR/profiles/postgres/build_traceability.sh" "$TARGET_DIR/scripts/build_traceability.sh"
   chmod +x "$TARGET_DIR/scripts/build_traceability.sh"
   cp "$TOOLKIT_DIR/profiles/postgres/acceptance_test_prologue.sql" "$TARGET_DIR/scripts/templates/acceptance_test_prologue.sql"
+  cp "$TOOLKIT_DIR/profiles/postgres/run_tests.sh" "$TARGET_DIR/scripts/run_tests.sh"
+  chmod +x "$TARGET_DIR/scripts/run_tests.sh"
   cp "$TOOLKIT_DIR/profiles/postgres/verification.md" "$TARGET_DIR/harness/instructions/postgres.md"
-  ok "refreshed postgres profile tools and shared instructions"
+  # Generic, harness-owned test_helpers bundle (6 PL/pgSQL fixtures under
+  # schema harness_test_helpers). The project opts in by adding
+  #   "test_helpers": { "enabled": true }
+  # to .harness.json — init.sh then runs bash harness/test_helpers/install.sh.
+  mkdir -p "$TARGET_DIR/harness/test_helpers"
+  cp -r "$TOOLKIT_DIR/profiles/postgres/test_helpers/." "$TARGET_DIR/harness/test_helpers/"
+  chmod +x "$TARGET_DIR/harness/test_helpers/install.sh" "$TARGET_DIR/harness/test_helpers/uninstall.sh"
+  ok "refreshed postgres profile tools, shared instructions, and test_helpers (harness/test_helpers/)"
 fi
 
 mkdir -p "$TARGET_DIR/.claude"
@@ -198,19 +210,19 @@ echo ""
 echo "── 3. Scaffolding project docs ──────────────────────────"
 
 mkdir -p "$TARGET_DIR/docs"
-for name in architecture conventions verification specs; do
+for name in architecture conventions verification; do
   dest="$TARGET_DIR/docs/$name.md"
   if [ -f "$dest" ]; then
     warn "docs/$name.md already exists — leaving as-is"
   else
     cp "$TOOLKIT_DIR/templates/docs/$name.md.tmpl" "$dest"
-    if [ "$name" = "specs" ]; then
-      ok "scaffolded docs/specs.md (no TODOs — same across every project, see the file itself)"
-    else
-      ok "scaffolded docs/$name.md (fill in the TODOs)"
-    fi
+    ok "scaffolded docs/$name.md (fill in the TODOs)"
   fi
 done
+# docs/specs.md has no project-specific content, so it is harness-owned like
+# harness/instructions/: refreshed on every install and excluded from git below.
+cp "$TOOLKIT_DIR/templates/docs/specs.md.tmpl" "$TARGET_DIR/docs/specs.md"
+ok "refreshed docs/specs.md (harness-owned — same across every project)"
 
 if [ -f "$TARGET_DIR/CHECKPOINTS.md" ]; then
   warn "CHECKPOINTS.md already exists — leaving as-is"
@@ -253,6 +265,58 @@ fi
 touch "$TARGET_DIR/.gitignore"
 grep -qxF 'harness.db' "$TARGET_DIR/.gitignore" || echo 'harness.db' >> "$TARGET_DIR/.gitignore"
 ok "harness.db added to .gitignore"
+
+# Everything install.sh owns (copied, refreshed or generated) stays out of git:
+# the rules go to .git/info/exclude — local, never committed — so a project's
+# history only holds what the project itself authored. Each install writes its
+# own block keyed by the project's path inside the repository, so several
+# installs can share one repository (one harness per service in a monorepo) and
+# a reinstall replaces its block instead of appending duplicates.
+exclude_harness_files() {
+  if ! git -C "$TARGET_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    warn "not inside a git repository — skipping .git/info/exclude"
+    return 0
+  fi
+  local prefix exclude_rel exclude_file snapshot begin end name entries tracked
+  prefix="$(git -C "$TARGET_DIR" rev-parse --show-prefix)"
+  exclude_rel="$(cd "$TARGET_DIR" && git rev-parse --git-path info/exclude)"
+  case "$exclude_rel" in /*) exclude_file="$exclude_rel" ;; *) exclude_file="$TARGET_DIR/$exclude_rel" ;; esac
+  snapshot="$(jq -r '.snapshot_path // "state"' "$TARGET_DIR/.harness.json")"
+  snapshot="${snapshot%/}"
+
+  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ docs/specs.md $snapshot/"
+  for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do entries="$entries .claude/agents/${name##*/}"; done
+  for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do entries="$entries .codex/agents/${name##*/}"; done
+  for name in "$TOOLKIT_DIR"/scripts/*.sh; do entries="$entries scripts/${name##*/}"; done
+  # harness/ (above) already covers harness/test_helpers/; project-owned Tier 2
+  # helpers live outside it (test_helpers.project_specific_dir) so git sees them.
+  entries="$entries scripts/build_traceability.sh scripts/templates/acceptance_test_prologue.sql"
+
+  begin="# >>> harness-managed: /$prefix (written by install.sh — re-run it instead of editing)"
+  end="# <<< harness-managed: /$prefix"
+  mkdir -p "$(dirname "$exclude_file")"
+  touch "$exclude_file"
+  {
+    awk -v begin="$begin" -v end="$end" \
+      '$0 == begin { skip = 1; next } $0 == end { skip = 0; next } !skip' "$exclude_file"
+    printf '%s\n' "$begin"
+    for name in $entries; do
+      printf '/%s%s\n' "$prefix" "$name" | sed 's/[][*?\\]/\\&/g'
+    done
+    printf '%s\n' "$end"
+  } > "$exclude_file.tmp"
+  mv "$exclude_file.tmp" "$exclude_file"
+  ok "harness-owned files excluded from git ($exclude_rel)"
+
+  # Exclude rules only hide untracked files; anything committed earlier stays tracked.
+  # shellcheck disable=SC2086
+  tracked="$(cd "$TARGET_DIR" && git ls-files -- $entries)"
+  if [ -n "$tracked" ]; then
+    warn "harness-owned files still tracked by git — untrack them with 'git rm -r --cached' (they stay on disk):"
+    printf '%s\n' "$tracked" | sed 's/^/          /'
+  fi
+}
+exclude_harness_files
 
 echo ""
 echo "── 5. Importing features (if provided) ──────────────────"

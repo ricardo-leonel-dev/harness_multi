@@ -92,7 +92,7 @@ sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, a
 done
 
 sqlite3 -json "$DB_PATH" "SELECT s.id, f.name AS feature_name, s.path, s.status, s.requirements_count,
-  s.tasks_count, s.drafted_by, s.ready_at, s.approved_at, s.approved_by, s.deleted_at
+  s.tasks_count, s.drafted_by, s.ready_at, s.approved_at, s.approved_by, s.deleted_at, s.feature_id
   FROM specs s JOIN features f ON f.id = s.feature_id
   WHERE f.project_id='$(sql_escape "$pid")';" | jq -c '.[]' | while IFS= read -r row; do
   payload=$(jq -n --arg slug "$PROJECT_SLUG" \
@@ -107,7 +107,9 @@ sqlite3 -json "$DB_PATH" "SELECT s.id, f.name AS feature_name, s.path, s.status,
     --arg approved_at "$(jq -r '.approved_at // ""' <<<"$row")" \
     --arg approved_by "$(jq -r '.approved_by // ""' <<<"$row")" \
     --arg deleted_at "$(jq -r '.deleted_at // ""' <<<"$row")" \
-    '{p_project_slug:$slug, p_local_id:$local_id, p_feature_name:$feature_name, p_path:$path, p_status:$status,
+    --argjson feature_local_id "$(jq '.feature_id' <<<"$row")" \
+    '{p_project_slug:$slug, p_local_id:$local_id, p_feature_name:$feature_name, p_feature_local_id:$feature_local_id,
+      p_path:$path, p_status:$status,
       p_requirements_count:$requirements_count, p_tasks_count:$tasks_count,
       p_drafted_by: (if $drafted_by == "" then null else $drafted_by end),
       p_ready_at: (if $ready_at == "" then null else $ready_at end),
@@ -117,7 +119,7 @@ sqlite3 -json "$DB_PATH" "SELECT s.id, f.name AS feature_name, s.path, s.status,
   out=$(rpc upsert_spec "$payload") || warn "upsert_spec failed for local_id $(jq '.id' <<<"$row"): $out"
 done
 
-sqlite3 -json "$DB_PATH" "SELECT sl.id, f.name AS feature_name, sl.agent, sl.plan, sl.next_step, sl.changes,
+sqlite3 -json "$DB_PATH" "SELECT sl.id, f.name AS feature_name, sl.feature_id, sl.agent, sl.plan, sl.next_step, sl.changes,
   sl.verification, sl.closure, sl.started_at, sl.closed_at, sl.paused_at, sl.deleted_at
   FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id
   WHERE sl.project_id='$(sql_escape "$pid")';" | jq -c '.[]' | while IFS= read -r row; do
@@ -135,8 +137,10 @@ sqlite3 -json "$DB_PATH" "SELECT sl.id, f.name AS feature_name, sl.agent, sl.pla
     --arg closed_at "$(jq -r '.closed_at // ""' <<<"$row")" \
     --arg paused_at "$(jq -r '.paused_at // ""' <<<"$row")" \
     --arg deleted_at "$(jq -r '.deleted_at // ""' <<<"$row")" \
+    --argjson feature_local_id "$(jq '.feature_id // null' <<<"$row")" \
     '{p_project_slug:$slug, p_local_id:$local_id,
       p_feature_name: (if $feature_name == "" then null else $feature_name end),
+      p_feature_local_id:$feature_local_id,
       p_agent:$agent, p_plan:$plan, p_next_step:$next_step, p_changes:$changes,
       p_verification:$verification, p_closure:$closure, p_started_at:$started_at,
       p_closed_at: (if $closed_at == "" then null else $closed_at end),
