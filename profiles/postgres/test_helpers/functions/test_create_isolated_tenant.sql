@@ -2,19 +2,28 @@
 --
 -- Creates a fresh schema named `p_tenant` and populates it with copies of
 -- the tables listed in `p_tables`, taken from `p_source_schema`. Foreign
--- keys are recreated for in-schema relationships; FKs that point outside
--- p_source_schema (e.g. a public.countries reference) are intentionally
--- left alone — the tenant references them directly. Sequences attached
--- to serial columns are also cloned. All triggers on the source tables
--- are rebind-bound: each trigger's body is moved into the tenant schema
--- (so the tenant is fully self-contained), with a SET search_path that
--- points only at the tenant + public, and dictionary references in the
--- function body are rewritten to point at the tenant's own dictionary
--- copy.
+-- keys between the copied tables are recreated against the tenant copies;
+-- FKs that point at any table NOT in `p_tables` (another source table, or
+-- e.g. public.countries) are not recreated — the tenant copy has no FK
+-- there. Sequences attached to serial columns are also cloned. All
+-- triggers on the source tables are rebound: each trigger function is
+-- copied into the tenant schema with SET search_path TO
+-- <tenant>, <source>, public (so unqualified names hit the tenant copies
+-- first), and schema-qualified dictionary references in the function body
+-- are rewritten to point at the tenant's own dictionary copy.
 --
--- The dictionary table itself is cloned when `p_dictionary_table` is set
--- (default: 'public.dictionary_entries'); only rows whose `category` is
--- in `p_dictionary_categories` are copied (NULL means all rows).
+-- The dictionary table is cloned when `p_dictionary_table` is set
+-- (default: 'public.dictionary_entries') AND exists; a missing default
+-- dictionary is skipped with a NOTICE so projects without one can call
+-- the function with only 3 arguments. Only rows whose `category` is in
+-- `p_dictionary_categories` are copied (NULL means all rows).
+--
+-- The function runs with search_path = pg_catalog. That makes every
+-- catalog-to-text conversion (regclass::text, pg_get_constraintdef,
+-- pg_get_triggerdef) schema-qualify its output, regardless of the
+-- caller's search_path. Without it, a source schema on the caller's path
+-- (typically `public`) prints unqualified names and every rewrite below
+-- silently matches nothing.
 --
 -- Generic — no project-specific schema, trigger, or category names are
 -- hard-coded. Everything configurable is a parameter.
@@ -27,22 +36,46 @@ CREATE OR REPLACE FUNCTION harness_test_helpers.test_create_isolated_tenant(
     p_dictionary_categories text[] DEFAULT NULL
 ) RETURNS void
 LANGUAGE plpgsql
+SET search_path = pg_catalog
 AS $func$
 DECLARE
+    v_src_oid oid;
     t text;
     seq record;
-    v_seq_basename text;   -- e.g. 'witnesses_id_seq'
-    v_seq_qualified text;  -- e.g. '"smoke_tenant".witnesses_id_seq' (with quotes)
     fk record;
     v_fk_def text;
     trig record;
     v_func_def text;
+    v_header text;
+    v_rest text;
+    v_as_pos int;
     v_trig_def text;
-    v_func_qualified_orig text;
-    v_func_qualified_new text;
+    v_dict_oid oid;
+    v_dict_schema text;
     v_dict_basename text;
-    v_dict_basename_quoted text;
 BEGIN
+    SELECT oid INTO v_src_oid FROM pg_namespace WHERE nspname = p_source_schema;
+    IF v_src_oid IS NULL THEN
+        RAISE EXCEPTION 'test_create_isolated_tenant: source schema % does not exist', p_source_schema;
+    END IF;
+
+    -- Resolve the dictionary up front: a missing table is only an error
+    -- when the caller named it explicitly.
+    IF p_dictionary_table IS NOT NULL THEN
+        v_dict_oid := to_regclass(p_dictionary_table);
+        IF v_dict_oid IS NULL THEN
+            IF p_dictionary_table = 'public.dictionary_entries' THEN
+                RAISE NOTICE 'test_create_isolated_tenant: % not found, skipping dictionary copy', p_dictionary_table;
+            ELSE
+                RAISE EXCEPTION 'test_create_isolated_tenant: dictionary table % does not exist', p_dictionary_table;
+            END IF;
+        ELSE
+            SELECT n.nspname, c.relname INTO v_dict_schema, v_dict_basename
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.oid = v_dict_oid;
+        END IF;
+    END IF;
+
     ----------------------------------------------------------------------
     -- 1. Create the tenant schema (and grant USAGE so other roles can see
     --    its objects during tests).
@@ -52,96 +85,82 @@ BEGIN
 
     ----------------------------------------------------------------------
     -- 2. For each table in p_tables: create a LIKE copy in the tenant
-    --    schema. PostgreSQL's LIKE clause never copies triggers
-    --    (INCLUDING ALL doesn't include them either), so the rebinding
-    --    in step 4 is the only path that creates them in the tenant.
-    --    We do need INCLUDING DEFAULTS to copy serial/identity defaults
-    --    so we can detect them via column_default in the loop below.
+    --    schema. PostgreSQL's LIKE clause never copies triggers or
+    --    foreign keys, so steps 3 and 4 are the only paths that create
+    --    them in the tenant. INCLUDING ALL copies serial defaults as
+    --    text (still pointing at the source sequence), rewired below.
     ----------------------------------------------------------------------
     FOREACH t IN ARRAY p_tables LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = v_src_oid AND relname = t) THEN
+            RAISE EXCEPTION 'test_create_isolated_tenant: %.% does not exist', p_source_schema, t;
+        END IF;
+
         EXECUTE format(
             'CREATE TABLE IF NOT EXISTS %I.%I (LIKE %I.%I INCLUDING ALL)',
             p_tenant, t, p_source_schema, t
         );
 
-        -- Detect columns whose default is a nextval(...) reference to a
-        -- sequence in the source schema, create the same sequence in the
-        -- tenant, and rewire the column default to point at it. We do
-        -- this per-table because the LIKE ... INCLUDING DEFAULTS clause
-        -- only copies the default expression text — the sequence itself
-        -- is not moved by it.
-        --
-        -- information_schema.columns.column_default prints the regclass
-        -- argument without its schema (e.g. `nextval('witnesses_id_seq'::regclass)`
-        -- even though the sequence is in 'rushr_ec'), so we walk
-        -- pg_depend instead — that gives us the sequence's real
-        -- schema-qualified identity, which we strip down to a basename
-        -- before recreating in the tenant.
+        -- Walk pg_depend (not information_schema's column_default text)
+        -- to find the sequence each nextval() default really points at.
         FOR seq IN
             SELECT a.attname AS column_name,
                    s.relname  AS seq_basename
             FROM pg_class     c
-            JOIN pg_namespace n       ON n.oid = c.relnamespace
             JOIN pg_attribute a       ON a.attrelid = c.oid AND a.attnum > 0
             JOIN pg_attrdef   ad      ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
             JOIN pg_depend    d       ON d.objid = ad.oid
                                      AND d.classid = 'pg_attrdef'::regclass
                                      AND d.deptype = 'n'
-            JOIN pg_class    s         ON s.oid = d.refobjid
-            WHERE n.nspname = p_source_schema
+            JOIN pg_class    s         ON s.oid = d.refobjid AND s.relkind = 'S'
+            WHERE c.relnamespace = v_src_oid
               AND c.relname = t
               AND a.atthasdef
               AND pg_get_expr(ad.adbin, ad.adrelid) LIKE 'nextval%'
         LOOP
-            v_seq_basename := seq.seq_basename;
-
             EXECUTE format(
                 'CREATE SEQUENCE IF NOT EXISTS %I.%I OWNED BY %I.%I.%I',
-                p_tenant, v_seq_basename,
+                p_tenant, seq.seq_basename,
                 p_tenant, t, seq.column_name
             );
-
-            v_seq_qualified := format('%I.%I', p_tenant, v_seq_basename);
             EXECUTE format(
                 'ALTER TABLE %I.%I ALTER COLUMN %I SET DEFAULT nextval(%L::regclass)',
-                p_tenant, t, seq.column_name, v_seq_qualified
+                p_tenant, t, seq.column_name, format('%I.%I', p_tenant, seq.seq_basename)
             );
         END LOOP;
     END LOOP;
 
     ----------------------------------------------------------------------
-    -- 3. Recreate in-schema foreign keys. We only copy FKs whose target
-    --    table is also in p_source_schema; FKs that point at, say,
-    --    public.countries stay pointing at the original. This is a
-    --    documented trade-off: it assumes the global catalogue is shared,
-    --    which is the common case.
+    -- 3. Recreate foreign keys whose source AND target are both copied
+    --    tables. Matching is by oid/relname, never by regclass text.
     ----------------------------------------------------------------------
     FOR fk IN
-        SELECT c.conname,
-               c.conrelid::regclass::text  AS src_table,
-               pg_get_constraintdef(c.oid) AS def
-        FROM pg_constraint c
-        WHERE c.contype = 'f'
-          AND c.connamespace = (SELECT oid FROM pg_namespace WHERE nspname = p_source_schema)
-          AND c.confrelid::regnamespace = (SELECT oid FROM pg_namespace WHERE nspname = p_source_schema)
-          AND (c.conrelid::regclass::text = ANY (
-                SELECT p_source_schema || '.' || tbl FROM unnest(p_tables) tbl
-              ))
+        SELECT con.conname,
+               src.relname                   AS src_table,
+               tgt.relname                   AS tgt_table,
+               pg_get_constraintdef(con.oid) AS def
+        FROM pg_constraint con
+        JOIN pg_class src ON src.oid = con.conrelid
+        JOIN pg_class tgt ON tgt.oid = con.confrelid
+        WHERE con.contype = 'f'
+          AND src.relnamespace = v_src_oid AND src.relname = ANY (p_tables)
+          AND tgt.relnamespace = v_src_oid AND tgt.relname = ANY (p_tables)
     LOOP
+        -- search_path = pg_catalog guarantees the REFERENCES target is
+        -- printed schema-qualified, so this rewrite is exact.
         v_fk_def := replace(
             fk.def,
-            quote_ident(p_source_schema) || '.',
-            quote_ident(p_tenant) || '.'
+            'REFERENCES ' || format('%I.%I', p_source_schema, fk.tgt_table) || '(',
+            'REFERENCES ' || format('%I.%I', p_tenant, fk.tgt_table) || '('
         );
         -- Drop-then-add gives idempotency without needing a UNIQUE check
         -- on constraint names across tenants.
         EXECUTE format(
             'ALTER TABLE %I.%I DROP CONSTRAINT IF EXISTS %I',
-            p_tenant, split_part(fk.src_table, '.', 2), fk.conname
+            p_tenant, fk.src_table, fk.conname
         );
         EXECUTE format(
             'ALTER TABLE %I.%I ADD CONSTRAINT %I %s',
-            p_tenant, split_part(fk.src_table, '.', 2), fk.conname, v_fk_def
+            p_tenant, fk.src_table, fk.conname, v_fk_def
         );
     END LOOP;
 
@@ -151,111 +170,104 @@ BEGIN
     --    out of pg_trigger.
     ----------------------------------------------------------------------
     FOR trig IN
-        SELECT t.tgname        AS trigger_name,
-               t.tgrelid::regclass::text AS table_full_name,
-               p.proname       AS function_name,
-               n.nspname       AS function_schema,
-               p.oid           AS function_oid,
-               t.oid           AS trigger_oid
-        FROM pg_trigger t
-        JOIN pg_class    c   ON c.oid = t.tgrelid
-        JOIN pg_namespace nsp ON nsp.oid = c.relnamespace
-        JOIN pg_proc p        ON t.tgfoid = p.oid
-        JOIN pg_namespace n   ON p.pronamespace = n.oid
-        WHERE NOT t.tgisinternal
-          AND nsp.nspname = p_source_schema
-          AND (t.tgrelid::regclass::text = ANY (
-                SELECT p_source_schema || '.' || tbl FROM unnest(p_tables) tbl
-              ))
+        SELECT tg.tgname        AS trigger_name,
+               c.relname        AS table_name,
+               p.proname        AS function_name,
+               n.nspname        AS function_schema,
+               p.oid            AS function_oid,
+               tg.oid           AS trigger_oid
+        FROM pg_trigger tg
+        JOIN pg_class    c   ON c.oid = tg.tgrelid
+        JOIN pg_proc     p   ON p.oid = tg.tgfoid
+        JOIN pg_namespace n  ON n.oid = p.pronamespace
+        WHERE NOT tg.tgisinternal
+          AND c.relnamespace = v_src_oid
+          AND c.relname = ANY (p_tables)
     LOOP
-        -- 4a. Pull the full function DDL.
+        -- 4a. Pull the full function DDL. pg_get_functiondef always
+        --     schema-qualifies the function name in the header.
         v_func_def := pg_get_functiondef(trig.function_oid);
 
         -- 4b. Rewrite the schema qualifier on the function name so the
         --     new copy lives in the tenant namespace.
-        v_func_qualified_orig := format('%I.%I', trig.function_schema, trig.function_name);
-        v_func_qualified_new   := format('%I.%I', p_tenant, trig.function_name);
-        v_func_def := replace(v_func_def, v_func_qualified_orig, v_func_qualified_new);
+        v_func_def := replace(
+            v_func_def,
+            format('%I.%I', trig.function_schema, trig.function_name),
+            format('%I.%I', p_tenant, trig.function_name)
+        );
 
         -- 4c. Rewrite dictionary references in the body. This is the only
         --     string-rewrite we do inside function bodies; we never touch
-        --     references to other public tables. replace() is exact, so
+        --     references to other tables. replace() is exact, so
         --     'public.dictionary_entries' becomes '<tenant>.dictionary_entries'
         --     while 'public.countries' (say) stays as 'public.countries'.
-        IF p_dictionary_table IS NOT NULL
-           AND position(p_dictionary_table IN v_func_def) > 0
-        THEN
-            v_dict_basename       := split_part(p_dictionary_table, '.', 2);
-            v_dict_basename_quoted := quote_ident(v_dict_basename);
+        IF v_dict_oid IS NOT NULL THEN
             v_func_def := replace(
                 v_func_def,
-                p_dictionary_table,
-                quote_ident(p_tenant) || '.' || v_dict_basename
+                format('%I.%I', v_dict_schema, v_dict_basename),
+                format('%I.%I', p_tenant, v_dict_basename)
             );
         END IF;
 
-        -- 4d. Inject SET search_path so the function's unqualified names
-        --     resolve against the tenant's own copies, not the source.
-        --     pg_get_functiondef always emits the LANGUAGE clause on its
-        --     own line followed by 'AS $tag$', which is what we anchor on.
-        v_func_def := replace(
-            v_func_def,
-            E'LANGUAGE plpgsql\nAS ',
-            E'LANGUAGE plpgsql\n SET search_path TO ' || quote_ident(p_tenant) || E', public\nAS '
-        );
+        -- 4d. Pin the copy's search_path so unqualified names resolve
+        --     against the tenant copies first. pg_get_functiondef puts
+        --     every option (LANGUAGE, SET ...) in the header before the
+        --     first line starting with 'AS '; we drop any existing
+        --     search_path there and add ours, for any function language.
+        v_as_pos := position(E'\nAS ' IN v_func_def);
+        v_header := regexp_replace(left(v_func_def, v_as_pos - 1),
+                                   E'\n SET search_path TO [^\n]*', '', 'g');
+        v_rest := substr(v_func_def, v_as_pos);
+        v_func_def := v_header
+            || format(E'\n SET search_path TO %I, %I, public', p_tenant, p_source_schema)
+            || v_rest;
 
         -- 4e. Create the function copy in the tenant.
         EXECUTE v_func_def;
 
-        -- 4f. Pull the trigger DDL, swap the source schema for the tenant
-        --     schema in the table reference, and qualify the function
-        --     call. pg_get_triggerdef returns the unqualified function
-        --     name (just 'validate_asset_fields'), so we schema-qualify
-        --     it explicitly so the right copy is invoked.
+        -- 4f. Pull the trigger DDL and point both the table and the
+        --     function at the tenant. pg_get_triggerdef qualifies the
+        --     function name here because search_path = pg_catalog.
         v_trig_def := pg_get_triggerdef(trig.trigger_oid);
         v_trig_def := replace(
             v_trig_def,
-            'ON ' || quote_ident(p_source_schema) || '.',
-            'ON ' || quote_ident(p_tenant) || '.'
+            ' ON ' || format('%I.%I', p_source_schema, trig.table_name) || ' ',
+            ' ON ' || format('%I.%I', p_tenant, trig.table_name) || ' '
         );
-        v_trig_def := regexp_replace(
+        v_trig_def := replace(
             v_trig_def,
-            'EXECUTE FUNCTION[[:space:]]+(' || quote_literal(trig.function_name) || ')',
-            'EXECUTE FUNCTION ' || quote_ident(p_tenant) || '.' || trig.function_name,
-            'i'
+            'EXECUTE FUNCTION ' || format('%I.%I', trig.function_schema, trig.function_name) || '(',
+            'EXECUTE FUNCTION ' || format('%I.%I', p_tenant, trig.function_name) || '('
         );
 
+        EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I.%I',
+                       trig.trigger_name, p_tenant, trig.table_name);
         EXECUTE v_trig_def;
     END LOOP;
 
     ----------------------------------------------------------------------
     -- 5. Clone the dictionary table into the tenant and copy the rows
-    --    the caller asked for. If no dictionary was specified, skip —
-    --    some projects don't have one and that's fine.
+    --    the caller asked for. OVERRIDING SYSTEM VALUE keeps GENERATED
+    --    ALWAYS identity columns copyable.
     ----------------------------------------------------------------------
-    IF p_dictionary_table IS NOT NULL THEN
-        v_dict_basename := split_part(p_dictionary_table, '.', 2);
-        DECLARE
-            v_dict_schema text := split_part(p_dictionary_table, '.', 1);
-        BEGIN
+    IF v_dict_oid IS NOT NULL THEN
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS %I.%I (LIKE %I.%I INCLUDING ALL)',
+            p_tenant, v_dict_basename, v_dict_schema, v_dict_basename
+        );
+
+        IF p_dictionary_categories IS NULL THEN
             EXECUTE format(
-                'CREATE TABLE IF NOT EXISTS %I.%I (LIKE %I.%I INCLUDING ALL)',
+                'INSERT INTO %I.%I OVERRIDING SYSTEM VALUE SELECT * FROM %I.%I ON CONFLICT DO NOTHING',
                 p_tenant, v_dict_basename, v_dict_schema, v_dict_basename
             );
-
-            IF p_dictionary_categories IS NULL THEN
-                EXECUTE format(
-                    'INSERT INTO %I.%I SELECT * FROM %I.%I ON CONFLICT DO NOTHING',
-                    p_tenant, v_dict_basename, v_dict_schema, v_dict_basename
-                );
-            ELSE
-                EXECUTE format(
-                    'INSERT INTO %I.%I SELECT * FROM %I.%I
-                     WHERE category = ANY($1) ON CONFLICT DO NOTHING',
-                    p_tenant, v_dict_basename, v_dict_schema, v_dict_basename
-                ) USING p_dictionary_categories;
-            END IF;
-        END;
+        ELSE
+            EXECUTE format(
+                'INSERT INTO %I.%I OVERRIDING SYSTEM VALUE SELECT * FROM %I.%I
+                 WHERE category = ANY($1) ON CONFLICT DO NOTHING',
+                p_tenant, v_dict_basename, v_dict_schema, v_dict_basename
+            ) USING p_dictionary_categories;
+        END IF;
     END IF;
 END
 $func$;

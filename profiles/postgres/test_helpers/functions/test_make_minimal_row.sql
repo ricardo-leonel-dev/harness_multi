@@ -24,8 +24,6 @@ DECLARE
     col record;
     v_payload jsonb := '{}'::jsonb;
     v_value jsonb;
-    v_enum_label text;
-    v_type_kind char;
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_namespace n
@@ -36,87 +34,76 @@ BEGIN
     END IF;
 
     FOR col IN
-        SELECT column_name, data_type, udt_name, character_maximum_length
+        SELECT column_name, data_type, udt_schema, udt_name, character_maximum_length
         FROM information_schema.columns
         WHERE table_schema = p_schema
           AND table_name   = p_table
           AND is_nullable  = 'NO'
           AND column_default IS NULL
+          AND is_identity  = 'NO'
+          AND is_generated = 'NEVER'
         ORDER BY ordinal_position
     LOOP
-        -- We use a string-based CASE and then to_jsonb() the result so
-        -- every branch has type text — that keeps PostgreSQL happy when
-        -- it tries to pick a common type for the CASE expression. (Doing
-        -- the same with mixed jsonb/int/text branches trips the "could
-        -- not determine polymorphic type" error.)
-        v_value := to_jsonb(
-            CASE
-                -- Arrays always default to an empty JSON array.
-                WHEN col.data_type = 'ARRAY' THEN '[]'
+        -- Every branch yields a typed jsonb value (not a JSON string), so
+        -- test_insert_row's jsonb_to_recordset receives a real JSON array
+        -- for array columns and a real object for json/jsonb columns.
+        v_value := CASE
+            -- Arrays always default to an empty JSON array.
+            WHEN col.data_type = 'ARRAY' THEN '[]'::jsonb
 
-                -- JSON columns default to a JSON object so callers can
-                -- chain key updates without juggling NULL vs '{}'.
-                WHEN col.udt_name IN ('jsonb', 'json') THEN '{}'
+            -- JSON columns default to a JSON object so callers can
+            -- chain key updates without juggling NULL vs '{}'.
+            WHEN col.udt_name IN ('jsonb', 'json') THEN '{}'::jsonb
 
-                -- Enums and other USER-DEFINED types: resolved below
-                -- the CASE expression. For non-enum UDTs (composite,
-                -- range, domain), we fall back to NULL — extras must
-                -- provide.
-                WHEN col.data_type = 'USER-DEFINED' THEN NULL
+            -- Enums: the first label in sort order. The type is looked
+            -- up in udt_schema — a tenant copy's enum column still uses
+            -- the type from the source schema. Other USER-DEFINED types
+            -- (composite, range) fall back to NULL — extras must provide.
+            WHEN col.data_type = 'USER-DEFINED' THEN (
+                SELECT to_jsonb(e.enumlabel::text)
+                FROM pg_type ty
+                JOIN pg_namespace tn ON tn.oid = ty.typnamespace
+                JOIN pg_enum e ON e.enumtypid = ty.oid
+                WHERE tn.nspname = col.udt_schema AND ty.typname = col.udt_name
+                ORDER BY e.enumsortorder
+                LIMIT 1
+            )
 
-                -- Timestamps: epoch. With and without time zone both parse.
-                WHEN col.data_type = 'timestamp with time zone'
-                    THEN '1970-01-01 00:00:00+00'
-                WHEN col.data_type LIKE 'timestamp%'
-                    THEN '1970-01-01 00:00:00'
+            -- Timestamps: epoch. With and without time zone both parse.
+            WHEN col.data_type = 'timestamp with time zone'
+                THEN to_jsonb('1970-01-01 00:00:00+00'::text)
+            WHEN col.data_type LIKE 'timestamp%'
+                THEN to_jsonb('1970-01-01 00:00:00'::text)
 
-                WHEN col.data_type = 'time with time zone'    THEN '00:00:00+00'
-                WHEN col.data_type = 'time without time zone' THEN '00:00:00'
+            WHEN col.data_type = 'time with time zone'    THEN to_jsonb('00:00:00+00'::text)
+            WHEN col.data_type = 'time without time zone' THEN to_jsonb('00:00:00'::text)
 
-                -- Booleans default to false — many tables use a flag
-                -- column to mean "active" or "deleted", and false is
-                -- the safer default than true.
-                WHEN col.data_type = 'boolean' THEN 'false'
+            -- Booleans default to false — many tables use a flag
+            -- column to mean "active" or "deleted", and false is
+            -- the safer default than true.
+            WHEN col.data_type = 'boolean' THEN 'false'::jsonb
 
-                -- Numeric family — 0.
-                WHEN col.data_type IN ('integer','smallint','bigint') THEN '0'
-                WHEN col.data_type IN ('numeric','real','double precision') THEN '0'
+            -- Numeric family — 0.
+            WHEN col.data_type IN ('integer','smallint','bigint',
+                                   'numeric','real','double precision') THEN '0'::jsonb
 
-                -- String types — sentinel value that signals "this is a
-                -- stub"; tests can grep for it if they want to assert
-                -- against it, but in practice tests override via extras.
-                WHEN col.data_type IN (
-                    'text','character varying','character','name','citext'
-                ) THEN 'test_value'
+            -- String types — sentinel value that signals "this is a
+            -- stub"; tests override via extras in practice. Truncated
+            -- to the column length so char(2)/varchar(5) columns accept it.
+            WHEN col.data_type IN (
+                'text','character varying','character','name','citext'
+            ) THEN to_jsonb(left('test_value', coalesce(col.character_maximum_length, 10)))
 
-                WHEN col.data_type = 'date' THEN '1970-01-01'
+            WHEN col.data_type = 'date' THEN to_jsonb('1970-01-01'::text)
 
-                -- UUIDs: fresh per call so a row inserted twice doesn't
-                -- collide on PK uniqueness (when the column is the PK).
-                WHEN col.udt_name = 'uuid' THEN gen_random_uuid()::text
+            -- UUIDs: fresh per call so a row inserted twice doesn't
+            -- collide on PK uniqueness (when the column is the PK).
+            WHEN col.udt_name = 'uuid' THEN to_jsonb(gen_random_uuid()::text)
 
-                -- Default case: unknown / exotic type, leave NULL.
-                ELSE NULL
-            END
-        );
-
-        -- USER-DEFINED enum resolution is special-cased because the
-        -- CASE expression above can't issue a SELECT. We do it here.
-        IF col.data_type = 'USER-DEFINED' THEN
-            SELECT t.typtype INTO v_type_kind
-            FROM pg_type t
-            WHERE t.oid = (p_schema || '.' || col.udt_name)::regtype;
-            IF v_type_kind = 'e' THEN
-                SELECT enumlabel INTO v_enum_label
-                FROM pg_enum
-                WHERE enumtypid = (p_schema || '.' || col.udt_name)::regtype
-                ORDER BY enumsortorder
-                LIMIT 1;
-                v_value := to_jsonb(v_enum_label);
-            ELSE
-                v_value := to_jsonb(NULL);
-            END IF;
-        END IF;
+            -- Default case: unknown / exotic type, leave NULL.
+            ELSE 'null'::jsonb
+        END;
+        v_value := coalesce(v_value, 'null'::jsonb);
 
         v_payload := v_payload || jsonb_build_object(col.column_name, v_value);
     END LOOP;

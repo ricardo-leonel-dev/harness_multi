@@ -3,15 +3,20 @@
 -- Inserts (or refreshes) a list of dictionary entries into the named
 -- table inside a tenant schema. The function is generic over schema and
 -- table name — it expects the destination table to expose at least
--- (code text, category text, is_active smallint/bool, label text), and
--- to have a UNIQUE or PRIMARY KEY constraint whose columns are a
--- superset of (code, category) so ON CONFLICT can resolve duplicates.
+-- (code, category, is_active, label), and to have a non-partial UNIQUE
+-- index (or PRIMARY KEY) on exactly (code, category), in either order.
+-- That is what `ON CONFLICT (code, category)` can infer; an index on more
+-- columns, e.g. (code, category, language_code), or on (code) alone does
+-- not qualify.
 --
--- Projects whose dictionary uses a different uniqueness rule (single
--- column, composite of three, no key) should write a per-table Tier 2
--- helper. We do not silently degrade to ON CONFLICT DO NOTHING on the
--- PK column, because that would defeat the "refresh existing entries"
--- purpose of this function.
+-- `is_active` is cast to whatever type the column has, so smallint,
+-- integer and boolean columns all accept 1/0 (and true/false for
+-- boolean). It defaults to 1 when the entry omits it.
+--
+-- Projects whose dictionary uses a different uniqueness rule should
+-- write a per-table Tier 2 helper. We do not silently degrade to
+-- ON CONFLICT DO NOTHING on the PK column, because that would defeat the
+-- "refresh existing entries" purpose of this function.
 
 CREATE OR REPLACE FUNCTION harness_test_helpers.test_seed_dictionary_entries(
     p_schema text,
@@ -22,45 +27,42 @@ LANGUAGE plpgsql
 AS $func$
 DECLARE
     entry record;
-    v_target_ok boolean;
-    v_target_cols text[];
+    v_rel oid;
+    v_is_active_type text;
 BEGIN
-    -- Pre-flight that the destination table exists, has a usable
-    -- uniqueness target, and exposes the four columns we need.
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_namespace n
-        JOIN pg_class c ON c.relnamespace = n.oid
-        WHERE n.nspname = p_schema AND c.relname = p_table AND c.relkind = 'r'
-    ) THEN
+    -- Pre-flight that the destination table exists and has a usable
+    -- conflict target.
+    SELECT c.oid INTO v_rel
+    FROM pg_namespace n
+    JOIN pg_class c ON c.relnamespace = n.oid
+    WHERE n.nspname = p_schema AND c.relname = p_table AND c.relkind = 'r';
+    IF v_rel IS NULL THEN
         RAISE EXCEPTION 'test_seed_dictionary_entries: %.% is not a regular table',
             p_schema, p_table;
     END IF;
 
-    -- Look for a UNIQUE or PRIMARY KEY constraint whose key columns are
-    -- a prefix-subset of (code, category) — that's the conflict target
-    -- ON CONFLICT needs to know about. We accept supersets too (so a
-    -- UNIQUE on (code, category, language_code) still works), but we
-    -- reject disjoint ones (a PK on id alone, say).
-    SELECT con.conkey::int[] INTO v_target_cols
-    FROM pg_constraint con
-    WHERE con.conrelid = (p_schema || '.' || p_table)::regclass
-      AND con.contype IN ('u', 'p')
-      AND (
-          -- (code, category) both appear in the constraint key in order.
-          SELECT bool_and(c.column_name IN ('code','category'))
-          FROM information_schema.columns c
-          WHERE c.table_schema = p_schema
-            AND c.table_name = p_table
-            AND c.ordinal_position = ANY (con.conkey::int[])
-      )
-    ORDER BY array_length(con.conkey::int[], 1) ASC
-    LIMIT 1;
-
-    v_target_ok := v_target_cols IS NOT NULL;
-
-    IF NOT v_target_ok THEN
-        RAISE EXCEPTION 'test_seed_dictionary_entries: %.% needs a UNIQUE or PRIMARY KEY constraint that covers (code, category) so ON CONFLICT can refresh existing rows. Otherwise the function would silently duplicate entries on every call.',
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_index i
+        WHERE i.indrelid = v_rel
+          AND i.indisunique
+          AND i.indpred IS NULL
+          AND i.indexprs IS NULL
+          AND (
+              SELECT array_agg(a.attname::text ORDER BY a.attname)
+              FROM unnest(i.indkey::int2[]) AS k(attnum)
+              JOIN pg_attribute a ON a.attrelid = v_rel AND a.attnum = k.attnum
+          ) = ARRAY['category', 'code']
+    ) THEN
+        RAISE EXCEPTION 'test_seed_dictionary_entries: %.% needs a UNIQUE index or PRIMARY KEY on exactly (code, category) so ON CONFLICT can refresh existing rows. Other uniqueness shapes need a Tier 2 helper.',
             p_schema, p_table;
+    END IF;
+
+    SELECT format_type(a.atttypid, a.atttypmod) INTO v_is_active_type
+    FROM pg_attribute a
+    WHERE a.attrelid = v_rel AND a.attname = 'is_active' AND NOT a.attisdropped;
+    IF v_is_active_type IS NULL THEN
+        RAISE EXCEPTION 'test_seed_dictionary_entries: %.% has no is_active column', p_schema, p_table;
     END IF;
 
     FOR entry IN
@@ -69,15 +71,15 @@ BEGIN
     LOOP
         EXECUTE format(
             'INSERT INTO %I.%I (code, category, is_active, label)
-             VALUES ($1, $2, $3, $4)
+             VALUES ($1, $2, $3::%s, $4)
              ON CONFLICT (code, category) DO UPDATE
                 SET is_active = EXCLUDED.is_active,
                     label     = EXCLUDED.label',
-            p_schema, p_table
+            p_schema, p_table, v_is_active_type
         ) USING
             entry.value->>'code',
             entry.value->>'category',
-            COALESCE((entry.value->>'is_active')::smallint, 1),
+            COALESCE(entry.value->>'is_active', '1'),
             entry.value->>'label';
     END LOOP;
 END

@@ -159,7 +159,7 @@ if [ "$PROFILE" = postgres ]; then
   cp "$TOOLKIT_DIR/profiles/postgres/run_tests.sh" "$TARGET_DIR/scripts/run_tests.sh"
   chmod +x "$TARGET_DIR/scripts/run_tests.sh"
   cp "$TOOLKIT_DIR/profiles/postgres/verification.md" "$TARGET_DIR/harness/instructions/postgres.md"
-  # Generic, project-owned test_helpers bundle (6 PL/pgSQL fixtures under
+  # Generic, harness-owned test_helpers bundle (6 PL/pgSQL fixtures under
   # schema harness_test_helpers). The project opts in by adding
   #   "test_helpers": { "enabled": true }
   # to .harness.json — init.sh then runs bash harness/test_helpers/install.sh.
@@ -287,7 +287,9 @@ exclude_harness_files() {
   for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do entries="$entries .claude/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do entries="$entries .codex/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/scripts/*.sh; do entries="$entries scripts/${name##*/}"; done
-  entries="$entries scripts/build_traceability.sh scripts/templates/acceptance_test_prologue.sql harness/test_helpers/"
+  # harness/ (above) already covers harness/test_helpers/; project-owned Tier 2
+  # helpers live outside it (test_helpers.project_specific_dir) so git sees them.
+  entries="$entries scripts/build_traceability.sh scripts/templates/acceptance_test_prologue.sql"
 
   begin="# >>> harness-managed: /$prefix (written by install.sh — re-run it instead of editing)"
   end="# <<< harness-managed: /$prefix"

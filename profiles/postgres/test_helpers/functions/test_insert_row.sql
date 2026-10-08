@@ -4,6 +4,8 @@
 -- the destination table, builds a row-type matching the columns present
 -- in `p_payload`, and uses jsonb_to_recordset to bind the JSON keys to
 -- the row type — so we never hand-roll a parser for JSON-to-SQL casts.
+-- Array columns take JSON arrays (["a","b"]); json/jsonb columns take
+-- any JSON value.
 --
 -- Columns omitted from `p_payload` keep the table's DEFAULT. JSON nulls
 -- become SQL NULLs (so a NOT-NULL column with no DEFAULT will reject
@@ -47,49 +49,27 @@ BEGIN
     -- DEFAULT (or NULL) is used — we don't synthesize NULL defaults
     -- here. That's why callers usually pair this with test_make_minimal_row.
     FOR col IN
-        SELECT c.column_name, c.data_type, c.udt_name,
-               c.character_maximum_length, c.numeric_precision, c.numeric_scale,
-               c.ordinal_position
-        FROM information_schema.columns c
-        WHERE c.table_schema = p_schema
-          AND c.table_name   = p_table
-          AND c.column_name = ANY (SELECT jsonb_object_keys(p_payload))
-        ORDER BY c.ordinal_position
+        SELECT a.attname AS column_name, a.atttypid, a.atttypmod
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = p_schema
+          AND c.relname = p_table
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND a.attname = ANY (SELECT jsonb_object_keys(p_payload))
+        ORDER BY a.attnum
     LOOP
         v_col_list := v_col_list || quote_ident(col.column_name) || ', ';
 
-        -- Map information_schema types to PostgreSQL cast expressions
-        -- that jsonb_to_recordset will accept. Most are 1:1; the cases
-        -- we have to handle are: array udt_name (which has a leading
-        -- underscore like '_text'), varchar length annotation, and
-        -- timestamp-with-time-zone abbreviation.
-        v_row_type_expr := CASE
-            WHEN col.data_type = 'ARRAY' THEN
-                -- udt_name for arrays is '_int4', '_text', etc.
-                -- Strip the leading underscore and append '[]'.
-                regexp_replace(col.udt_name, '^_(.+)$', '\1[]')
-            WHEN col.data_type = 'character varying' AND col.character_maximum_length IS NOT NULL THEN
-                format('varchar(%s)', col.character_maximum_length)
-            WHEN col.data_type = 'character' AND col.character_maximum_length IS NOT NULL THEN
-                format('char(%s)', col.character_maximum_length)
-            WHEN col.data_type = 'numeric' AND col.numeric_precision IS NOT NULL
-                 AND col.numeric_scale IS NOT NULL THEN
-                format('numeric(%s,%s)', col.numeric_precision, col.numeric_scale)
-            WHEN col.data_type = 'numeric' AND col.numeric_precision IS NOT NULL THEN
-                format('numeric(%s)', col.numeric_precision)
-            WHEN col.data_type = 'timestamp with time zone'    THEN 'timestamptz'
-            WHEN col.data_type = 'timestamp without time zone' THEN 'timestamp'
-            WHEN col.data_type = 'time with time zone'         THEN 'timetz'
-            WHEN col.data_type = 'time without time zone'      THEN 'time'
-            WHEN col.data_type IN ('integer','bigint','smallint','numeric','real',
-                                   'double precision','text','boolean','date',
-                                   'jsonb','json','uuid','bytea','interval','money',
-                                   'xml','inet','cidr','macaddr','macaddr8')
-                THEN col.data_type
-            WHEN col.data_type = 'USER-DEFINED' OR col.data_type LIKE 'character%'
-                THEN col.udt_name
-            ELSE col.data_type
-        END;
+        -- format_type() prints the exact declared type (varchar(N),
+        -- numeric(p,s), arrays, ...) and schema-qualifies it whenever it
+        -- is not visible on the current search_path. That keeps enums
+        -- working when the table is a tenant copy whose enum type still
+        -- lives in the source schema. The column definition is
+        -- evaluated under this same search_path, so the printed name
+        -- always resolves to the same type.
+        v_row_type_expr := format_type(col.atttypid, col.atttypmod);
 
         v_row_def := v_row_def
             || quote_ident(col.column_name) || ' ' || v_row_type_expr || ', ';

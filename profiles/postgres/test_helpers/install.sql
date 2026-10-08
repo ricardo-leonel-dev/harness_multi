@@ -11,16 +11,15 @@
 CREATE SCHEMA IF NOT EXISTS harness_test_helpers;
 GRANT USAGE ON SCHEMA harness_test_helpers TO PUBLIC;
 
--- install.sh sets `helpers_dir` to the directory holding this script.
--- Using it here keeps the \i includes working regardless of the
--- caller's cwd (init.sh runs from the project root, where 'functions/'
--- does not exist).
-\i :helpers_dir/functions/test_drop_isolated_tenant.sql
-\i :helpers_dir/functions/test_create_isolated_tenant.sql
-\i :helpers_dir/functions/test_make_minimal_row.sql
-\i :helpers_dir/functions/test_insert_row.sql
-\i :helpers_dir/functions/test_seed_dictionary_entries.sql
-\i :helpers_dir/functions/test_assert_field_equals.sql
+-- \ir resolves paths relative to this file, so the includes work
+-- regardless of the caller's cwd (init.sh runs from the project root,
+-- where 'functions/' does not exist) and of spaces in the path.
+\ir functions/test_drop_isolated_tenant.sql
+\ir functions/test_create_isolated_tenant.sql
+\ir functions/test_make_minimal_row.sql
+\ir functions/test_insert_row.sql
+\ir functions/test_seed_dictionary_entries.sql
+\ir functions/test_assert_field_equals.sql
 
 -- Grant EXECUTE to PUBLIC on every function we just created. We resolve
 -- them dynamically (rather than hard-coding names) so adding a new

@@ -5,8 +5,9 @@ project's dev/test database. They are **completely generic** — no project
 schema, trigger, or category names are hard-coded — so they work for any
 postgres project that uses `install.sh --profile postgres`.
 
-The bundle is project-owned: `install.sh` copies it into
-`<project>/harness/test_helpers/`, and `init.sh` installs it conditionally
+The bundle is harness-owned: `install.sh` refreshes it into
+`<project>/harness/test_helpers/` on every reinstall (git-excluded, never
+edit it there), and `init.sh` installs it conditionally
 when `.harness.json::test_helpers.enabled = true`. Production never sees
 the `harness_test_helpers` schema — it is installed only into the dev/test
 DB the project's `verify_command` points at.
@@ -49,20 +50,31 @@ harness_test_helpers.test_create_isolated_tenant(
 Creates a fresh schema `p_tenant` and populates it with copies of every
 table in `p_tables`, drawn from `p_source_schema`. Per table, the function:
 
-- creates a `LIKE ... INCLUDING ALL EXCLUDING TRIGGERS` copy
+- creates a `LIKE ... INCLUDING ALL` copy (LIKE never copies triggers
+  or foreign keys; both are handled below)
 - clones sequences attached to serial columns and rewires the column
   defaults to point at the new sequences
-- re-creates every in-schema foreign key (FKs pointing outside
-  `p_source_schema`, e.g. `public.countries`, are left pointing at the
-  original — a deliberate trade-off)
+- re-creates every foreign key between two tables in `p_tables`,
+  pointing at the tenant copies. FKs to any other table (another table
+  of the source schema, or e.g. `public.countries`) are not recreated —
+  a deliberate trade-off
 - discovers and rebinds every trigger on the copied tables: each
-  trigger's function body is moved into the tenant schema with a
-  `SET search_path TO <tenant>, public`, and dictionary references are
-  rewritten to point at the tenant's dictionary copy
+  trigger function is copied into the tenant schema with
+  `SET search_path TO <tenant>, <source>, public`, and schema-qualified
+  dictionary references are rewritten to point at the tenant's
+  dictionary copy
 
-If `p_dictionary_table` is non-NULL the named dictionary table is also
-cloned into the tenant, populated with rows whose `category` is in
-`p_dictionary_categories` (or all rows if NULL).
+The function runs with `search_path = pg_catalog` internally, so it
+behaves the same whether or not the source schema (typically `public`)
+is on the caller's `search_path`.
+
+If `p_dictionary_table` (schema-qualified) is non-NULL the named
+dictionary table is also cloned into the tenant, populated with rows
+whose `category` is in `p_dictionary_categories` (or all rows if NULL).
+When the default `public.dictionary_entries` does not exist the copy is
+skipped with a NOTICE, so projects without a dictionary can call the
+function with three arguments; an explicitly named table that does not
+exist is an error.
 
 **Examples** — rushr-style and a generic postgres project:
 
@@ -110,13 +122,17 @@ harness_test_helpers.test_make_minimal_row(
 ```
 
 Introspects every `NOT NULL DEFAULT-less column` of `<schema>.<table>`
-and emits a JSONB object with a stub value for each. `p_extras` is merged
-on top so the caller can override any field.
+(identity and generated columns excluded) and emits a JSONB object with
+a stub value for each. `p_extras` is merged on top so the caller can
+override any field. The result is directly insertable with
+`test_insert_row`.
 
-Stub values: arrays → `[]`, jsonb/json → `{}`, numeric → `0`, text →
-`'test_value'`, timestamp → `'1970-01-01 00:00:00'`, date →
+Stub values: arrays → JSON array `[]`, jsonb/json → JSON object `{}`,
+numeric → `0`, boolean → `false`, text → `'test_value'` (truncated to
+the column length), timestamp → `'1970-01-01 00:00:00'`, date →
 `'1970-01-01'`, uuid → fresh `gen_random_uuid()`, enum → first
-`enumsortorder` label.
+`enumsortorder` label (looked up in the type's own schema, so enum
+columns of a tenant copy work too).
 
 **Honest limitation:** for tables whose NOT-NULL columns are validated
 by triggers that look up domain-specific values (e.g. `validate_campaign_fields`
@@ -137,8 +153,10 @@ harness_test_helpers.test_insert_row(
 ) RETURNS bigint
 ```
 
-Builds the row-type dynamically from `information_schema.columns` and
-runs `INSERT INTO <schema>.<table> SELECT ... FROM jsonb_to_recordset($1)`.
+Builds the row-type dynamically from the catalog (`format_type()` of each
+column, so enums, arrays and typmods are exact) and runs
+`INSERT INTO <schema>.<table> SELECT ... FROM jsonb_to_recordset($1)`.
+Array columns take JSON arrays (`["a","b"]`).
 Returns the new id when the table has a bigint/int/smallint `id` column
 (common case), or `1` as a sentinel otherwise.
 
@@ -161,9 +179,13 @@ Inserts or refreshes dictionary entries into `<schema>.<p_table>`.
 objects. `ON CONFLICT (code, category) DO UPDATE` so re-running the
 same entries refreshes them in place.
 
-The function assumes the table has a PRIMARY KEY or UNIQUE constraint
-covering at least `(code, category)`. Projects whose dictionary uses a
-different uniqueness rule should write a per-table Tier 2 helper.
+The table needs a non-partial UNIQUE index or PRIMARY KEY on exactly
+`(code, category)` (either order) — that is what `ON CONFLICT (code,
+category)` can infer; `(code)` alone or `(code, category, lang)` does
+not qualify and the function raises up front. `is_active` is cast to
+the column's own type (smallint, integer or boolean) and defaults to 1.
+Projects whose dictionary uses a different uniqueness rule should write
+a per-table Tier 2 helper.
 
 ### 6. `test_assert_field_equals`
 
@@ -190,48 +212,57 @@ jq 'del(.test_helpers)' .harness.json > .harness.json.tmp \
   && mv .harness.json.tmp .harness.json
 ```
 
-`uninstall.sh` drops schema `harness_test_helpers CASCADE`. Production
-DBs were never touched — the schema only exists on the DB your
-`verify_command` runs against.
+`uninstall.sh` drops schema `harness_test_helpers CASCADE` from the same
+database `install.sh` installs into (both resolve the connection through
+`lib_conn.sh`, including the `datname='<db>'` existence-check pattern of
+`verify_command`). Production DBs were never touched — the schema only
+exists on the DB your `verify_command` runs against.
 
 ## Limitations
 
-- **FKs to tables outside `p_source_schema` are not copied.** If
-  `rushr_ec.assets.country_id` references `public.countries.id`, the
-  tenant references the original `public.countries` table directly. This
-  assumes the global catalogue is shared, which is the common case.
+- **Only FKs between copied tables are recreated.** If
+  `rushr_ec.assets.country_id` references `public.countries.id` (or a
+  source table you did not list in `p_tables`), the tenant copy has no
+  FK for that column. Copy the referenced table too if a test depends
+  on the constraint.
 - **Triggers with side effects outside the source schema are not
   isolated.** A trigger that writes to a different schema (e.g. an
   audit-log table in `public.audit`) will still write there when fired
   in the tenant. Use Tier 2 for those tables.
-- **Trigger rebinding only handles triggers named in pg_trigger.**
-  Triggers defined on views (`INSTEAD OF`) and event triggers are out
-  of scope. Triggers on partitioned tables work — the function copies
-  them onto the leaf partitions of the LIKE copy.
+- **Only row/statement triggers on the copied tables are rebound.**
+  Event triggers and triggers on views are out of scope. Partitioned
+  tables are copied by `LIKE` as plain tables.
 - **`test_make_minimal_row` does not try to be smart about trigger
   validation.** See function 3's docstring.
-- **`test_seed_dictionary_entries` requires `(code, category)` to be in
-  a unique constraint.** Other uniqueness shapes → Tier 2.
+- **`test_seed_dictionary_entries` requires a unique index on exactly
+  `(code, category)`.** Other uniqueness shapes → Tier 2.
 
 ## Extending with per-table helpers (Tier 2)
 
 Projects whose tables have unusual constraints (complex triggers,
 domain-specific NOT-NULL checks, etc.) can write their own per-table
-helpers alongside this one:
+helpers. They live **outside** `harness/` — `install.sh` of the toolkit
+lists `harness/` in `.git/info/exclude`, and Tier 2 files must be
+versioned with the project:
 
 ```
-<project>/harness/test_helpers/
-├── install.sql                              # from personal_harness
-├── install.sh                               # from personal_harness
-├── README.md                                # from personal_harness
-└── project_specific/                        # project-owned, git-tracked
+<project>/
+├── harness/test_helpers/                    # from personal_harness (git-excluded)
+└── test_helpers/                            # project-owned, git-tracked
     ├── test_make_minimal_campaign.sql       # returns a payload that
-                                             # passes validate_campaign_fields
+    │                                        # passes validate_campaign_fields
     └── test_insert_campaign.sql
 ```
 
-The project's install/uninstall scripts load these after the Tier 1
-ones. Convention: name them `test_make_minimal_<table>.sql` /
+The directory defaults to `test_helpers/` at the project root; override
+it with `.harness.json::test_helpers.project_specific_dir`.
+`harness/test_helpers/install.sh` loads every `*.sql` in it, in name
+order, right after the Tier 1 functions (so on every `init.sh` run when
+`test_helpers.enabled = true`). Each file should be idempotent
+(`CREATE OR REPLACE FUNCTION harness_test_helpers.<name>(...)`) so
+`uninstall.sh` removes it together with the schema.
+
+Convention: name them `test_make_minimal_<table>.sql` /
 `test_insert_<table>.sql` so they live next to the generic names in
 the search_path without colliding. The Tier 2 helpers know the trigger
 contract — e.g. `test_make_minimal_campaign.sql` returns a payload with
