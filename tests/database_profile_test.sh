@@ -11,6 +11,7 @@ install_into "$P" --human-user Tester --verify-command true
 [ ! -e "$P/scripts/build_traceability.sh" ]
 [ ! -e "$P/harness/instructions/postgres.md" ]
 [ -f "$P/harness/instructions/coverage.md" ]
+cmp "$TOOLKIT/shared/persona.md" "$P/harness/instructions/persona.md"
 pass 'generic profile installs only generic shared guidance'
 # Runtime settings and project-owned artifacts must survive profile adoption.
 jq '.verify_command="true" | .custom_field="keep" | .notion_database_id=""' "$P/.harness.json" > "$WORK/config"
