@@ -122,6 +122,29 @@ else
 fi
 
 echo ""
+echo "── 4a. Refreshing postgres test_helpers (best-effort) ──"
+
+# Optional, gated on .harness.json::test_helpers.enabled. The bundle is
+# always copied by install.sh into harness/test_helpers/ — this step
+# only installs the PL/pgSQL functions into the project's DB when the
+# project opts in. A missing install.sh means install.sh wasn't run yet
+# (we add it then); a failure here is best-effort because the user may
+# be in a sandbox where the DB isn't reachable.
+if jq -e '.test_helpers.enabled == true' .harness.json >/dev/null 2>&1; then
+  if [ -f harness/test_helpers/install.sh ]; then
+    if bash harness/test_helpers/install.sh; then
+      ok "test_helpers enabled (schema: $(jq -r '.test_helpers.schema // "harness_test_helpers"' .harness.json))"
+    else
+      warn "test_helpers install failed (continuing — verify_command still passed)"
+    fi
+  else
+    warn "test_helpers.enabled is true but harness/test_helpers/install.sh is missing — re-run install.sh --profile postgres"
+  fi
+else
+  ok "test_helpers disabled in .harness.json (skipping)"
+fi
+
+echo ""
 
 echo ""
 echo "── 4.5. Linting tests for byte-level fingerprints ─────────"

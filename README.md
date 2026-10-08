@@ -256,4 +256,7 @@ for discovery. Standalone migration diffs must remain self-contained for externa
 deployment. No timing savings are claimed until measured in actual projects.
 
 Run isolated regressions with `bash tests/database_profile_test.sh` and
-`bash tests/session_resume_test.sh`.
+`bash tests/session_resume_test.sh`. `bash tests/test_helpers_regression_test.sh`
+covers the postgres test_helpers; its SQL cases run only when
+`HARNESS_TEST_PG_DSN` points at a dev database (inside a rolled-back
+transaction), and are skipped otherwise.
