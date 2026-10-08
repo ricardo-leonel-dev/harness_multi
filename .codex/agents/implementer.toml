@@ -51,8 +51,19 @@ or PR descriptions; use conventional commits only.
    requirement id in `requirements.md` must map to at least one concrete test you can point to by
    file+test-name; a requirement with no mapped test is a gap to close before reporting readiness.
 6. As you work, append short notes: `scripts/harness.sh append-log "<what you just did>"`.
-7. **Verify** by running `./init.sh`. If it fails, return to step 4. Capture its output — if it contains any
-   `[WARN]` line (e.g. the mirror sync skipping), that's not a verification failure, but note it down for step 9.
+7. **Verify** by running `./init.sh`. If it fails, return to step 4. Read `docs/verification.md` and,
+   when installed, `harness/instructions/postgres.md` for the accepted verification policy.
+   With an accepted PostgreSQL baseline captured before changes, run all active feature tests and changed
+   relevant tests without baseline suppression, then `bash scripts/run_tests.sh --all --baseline <accepted-path>`.
+   Every active acceptance/spec requirement needs independently passing evidence; a `[STALE]` filename
+   does not excuse failing changed behavior. Compare stale failure details against the original evidence:
+   filename matching alone cannot prove no new regression. Never widen/rewrite a baseline to absorb failures
+   introduced by this feature. Record its acceptance, pre-change evidence, revision, database/environment
+   applicability, executed commands, results and remaining `[STALE]` failures in the handoff. Without an
+   accepted applicable baseline, require ordinary green tests. An incompatible project-owned checkpoint
+   requires explicit local alignment before closure, not an automatic override.
+   Capture init output — a `[WARN]` line (e.g. mirror sync skipping) is not a verification failure,
+   but note it down for step 9.
 8. **Do not log out, and do not spawn the reviewer yourself.** Write your handoff to `progress/impl_<feature>.md`
    (outcome, scope, verification — see the Anti-Telephone convention in `AGENTS.md`; for `sdd=1` features,
    include the `R<n> → test` traceability table from step 5) and end your turn reporting

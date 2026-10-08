@@ -13,7 +13,8 @@
 ## C2 — The state is consistent
 
 - [ ] At most one feature is `in_progress` (enforced by a DB constraint — this should never actually fail).
-- [ ] Every `done` feature has passing tests.
+- [ ] Every `done` feature has passing tests for its active acceptance/spec requirements; an accepted
+      PostgreSQL baseline only permits documented pre-existing failures outside those requirements.
 - [ ] The open session (if any) reflects real, current work — not stale leftovers from a previous session.
 
 ## C3 — The code respects the architecture
@@ -26,7 +27,13 @@
 
 - [ ] Tests exist for the code that changed.
 - [ ] Tests exercise real behavior, not mocks of the thing under test.
-- [ ] `{{VERIFY_COMMAND}}` returns green.
+- [ ] `{{VERIFY_COMMAND}}` exits 0 under the project's accepted verification policy. Without an accepted
+      applicable baseline, require ordinary green tests. With an accepted PostgreSQL baseline captured
+      before changes, all active feature tests and changed relevant tests pass without suppression,
+      and an independent reviewer `--all --baseline <accepted-path>` run finds zero new regressions.
+- [ ] If a baseline is used, its acceptance, pre-change evidence, revision and database/environment
+      applicability are documented; it was not widened to absorb new failures. Remaining `[STALE]`
+      failure details match the original evidence and are reported explicitly, not as "all tests pass".
 
 ## C5 — The session closed successfully
 

@@ -162,7 +162,12 @@ docs, specs, tests, CHECKPOINTS.md and .harness.json belong to the project.
   `claim` mechanically refuses it until every one of them is `done` — see "Local Feature Dependencies" in §4. A
   feature's free-text description saying "depends on X" is not enough on its own; record it with `--depends-on` /
   `set-depends-on` so `claim` actually enforces it instead of relying on whoever picks the next task to notice.
-- **Don't declare a task `done` without green tests.** Run `./init.sh` and make sure the verification command passes.
+- **Don't declare a task `done` without passing verification.** Run `./init.sh` and make sure the verification
+  command passes. Ordinary green tests are required unless the project explicitly accepts an applicable
+  PostgreSQL baseline captured before changes: then active feature/changed relevant tests must pass without
+  suppression, the reviewer must independently confirm zero new regressions with `--all --baseline`, and
+  remaining pre-existing `[STALE]` failures must be documented. Never widen a baseline to absorb new failures.
+  See `harness/instructions/postgres.md`; incompatible project-owned checkpoints need explicit local alignment.
 - **Document what you do** via `scripts/harness.sh append-log "<note>"` while you work, not at the end.
 - **Clean up the repository** before closing the session (see [5](#5-log-out-lifecycle)).
 - **If you don't know something, look it up in `docs/`** before inventing it.
@@ -204,8 +209,9 @@ dependencies on a *different* project's harness; this one is for dependencies be
 
 Before finishing:
 
-1. Run `./init.sh` — everything is green (this also regenerates `state/` and best-effort syncs the Postgres/Supabase
-   mirror, if configured).
+1. Run `./init.sh` — verification passes under the accepted policy in §3 (this also regenerates `state/` and
+   best-effort syncs the Postgres/Supabase mirror, if configured). Accepted `[STALE]` failures remain explicitly
+   documented; passing with a baseline does not mean every historical test is green.
 2. If the task is finished, run:
    ```
    scripts/harness.sh log-out --changes <file1> <file2> ... --verification "<summary>" --closure "<summary>"
