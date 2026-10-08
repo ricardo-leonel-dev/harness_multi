@@ -78,9 +78,23 @@ BEGIN
 
     ----------------------------------------------------------------------
     -- 1. Create the tenant schema (and grant USAGE so other roles can see
-    --    its objects during tests).
+    --    its objects during tests), marked with a COMMENT so
+    --    test_drop_isolated_tenant only ever drops schemas created here.
+    --    An existing schema without the mark is a real one: reusing it
+    --    would rebind triggers on its live tables, so refuse.
     ----------------------------------------------------------------------
-    EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', p_tenant);
+    IF p_tenant = p_source_schema THEN
+        RAISE EXCEPTION 'test_create_isolated_tenant: tenant and source schema are both %', p_tenant;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = p_tenant) THEN
+        IF obj_description((SELECT oid FROM pg_namespace WHERE nspname = p_tenant), 'pg_namespace')
+           IS DISTINCT FROM 'harness_test_helpers:isolated_tenant' THEN
+            RAISE EXCEPTION 'test_create_isolated_tenant: schema % already exists and was not created by test_create_isolated_tenant; refusing to modify it', p_tenant;
+        END IF;
+    ELSE
+        EXECUTE format('CREATE SCHEMA %I', p_tenant);
+        EXECUTE format('COMMENT ON SCHEMA %I IS %L', p_tenant, 'harness_test_helpers:isolated_tenant');
+    END IF;
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO PUBLIC', p_tenant);
 
     ----------------------------------------------------------------------

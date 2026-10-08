@@ -22,6 +22,10 @@ if ! resolve_psql_bin; then
     exit 1
 fi
 resolve_psql_conn
+if ! check_host_allowed; then
+    fail "refusing to install into host '$PSQL_HOST' (allowed: $ALLOWED_HOSTS) — add it to .harness.json::test_helpers.allowed_hosts if it is a dev/test database"
+    exit 1
+fi
 PSQL=("$PSQL_BIN" -X -h "$PSQL_HOST" -p "$PSQL_PORT" -U "$PSQL_USER" -d "$PSQL_DB")
 
 if ! "${PSQL[@]}" -tAc "SELECT 1" >/dev/null 2>&1; then

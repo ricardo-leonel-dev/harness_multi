@@ -47,6 +47,40 @@ grep -q '^\\if :has_test_helpers' "$T"
 grep -q "current_setting('search_path')" "$T"
 pass 'prologue prepends harness_test_helpers conditionally'
 
+# Host lock: only local hosts and sockets by default; allowed_hosts replaces
+# the defaults (sockets stay allowed).
+H="$WORK/hostlock"; mkdir -p "$H"
+host_allowed() { # <harness.json contents> <host>
+  printf '%s\n' "$1" > "$H/.harness.json"
+  PROJECT_DIR="$H" PSQL_HOST="$2" bash -c '. "$1/lib_conn.sh"; check_host_allowed' _ "$HELPERS"
+}
+host_allowed '{}' localhost
+pass 'host lock allows localhost by default'
+if host_allowed '{}' db.prod.example.com; then echo 'remote host allowed by default' >&2; exit 1; fi
+pass 'host lock denies a remote host by default'
+host_allowed '{"test_helpers": {"allowed_hosts": ["devdb.internal", "db.prod.example.com"]}}' db.prod.example.com
+pass 'host lock allows a remote host listed in allowed_hosts'
+if host_allowed '{"test_helpers": {"allowed_hosts": ["devdb.internal"]}}' localhost; then
+  echo 'allowed_hosts did not replace the local defaults' >&2; exit 1
+fi
+pass 'host lock: allowed_hosts replaces the local defaults'
+host_allowed '{"test_helpers": {"allowed_hosts": ["devdb.internal"]}}' /tmp
+pass 'host lock always allows Unix socket paths'
+
+# install.sh refuses a denied host before connecting. A fake psql stands in
+# when no real one is found, and records any call.
+mkdir -p "$WORK/fakebin"
+printf '#!/bin/sh\ntouch "%s/psql_called"\nexit 0\n' "$WORK" > "$WORK/fakebin/psql"; chmod +x "$WORK/fakebin/psql"
+printf '%s\n' '{"verify_command": "PGPASSWORD=x psql -h db.prod.example.com -p 5432 -U app -d app -c \"SELECT 1\""}' > "$H/.harness.json"
+if env -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE -u PGPASSWORD -u PG_PASSWORD \
+       -u PSQL_HOST -u PSQL_PORT -u PSQL_USER -u PSQL_DB \
+       PATH="$WORK/fakebin:$PATH" PROJECT_DIR="$H" bash "$HELPERS/install.sh" > "$WORK/denied.log" 2>&1; then
+  cat "$WORK/denied.log" >&2; echo 'install.sh accepted a denied host' >&2; exit 1
+fi
+grep -q "refusing to install into host 'db.prod.example.com'" "$WORK/denied.log" || { cat "$WORK/denied.log" >&2; exit 1; }
+[ ! -e "$WORK/psql_called" ]
+pass 'install.sh refuses a denied host before connecting'
+
 if [ -z "${HARNESS_TEST_PG_DSN:-}" ]; then
   echo '  skip SQL regressions (set HARNESS_TEST_PG_DSN to a dev database to run them)'
   echo 'All test_helpers regressions passed.'
@@ -166,12 +200,64 @@ BEGIN
     END LOOP;
 END $$;
 SELECT 'PASS' AS result, 'seed_conflict_target_and_is_active_type' AS test_case;
+
+-- Drop/create guard: only schemas marked by test_create_isolated_tenant are reused or dropped.
+DO $$
+BEGIN
+    BEGIN
+        PERFORM harness_test_helpers.test_drop_isolated_tenant('zz_src');
+        RAISE EXCEPTION 'drop accepted an unmarked schema';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM NOT LIKE '%was not created by test_create_isolated_tenant%' THEN RAISE; END IF;
+    END;
+    IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'zz_src') THEN
+        RAISE EXCEPTION 'unmarked schema zz_src was dropped';
+    END IF;
+END $$;
+SELECT 'PASS' AS result, 'drop_refuses_unmarked_schema' AS test_case;
+DO $$
+BEGIN
+    PERFORM harness_test_helpers.test_create_isolated_tenant('zz_src', 'zz_src', ARRAY['orders']);
+    RAISE EXCEPTION 'create accepted tenant = source';
+EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%tenant and source schema are both%' THEN RAISE; END IF;
+END $$;
+SELECT 'PASS' AS result, 'create_refuses_tenant_equal_to_source' AS test_case;
+CREATE SCHEMA zz_real;
+DO $$
+BEGIN
+    PERFORM harness_test_helpers.test_create_isolated_tenant('zz_real', 'zz_src', ARRAY['orders']);
+    RAISE EXCEPTION 'create accepted an existing unmarked schema';
+EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%already exists and was not created by test_create_isolated_tenant%' THEN RAISE; END IF;
+END $$;
+SELECT 'PASS' AS result, 'create_refuses_existing_unmarked_schema' AS test_case;
+DO $$
+BEGIN
+    IF obj_description('zz_t3'::regnamespace, 'pg_namespace') IS DISTINCT FROM 'harness_test_helpers:isolated_tenant' THEN
+        RAISE EXCEPTION 'create did not mark the tenant schema';
+    END IF;
+END $$;
+SELECT harness_test_helpers.test_create_isolated_tenant('zz_t3', 'zz_src', ARRAY['orders']);
+SELECT 'PASS' AS result, 'create_marks_tenant_and_rerun_succeeds' AS test_case;
+SELECT harness_test_helpers.test_drop_isolated_tenant('zz_t3');
+SELECT harness_test_helpers.test_drop_isolated_tenant('zz_t3');
+SELECT harness_test_helpers.test_drop_isolated_tenant('zz_never_created');
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'zz_t3') THEN
+        RAISE EXCEPTION 'marked tenant zz_t3 was not dropped';
+    END IF;
+END $$;
+SELECT 'PASS' AS result, 'drop_marked_tenant_and_missing_is_noop' AS test_case;
 ROLLBACK;
 SQL
 psql "$HARNESS_TEST_PG_DSN" -X -q -v ON_ERROR_STOP=1 -f "$WORK/regression.sql" > "$WORK/sql.log" 2>&1 || { cat "$WORK/sql.log" >&2; exit 1; }
 for c in fk_and_trigger_rebinding_independent_of_search_path tenant_trigger_uses_tenant_dictionary \
          minimal_row_round_trips_arrays_jsonb_enums_on_tenant dictionary_copy_optional_by_default \
-         seed_conflict_target_and_is_active_type; do
+         seed_conflict_target_and_is_active_type drop_refuses_unmarked_schema \
+         create_refuses_tenant_equal_to_source create_refuses_existing_unmarked_schema \
+         create_marks_tenant_and_rerun_succeeds drop_marked_tenant_and_missing_is_noop; do
   grep -q "PASS *| *$c" "$WORK/sql.log" || { cat "$WORK/sql.log" >&2; echo "missing PASS for $c" >&2; exit 1; }
   pass "$c"
 done

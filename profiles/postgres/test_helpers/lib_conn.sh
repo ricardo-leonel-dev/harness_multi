@@ -72,6 +72,29 @@ resolve_psql_conn() {
     PSQL_DB="${PSQL_DB:-postgres}"
 }
 
+# Refuses any host not explicitly allowed, so a verify_command (or PG* env)
+# pointing at a shared/remote database never gets the helpers installed —
+# they run DDL and are EXECUTE-able by PUBLIC. Allowed by default: local
+# hosts and Unix sockets (an empty host or a path). Projects whose dev DB is
+# elsewhere list it in .harness.json::test_helpers.allowed_hosts (an array;
+# setting it replaces the local defaults, sockets stay allowed).
+# Sets ALLOWED_HOSTS (space-separated) for error messages. Returns 1 if refused.
+check_host_allowed() {
+    ALLOWED_HOSTS="localhost 127.0.0.1 ::1"
+    if [ -f "$PROJECT_DIR/.harness.json" ] \
+        && jq -e '.test_helpers.allowed_hosts | type == "array"' "$PROJECT_DIR/.harness.json" >/dev/null 2>&1; then
+        ALLOWED_HOSTS="$(jq -r '.test_helpers.allowed_hosts | map(tostring) | join(" ")' "$PROJECT_DIR/.harness.json")"
+    fi
+    case "$PSQL_HOST" in
+        ''|/*) return 0 ;;
+    esac
+    local h
+    for h in $ALLOWED_HOSTS; do
+        [ "$h" = "$PSQL_HOST" ] && return 0
+    done
+    return 1
+}
+
 # Directory holding project-owned Tier 2 helpers, relative to PROJECT_DIR.
 # Lives outside harness/ on purpose: harness/ is excluded from git by the
 # toolkit's install.sh, and Tier 2 files must be versioned with the project.

@@ -107,9 +107,14 @@ SELECT harness_test_helpers.test_create_isolated_tenant(
 harness_test_helpers.test_drop_isolated_tenant(p_tenant text) RETURNS void
 ```
 
-Companion to function 1. `DROP SCHEMA IF EXISTS <p_tenant> CASCADE`.
-Idempotent and unconditional — useful in `ROLLBACK` blocks where you
-also want to remove any leftover state.
+Companion to function 1. `DROP SCHEMA <p_tenant> CASCADE`, idempotent
+(a missing schema is a no-op). Guarded: function 1 marks every schema it
+creates with `COMMENT ON SCHEMA ... IS 'harness_test_helpers:isolated_tenant'`,
+and this function raises on any schema without that mark — so a typo or a
+real schema name (`'rushr_ec'`, `'public'`) can never be dropped through it.
+Function 1 applies the same check: it refuses to reuse an existing schema it
+did not create (or `p_tenant = p_source_schema`), since that would rebind
+triggers on live tables.
 
 ### 3. `test_make_minimal_row`
 
@@ -215,8 +220,23 @@ jq 'del(.test_helpers)' .harness.json > .harness.json.tmp \
 `uninstall.sh` drops schema `harness_test_helpers CASCADE` from the same
 database `install.sh` installs into (both resolve the connection through
 `lib_conn.sh`, including the `datname='<db>'` existence-check pattern of
-`verify_command`). Production DBs were never touched — the schema only
-exists on the DB your `verify_command` runs against.
+`verify_command`).
+
+### Host lock
+
+`install.sh` and `uninstall.sh` refuse any host not explicitly allowed, so a
+`verify_command` (or `PG*` env) that points at a shared or remote database
+never gets these DDL-running, `EXECUTE`-to-`PUBLIC` functions installed.
+Allowed by default: `localhost`, `127.0.0.1`, `::1` and Unix sockets. If your
+dev/test DB lives elsewhere (Docker host name, a dev server), list it:
+
+```bash
+jq '.test_helpers.allowed_hosts = ["localhost", "dev-db.internal"]' \
+  .harness.json > .harness.json.tmp && mv .harness.json.tmp .harness.json
+```
+
+Setting `allowed_hosts` replaces the defaults (keep `localhost` if you still
+want it); Unix sockets are always allowed. Never list a production host.
 
 ## Limitations
 
