@@ -13,6 +13,24 @@ install_into "$P" --human-user Tester --verify-command true
 [ -f "$P/harness/instructions/coverage.md" ]
 cmp "$TOOLKIT/shared/persona.md" "$P/harness/instructions/persona.md"
 pass 'generic profile installs only generic shared guidance'
+# Fresh checkpoints and generated agents must retain the accepted-baseline safeguards.
+grep -Fq 'all active feature tests and changed relevant tests pass without suppression' "$P/CHECKPOINTS.md"
+for runtime in .claude/agents .codex/agents; do
+  case "$runtime" in .claude/*) suffix=md ;; *) suffix=toml ;; esac
+  impl="$P/$runtime/implementer.$suffix"
+  review="$P/$runtime/reviewer.$suffix"
+  grep -Fq 'Without an' "$impl"
+  grep -Fq 'accepted applicable baseline, require ordinary green tests' "$impl"
+  grep -Fq 'Never widen/rewrite a baseline' "$impl"
+  grep -Fq 'filename matching alone cannot prove no new regression' "$impl"
+  grep -Fq 'independently run `bash scripts/run_tests.sh --all --baseline' "$review"
+  grep -Fq 'every active acceptance/spec requirement must pass' "$review"
+  grep -Fq 'before changes, its acceptance and revision/' "$review"
+  grep -Fq 'local alignment before approval; do not silently override it' "$review"
+  if grep -Fq 'Never pass with red tests.' "$review"; then exit 1; fi
+done
+pass 'fresh checkpoints and both generated runtimes enforce accepted-baseline safeguards'
+
 # Runtime settings and project-owned artifacts must survive profile adoption.
 jq '.verify_command="true" | .custom_field="keep" | .notion_database_id=""' "$P/.harness.json" > "$WORK/config"
 cp "$WORK/config" "$P/.harness.json"
@@ -37,6 +55,13 @@ printf 'stale shared instructions\n' > "$P/harness/instructions/postgres.md"
 install_into "$P" --profile postgres </dev/null
 cmp "$TOOLKIT/profiles/postgres/build_traceability.sh" "$P/scripts/build_traceability.sh"
 cmp "$TOOLKIT/profiles/postgres/verification.md" "$P/harness/instructions/postgres.md"
+grep -Fq 'A generated file alone is not approval' "$P/harness/instructions/postgres.md"
+grep -Fq 'Never widen/rewrite a baseline' "$P/harness/instructions/postgres.md"
+grep -Fq 'execute explicitly selected files' "$P/harness/instructions/postgres.md"
+grep -Fq 'New regressions, changed behavior without passing' "$P/harness/instructions/postgres.md"
+grep -Fq 'shared guidance does not silently override stricter criteria' "$P/harness/instructions/postgres.md"
+pass 'reinstalled postgres profile carries provenance, unsuppressed evidence and local policy rules'
+
 cmp "$WORK/config" "$P/.harness.json"
 (cd "$P" && ./init.sh) > "$WORK/init.log" 2>&1
 pass 'profile reinstall refreshes shared assets and preserved verification remains green'

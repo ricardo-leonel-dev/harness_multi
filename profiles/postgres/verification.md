@@ -75,19 +75,48 @@ When a test suite has 5–10 of these stale failures, every implementer
 spends 5–15 minutes per task proving "this is not mine" via `git stash`
 plus a re-run, even though the work has nothing to do with those tests.
 
-`scripts/run_tests.sh` ships a baseline cache to break that cycle:
+`scripts/run_tests.sh` can classify accepted pre-existing failures by basename.
+This is a regression policy, not evidence that every historical test passes.
+It applies only to projects using this runner and an explicitly accepted baseline;
+other projects still require ordinary green tests.
 
-- Run `bash scripts/run_tests.sh --all --baseline-write progress/.test_baseline`
-  once when you accept a known-stale set. The script writes the basenames
-  of currently failing tests to that file (one per line, `#` comments).
-- From then on, run `bash scripts/run_tests.sh --all --baseline progress/.test_baseline`.
-  Tests that fail and ARE in the baseline are reported as `[STALE]`
-  (informational, no exit code bump). Tests that fail and are NOT in
-  the baseline are `[REGRESSION]` (non-zero exit, blocks log-out).
-- Re-run `--baseline-write` whenever a previously-stale test is actually
-  fixed, to refresh the captured set.
+- Before feature changes, run
+  `bash scripts/run_tests.sh --all --baseline-write progress/.test_baseline`
+  to capture a proposed stale set. The command may exit nonzero because it captures
+  failing tests. Inspect the raw logs and accept only demonstrated pre-existing
+  failures. Document acceptance, baseline path, revision, database/schema state and
+  environment in the session log or project verification policy; preserve pre-change
+  output for comparison. A generated file alone is not approval.
+- Confirm that evidence still applies to the current branch/revision and database
+  environment. A baseline from another branch, tenant state or database is not
+  automatically applicable. Establish comparable pre-change evidence when needed.
+- Run `bash scripts/run_tests.sh --all --baseline <accepted-path>` against that set.
+  Listed failures are `[STALE]` and do not raise the exit code; unlisted failures
+  are `[REGRESSION]`, exit nonzero and block approval/log-out. The runner auto-loads
+  `progress/.test_baseline` when no explicit flag is provided, so record which
+  baseline actually applied.
+- Never widen/rewrite a baseline to absorb failures introduced by feature work.
+  When fixing stale tests, remove only proven-fixed entries after verification;
+  do not regenerate the baseline from a changed failing suite as a shortcut.
 
-The implementer's dev loop should still use `--changed` (or
-`--changed --baseline`) for fast iteration on the in-progress feature.
-The reviewer runs `--all --baseline` at log-out time to verify no
-regressions; pre-existing failures do not block sign-off.
+Use `--changed` for iteration, but confirm selection includes every added/changed
+relevant test, including untracked or ignored files. A basename-level baseline can
+mask new failures inside a listed file: all active feature tests and changed relevant
+tests must pass without baseline suppression, with passing evidence for every active
+acceptance/spec requirement. For SQL tests, execute explicitly selected files using
+`psql -X -v ON_ERROR_STOP=1 -f <test-path>` with the project's configured connection,
+or run the project's targeted runner with `--no-baseline` where available. Do not
+substitute a baseline-filtered zero exit for these checks.
+
+The reviewer independently runs the full suite with `--all --baseline <accepted-path>`,
+executes active/changed relevant tests without suppression, and compares stale failure
+details to the original evidence. New regressions, changed behavior without passing
+proof, or an inapplicable/unaccepted baseline block sign-off. Both handoff and review
+record commands, results, baseline provenance and remaining stale failures; report
+"no new regressions with accepted stale failures", never "all tests pass".
+
+`./init.sh` and the configured verification command must still exit 0 under the
+accepted policy; unrelated setup/lint failures remain blocking. Installation
+preserves project-owned `CHECKPOINTS.md` and `docs/verification.md`. If those still
+require universal historical green results, explicitly align the local project
+policy before closure; shared guidance does not silently override stricter criteria.
