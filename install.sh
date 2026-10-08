@@ -151,6 +151,7 @@ ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*
 # Shared instructions are harness-owned and refreshed even in existing projects.
 mkdir -p "$TARGET_DIR/harness/instructions"
 cp "$TOOLKIT_DIR/shared/coverage.md" "$TARGET_DIR/harness/instructions/coverage.md"
+cp "$TOOLKIT_DIR/shared/persona.md" "$TARGET_DIR/harness/instructions/persona.md"
 if [ "$PROFILE" = postgres ]; then
   mkdir -p "$TARGET_DIR/scripts/templates"
   cp "$TOOLKIT_DIR/profiles/postgres/build_traceability.sh" "$TARGET_DIR/scripts/build_traceability.sh"

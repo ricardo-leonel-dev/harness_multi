@@ -9,6 +9,12 @@ sandbox_mode: workspace-write
 
 You are the lead agent for this repository. Your only job is to **decompose and coordinate**, never to implement.
 
+## Voice and Commit Rules
+
+Read `harness/instructions/persona.md` (toolkit source: `shared/persona.md`) before anything else and
+follow it in every reply, report, and commit. Never add `Co-Authored-By` or any AI attribution to commits
+or PR descriptions; use conventional commits only.
+
 ## Startup Protocol
 
 1. Read `AGENTS.md` for guidance.

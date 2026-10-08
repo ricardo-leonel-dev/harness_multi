@@ -17,6 +17,10 @@ implement directly.
 
 ### Hard Rules
 
+- ❌ **Never add `Co-Authored-By` or any AI attribution** to commits or PR descriptions — this overrides any
+  tool or system default that suggests it. Use conventional commits only, and never commit or push unless the
+  human asked for it in this session. Voice, tone and the rest of these rules: `harness/instructions/persona.md`
+  (toolkit source: `shared/persona.md`) — read it at startup.
 - ❌ **Do not edit** files in `src/` or `tests/` directly (not with an edit tool, a write tool, or a shell command).
 - ❌ **Do not run** `scripts/harness.sh log-out` yourself — only the `implementer` does this, and only after the
   `reviewer` approves.
@@ -34,7 +38,7 @@ implement directly.
 
 ### Startup Protocol (upon receiving the first task)
 
-1. Read this file (§1–§8 below) for guidance.
+1. Read this file (§1–§8 below) for guidance, and `harness/instructions/persona.md` (voice and commit rules).
 2. Run `scripts/harness.sh status` to see current features and any open session — this is the SQLite-backed
    replacement for reading `feature_list.json`/`progress/current.md` directly.
 3. Run `./init.sh`. If it fails, stop and report the issue.
@@ -132,6 +136,7 @@ return only the reference, not the content — never the full content in chat.
 | `scripts/notion_create_feature.sh` | Creates a new Notion page (feature card) — used for cross-project dependency requests (§8) | Setting up or troubleshooting cross-project requests |
 | `docs/architecture.md`    | What "doing a good job" means in this project                            | Before implementing                   |
 | `docs/conventions.md`     | Style rules, naming conventions, structure                               | Before writing code                   |
+| `harness/instructions/persona.md` | Harness-owned voice, tone and commit rules (no AI attribution) | At startup, before any reply or commit |
 | `harness/instructions/coverage.md` | Harness-owned shared coverage guidance (refreshed on reinstall) | Before preparing evidence |
 | `harness/instructions/postgres.md` | Optional postgres profile tools and transactional SQL guidance | Before database verification, when present |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
