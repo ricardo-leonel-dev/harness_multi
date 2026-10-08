@@ -134,6 +134,16 @@ the new `db/rpc/upsert_spec.sql`. Local `docker compose` stacks don't need
 this — `docker compose down -v && docker compose up -d` re-applies
 everything from the current, already-updated `db/schema.postgres.sql`.
 
+**Mirror deployed before specs/sessions were resolved by feature local id?**
+Re-apply `db/rpc/upsert_spec.sql` and `db/rpc/upsert_session.sql` (each drops
+its previous signature first, then reloads PostgREST's schema cache). Before
+this, both RPCs found the feature by name, so a spec or session of a
+soft-deleted feature attached itself to a new feature that reused the name —
+and that stale spec could take the one-active-spec-per-feature slot, making
+the new feature's spec fail to sync (HTTP 409 on `specs_feature_active`). The
+updated RPCs also accept the old payload (no `p_feature_local_id`), so apply
+them before propagating the new `scripts/sync_postgres.sh`, never after.
+
 ## Notion task intake (optional)
 
 If your task tickets (Jira, etc.) tend to lack the detail you actually need,
