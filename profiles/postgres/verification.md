@@ -3,8 +3,13 @@
 These scripts and these instructions are harness-owned and refreshed by an
 explicit `install.sh --profile postgres` installation. Edit them in the source
 harness and reinstall. Your docs, configuration, tests, specs and migrations
-remain project-owned. Read docs/verification.md for the projects actual runner
-and database setup; this profile installs no credentials or runner defaults.
+remain project-owned. Read docs/verification.md for the project's verification command. The runner uses
+explicit PG* environment variables first, then `.harness.json::postgres_database`;
+only the Web Display project retains its legacy `web-display` fallback. Set the
+target explicitly with `install.sh --profile postgres --postgres-database NAME`
+or `PGDATABASE`. Host, port, user and password remain configurable through PG*
+environment variables; the runner retains its existing local defaults. Project-specific
+credentials are not copied into the installation.
 
 Copy `scripts/templates/acceptance_test_prologue.sql` to your own acceptance test.
 Replace SCHEMA/TABLE, set expect_table to true or false, and insert assertions
@@ -120,3 +125,43 @@ accepted policy; unrelated setup/lint failures remain blocking. Installation
 preserves project-owned `CHECKPOINTS.md` and `docs/verification.md`. If those still
 require universal historical green results, explicitly align the local project
 policy before closure; shared guidance does not silently override stricter criteria.
+
+## Assemble full migration definitions
+
+Use the installed Python 3 assembler to avoid rebuilding ad-hoc extraction scripts:
+
+```sh
+python3 scripts/assemble_migration.py --ddl progress/migration_ddl.sql \
+  --definition database/functions/first.sql \
+  --definition database/functions/second.sql --output diffs/new_migration.sql
+```
+
+It reads DDL followed by the explicitly listed canonical files in argument order,
+preserves their text (including multiline `ALTER FUNCTION ... OWNER TO ...`),
+and adds a single outer `BEGIN;`/`COMMIT;`. The artifact contains no local includes
+and is deterministic for identical input bytes/order. It never connects to a DB or
+executes SQL. Ownership capture/reapplication, tenant handling and business rules
+remain explicit project-specific input SQL. Review the resulting migration and
+verify it with the project's normal database procedure.
+
+Accepted fragments are UTF-8 PostgreSQL SQL without a BOM, with semicolon-terminated top-level
+statements. SQL standard strings/quoted identifiers, E strings, dollar quotes,
+line comments and nested block comments are lexically recognized. Standard strings
+assume `standard_conforming_strings=on` (PostgreSQL default); use E strings for
+backslash escapes. No psql metacommands are allowed outside literals/comments.
+Top-level transaction controls (`BEGIN`, `START TRANSACTION`, `COMMIT`, `END`,
+`ROLLBACK`, `ABORT`, `SAVEPOINT`, `RELEASE`, `PREPARE TRANSACTION`,
+`SET [LOCAL] TRANSACTION`) and all `SET SESSION` statements are refused.
+The latter exclusion deliberately includes session transaction defaults.
+This is a narrow lexical fragment validator, not a SQL parser: it does not inspect
+quoted procedure bodies or prove SQL validity/transaction safety. Routine bodies
+must be quoted; unquoted SQL `BEGIN ATOMIC` bodies are outside the supported format. Review bodies and dynamic
+SQL separately, and supply transactional DDL (no concurrent index creation or other
+statements incompatible with a transaction). Database encoding/configuration and
+whether definitions execute correctly remain verification responsibilities.
+
+Missing, empty/comments-only, duplicate resolved paths, malformed quoted text,
+transaction controls, includes and unfinished statements fail before writing.
+Output cannot alias an input. A successful result replaces output atomically;
+validation/read/write failures preserve an existing output. No output directory is
+created automatically. Keep preparation SQL local according to your project policy.

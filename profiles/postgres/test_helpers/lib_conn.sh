@@ -7,8 +7,9 @@
 #
 # Connection resolution, in order:
 # 1. Env vars: PSQL_{HOST,PORT,USER,DB}, then PG{HOST,PORT,USER,DATABASE}.
-# 2. The -h/-p/-U/-d flags and PGPASSWORD=... of .harness.json::verify_command.
-# 3. Defaults: localhost:5432, user postgres, db postgres.
+# 2. .harness.json::postgres_database for the target database.
+# 3. The -h/-p/-U flags, missing -d, and PGPASSWORD=... of .harness.json::verify_command.
+# 4. Defaults: localhost:5432, user postgres, db postgres.
 #
 # Strategy 2 has a wrinkle for projects whose verify_command is a database
 # existence check rather than a real connection — e.g.
@@ -42,7 +43,10 @@ resolve_psql_conn() {
     if [ -z "${PGPASSWORD:-}" ] && [ -n "${PG_PASSWORD:-}" ]; then export PGPASSWORD="$PG_PASSWORD"; fi
 
     if [ -f "$PROJECT_DIR/.harness.json" ]; then
-        local verify_cmd flag v real_db pwd_val
+        local verify_cmd flag v real_db pwd_val configured_db database_from_verify
+        configured_db="$(jq -r '.postgres_database // empty' "$PROJECT_DIR/.harness.json")"
+        if [ -z "$PSQL_DB" ] && [ -n "$configured_db" ]; then PSQL_DB="$configured_db"; fi
+        database_from_verify=0
         verify_cmd="$(jq -r '.verify_command // empty' "$PROJECT_DIR/.harness.json")"
         for flag in h p U d; do
             v=$(printf '%s\n' "$verify_cmd" | sed -nE "s/.*[[:space:]]-$flag[[:space:]]+([^[:space:]]+).*/\1/p" | head -n1)
@@ -50,7 +54,12 @@ resolve_psql_conn() {
                 h) [ -z "$PSQL_HOST" ] && [ -n "$v" ] && PSQL_HOST="$v" ;;
                 p) [ -z "$PSQL_PORT" ] && [ -n "$v" ] && PSQL_PORT="$v" ;;
                 U) [ -z "$PSQL_USER" ] && [ -n "$v" ] && PSQL_USER="$v" ;;
-                d) [ -z "$PSQL_DB"   ] && [ -n "$v" ] && PSQL_DB="$v"   ;;
+                d)
+                    if [ -z "$PSQL_DB" ] && [ -n "$v" ]; then
+                        PSQL_DB="$v"
+                        database_from_verify=1
+                    fi
+                    ;;
             esac
         done
         # If the verify_command targets a default-like db (postgres/template1)
@@ -58,7 +67,7 @@ resolve_psql_conn() {
         # project database name from the query.
         if [ "$PSQL_DB" = "postgres" ] || [ "$PSQL_DB" = "template1" ]; then
             real_db=$(printf '%s\n' "$verify_cmd" | sed -nE "s/.*WHERE[[:space:]]+datname[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" | head -n1)
-            if [ -n "$real_db" ]; then PSQL_DB="$real_db"; fi
+            if [ "$database_from_verify" -eq 1 ] && [ -n "$real_db" ]; then PSQL_DB="$real_db"; fi
         fi
         if [ -z "${PGPASSWORD:-}" ]; then
             pwd_val=$(printf '%s\n' "$verify_cmd" | sed -nE "s/.*PGPASSWORD=([^[:space:]]+).*/\1/p" | head -n1)

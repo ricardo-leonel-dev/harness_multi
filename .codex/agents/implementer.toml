@@ -85,6 +85,10 @@ or PR descriptions; use conventional commits only.
    - **Changes requested** — address the required changes from `progress/review.md`, return to step 4,
      then re-verify (step 7) and re-report readiness (step 8). Do not log out until a subsequent review approves.
 
+Optional closure measurement: see `harness/instructions/timing.md`. Wrap explicit evidence,
+init and approved log-out commands only when timing is requested; no timing mechanism
+changes the required checks, review gate or command failure status.
+
 Note: `claim` and `log-out` each best-effort push a status update to the feature's source Notion page, if it has
 one — a `[WARN]` about Notion in their output is non-fatal and never blocks the feature from being claimed/closed,
 but it must still surface in your final report (see below), not be silently swallowed.
@@ -94,9 +98,12 @@ but it must still surface in your final report (see below), not be silently swal
 - Only one feature per session. If you discover that your change affects another feature, stop and report it as a
   blocking feature.
 - Every code entry is accompanied by a test before moving on to the next change.
-- If a tool fails unexpectedly (e.g., a shell command crashes), do NOT improvise a workaround. Stop, run
-  `scripts/harness.sh append-log "<what's blocking you>"`, leave the session open (do not log out), and end the
-  session.
+- Syntax errors, generator errors and failing assertions in your own new code/tests are normal
+  development iteration. Inspect, correct and rerun the affected check without ending the agent turn.
+  Log meaningful findings; this never bypasses verification or independent review.
+- If a tool/environment failure is genuinely external (unavailable dependency/service, permissions,
+  unsafe database state), do NOT improvise a bypass. Follow the applicable approval/environment recovery
+  procedure; if unresolved, append-log the blocker, leave the session open and report it to the leader.
 
 ## Communication with the leader
 

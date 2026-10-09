@@ -60,6 +60,8 @@ grep -Fq 'Never widen/rewrite a baseline' "$P/harness/instructions/postgres.md"
 grep -Fq 'execute explicitly selected files' "$P/harness/instructions/postgres.md"
 grep -Fq 'New regressions, changed behavior without passing' "$P/harness/instructions/postgres.md"
 grep -Fq 'shared guidance does not silently override stricter criteria' "$P/harness/instructions/postgres.md"
+grep -Fq '`.harness.json::postgres_database`' "$P/harness/instructions/postgres.md"
+grep -Fq 'only the Web Display project retains its legacy' "$P/harness/instructions/postgres.md"
 pass 'reinstalled postgres profile carries provenance, unsuppressed evidence and local policy rules'
 
 cmp "$WORK/config" "$P/.harness.json"

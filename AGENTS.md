@@ -270,6 +270,12 @@ one-time reconciliation, not an alternate lifecycle.
 
 ## 6. If you get stuck
 
+Syntax errors, generator errors and failing assertions in code/tests you are developing
+are normal iteration: inspect the cause, fix your own work and rerun the affected check.
+Do not pause the whole agent solely for these failures. A genuinely unavailable tool,
+external service, permission or unsafe environment remains a blocker; do not bypass
+it or the reviewer gate.
+
 - Reread the relevant section of `docs/`.
 - If the tool is not doing what you expect, **do not create a workaround**: run
   `scripts/harness.sh append-log "<what's blocking you>"` and `set-next-step`, then close the session without
