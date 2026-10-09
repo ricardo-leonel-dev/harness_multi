@@ -259,14 +259,34 @@ For a first installation, also pass `--human-user` and the appropriate
 human-user prompt. Pass `--profile postgres` on each refresh; generic installation
 does not remove previously installed postgres assets or infer a saved profile.
 The profile installs an evidence-index helper, transactional SQL acceptance
-prologue and `harness/instructions/postgres.md`. It installs no database runner,
-connection defaults or credentials. Shared coverage guidance is installed for all
+prologue, configured database test runner, and `harness/instructions/postgres.md`.
+Use `--postgres-database NAME` on a first install to save the project's target DB,
+or pass it explicitly on a postgres-profile reinstall to update only that field;
+without the flag, existing `.harness.json` remains byte-for-byte unchanged.
+The runner honors `PGDATABASE` first, then `.harness.json::postgres_database`;
+only `rushr-web-display-db` has the legacy `web-display` fallback. Other projects
+must configure a DB name rather than deriving one from their slug. Host, port,
+user and password remain controlled by `PG*` environment settings and existing
+runner defaults. Project-specific credentials are not copied into the installation. Shared coverage guidance is installed for all
 profiles, including existing projects whose docs are preserved. Consult AGENTS.md
 for discovery. Standalone migration diffs must remain self-contained for external
 deployment. No timing savings are claimed until measured in actual projects.
 
-Run isolated regressions with `bash tests/database_profile_test.sh` and
+Run isolated regressions with `bash tests/database_profile_test.sh`,
+`bash tests/postgres_runner_config_test.sh`, and
 `bash tests/session_resume_test.sh`. `bash tests/test_helpers_regression_test.sh`
 covers the postgres test_helpers; its SQL cases run only when
 `HARNESS_TEST_PG_DSN` points at a dev database (inside a rolled-back
 transaction), and are skipped otherwise.
+
+### Reusable migration assembly and opt-in closure timing
+
+The PostgreSQL profile installs `scripts/assemble_migration.py`: concatenate supplied
+DDL and explicit full canonical definition files into one transactional artifact,
+without extracting SQL bodies or executing SQL. See [PostgreSQL guidance](profiles/postgres/verification.md#assemble-full-migration-definitions)
+for its narrow input format and validation limits. Generic installation also refreshes
+`scripts/time_phase.py` and [timing guidance](shared/timing.md) for opt-in command
+measurement. Neither tool changes verification defaults, accepts failing tests or
+bypasses independent review. Development errors in an agent’s own code/generator/tests
+are corrected as normal iteration; genuine external/environment blockers still need
+proper recovery or reporting.

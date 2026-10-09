@@ -50,7 +50,28 @@ PGHOST="${PGHOST:-localhost}"
 PGPORT="${PGPORT:-5439}"
 PGUSER="${PGUSER:-postgres}"
 PGPASSWORD="${PGPASSWORD:-Berlin2020}"
-PGDATABASE="${PGDATABASE:-web-display}"
+# Explicit environment wins over project config. The historical default only
+# applies to the Web Display project; never infer a DB name from the project slug.
+if [ -z "${PGDATABASE:-}" ]; then
+  configured_database=""
+  project_slug=""
+  if [ -f .harness.json ]; then
+    if ! jq -e 'type == "object"' .harness.json >/dev/null 2>&1; then
+      echo "[FAIL]  .harness.json is invalid; cannot resolve the PostgreSQL test database" >&2
+      exit 1
+    fi
+    configured_database="$(jq -r '.postgres_database // empty' .harness.json)"
+    project_slug="$(jq -r '.project_slug // empty' .harness.json)"
+  fi
+  if [ -n "$configured_database" ]; then
+    PGDATABASE="$configured_database"
+  elif [ "$project_slug" = "rushr-web-display-db" ]; then
+    PGDATABASE="web-display"
+  else
+    echo "[FAIL]  PostgreSQL test database is not configured; set PGDATABASE or .harness.json::postgres_database" >&2
+    exit 1
+  fi
+fi
 export PGPASSWORD
 
 MODE="all"
