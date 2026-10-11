@@ -51,6 +51,16 @@ Do not replace repeated definitions with local file includes to reduce report or
 generation length. Group report evidence when appropriate using
 `harness/instructions/coverage.md`; each requirement still needs passing evidence.
 
+## Reuse project mock data
+
+When `harness/instructions/mock-data.md`, `scripts/mock_data.py` and a non-empty
+`.harness.json::postgres_schemas` array are available, the implementer and reviewer
+execute that guide's agent workflow as part of the task. Select the base from the
+intended branch/dev schema and approved dependencies, load before task migration,
+version changed templates as needed, and prove compatibility with a fresh disposable
+reload and feature tests. No routine mock-data commands are delegated to the human.
+This supplements the verification policy below; offline checks cannot replace tests.
+
 ## Avoid byte-level fingerprints in acceptance tests
 
 Do not assert `md5(pg_get_functiondef(...))`, `sha256(pg_get_functiondef(...))`,
