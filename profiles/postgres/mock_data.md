@@ -1,7 +1,11 @@
 # Reusable PostgreSQL mock data
 
 The harness supplies `scripts/mock_data.py` and three `scripts/harness.sh` commands.
-Projects own `.harness.json` configuration, selections and `mock-data/` records.
+Projects own `.harness.json` configuration and keep selections, templates and manifests
+locally in `mock-data/`. Installation excludes that directory through the managed
+`.git/info/exclude` block; reinstall preserves its files. Dataset version names and
+checksums track local template history independently of Git. Already tracked files
+remain tracked and are reported by the installer; exclusion never removes them.
 Templates contain real selected records, including potentially sensitive values. Review
 or anonymize project data before publishing it; do not put credentials in templates.
 

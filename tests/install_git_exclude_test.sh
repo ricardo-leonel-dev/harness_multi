@@ -17,6 +17,15 @@ A="$REPO/service-a"; B="$REPO/svc [b]"; mkdir -p "$A" "$B"
 install_into "$A"
 install_into "$B"
 
+# Mock datasets stay on disk and remain invisible in each monorepo service.
+for project in "$A" "$B"; do
+  mkdir -p "$project/mock-data/manifests"
+  printf '{"version":"initial"}\n' > "$project/mock-data/manifests/initial.json"
+done
+cp "$A/mock-data/manifests/initial.json" "$WORK/dataset.before"
+git -C "$REPO" check-ignore -q "$A/mock-data/manifests/initial.json"
+git -C "$REPO" check-ignore -q "$B/mock-data/manifests/initial.json"
+
 # Only project-owned files may show up for commit; harness-owned ones never do.
 untracked > "$WORK/visible"
 for f in .gitignore .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md \
@@ -24,7 +33,7 @@ for f in .gitignore .harness.json CHECKPOINTS.md docs/architecture.md docs/conve
   grep -qxF "service-a/$f" "$WORK/visible"
   grep -qxF "svc [b]/$f" "$WORK/visible"
 done
-if grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|init\.sh|harness\.db|docs/specs\.md)$|/(harness|state|scripts)/|/\.(claude|codex)/agents/' "$WORK/visible"; then
+if grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|init\.sh|harness\.db|docs/specs\.md)$|/(harness|state|scripts|mock-data)/|/\.(claude|codex)/agents/' "$WORK/visible"; then
   echo 'harness-owned file visible to git' >&2; exit 1
 fi
 [ -d "$A/state" ]
@@ -38,6 +47,8 @@ cp "$EXCLUDE" "$WORK/exclude.before"
 install_into "$A"
 install_into "$B"
 cmp "$WORK/exclude.before" "$EXCLUDE"
+cmp "$WORK/dataset.before" "$A/mock-data/manifests/initial.json"
+cmp "$WORK/dataset.before" "$B/mock-data/manifests/initial.json"
 [ "$(grep -c '^# >>> harness-managed: /service-a/ ' "$EXCLUDE")" = 1 ]
 pass 'reinstall replaces its own block without duplicating rules'
 
@@ -49,11 +60,15 @@ pass 'project scripts in scripts/ stay visible'
 # Files committed before the exclude existed are reported, not silently kept.
 R2="$WORK/legacy"; mkdir -p "$R2"; git -C "$R2" init -q
 install_into "$R2"
-git -C "$R2" add -f state docs/specs.md
+mkdir -p "$R2/mock-data/manifests"
+printf '{"version":"legacy"}\n' > "$R2/mock-data/manifests/legacy.json"
+git -C "$R2" add -f state docs/specs.md mock-data
 git -C "$R2" -c user.name=t -c user.email=t@t commit -qm legacy
 install_into "$R2"
 grep -q 'harness-owned files still tracked by git' "$WORK/install.log"
 grep -q 'docs/specs.md' "$WORK/install.log"
+grep -q 'mock-data/manifests/legacy.json' "$WORK/install.log"
+git -C "$R2" ls-files --error-unmatch mock-data/manifests/legacy.json >/dev/null
 pass 'reinstall lists harness-owned files that are still tracked'
 
 # A worktree has no exclude file of its own: the block must land in the shared one.
@@ -63,6 +78,10 @@ git -C "$R3" worktree add -q "$WORK/wt" 2>/dev/null
 mkdir -p "$WORK/wt/sub"
 install_into "$WORK/wt/sub"
 grep -qxF '/sub/AGENTS.md' "$R3/.git/info/exclude"
+mkdir -p "$WORK/wt/sub/mock-data"
+printf 'retained\n' > "$WORK/wt/sub/mock-data/selection.json"
+git -C "$WORK/wt" check-ignore -q sub/mock-data/selection.json
+[ -f "$WORK/wt/sub/mock-data/selection.json" ]
 if git -C "$WORK/wt" status --porcelain --untracked-files=all | grep -q 'sub/AGENTS.md'; then exit 1; fi
 pass 'worktree installs write to the shared exclude file'
 
