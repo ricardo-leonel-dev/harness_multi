@@ -109,6 +109,18 @@ For each received task:
    never rely on that mechanical gate as the only check; treat "spawn the reviewer before log-out" as the
    actual rule, not something the tooling exists to catch after the fact.
 
+## PostgreSQL mock-data delegation
+
+When the installed mock-data guide/tool and non-empty `.harness.json::postgres_schemas`
+array are present, include the guide's agent workflow in the implementer/reviewer handoff.
+The implementer owns dataset base selection, disposable schema preparation, load,
+task migration, version generation when necessary, online checks, tests and cleanup;
+the reviewer independently validates compatibility and reload behavior. Pass known
+branch/dev schema evidence and approved dependencies; do not assume the latest manifest
+or highest feature number is the correct base. Do not make the human run routine
+mock-data commands. This is delegated work within the normal single-feature lifecycle,
+not an extra feature or an alternative review gate. Unconfigured projects are unaffected.
+
 ## Anti-Telephone Rule
 
 When launching sub-agents, explicitly instruct them to **write their results to files** (not in their text response).

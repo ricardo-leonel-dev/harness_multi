@@ -38,12 +38,15 @@ NOTION_STATUS_SPEC_READY="Spec Ready"
 HUMAN_USER=""
 POSTGRES_DATABASE=""
 POSTGRES_DATABASE_SET=0
+POSTGRES_SCHEMAS="[]"
+POSTGRES_SCHEMAS_SET=0
 PROFILE="generic"
 
 usage() {
   cat <<EOF
 Usage: install.sh --slug SLUG [options]
   --profile NAME               generic (default) or postgres; explicit on each installation
+  --postgres-schemas JSON      schema array for mock-data (example: '["rushr_ec"]')
   --postgres-database NAME     explicitly configure the postgres profile target DB (first install or update)
   --slug SLUG                  project slug (required)
   --description TEXT           project description
@@ -82,6 +85,7 @@ while [ $# -gt 0 ]; do
     --notion-status-done) NOTION_STATUS_DONE="$2"; shift 2 ;;
     --notion-status-spec-ready) NOTION_STATUS_SPEC_READY="$2"; shift 2 ;;
     --human-user) HUMAN_USER="$2"; shift 2 ;;
+    --postgres-schemas) POSTGRES_SCHEMAS="${2:-}"; POSTGRES_SCHEMAS_SET=1; shift 2 ;;
     --postgres-database) POSTGRES_DATABASE="${2:-}"; POSTGRES_DATABASE_SET=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1"; usage; exit 1 ;;
@@ -131,6 +135,13 @@ fi
 # approve-spec attribution accurate across teams. CI callers must pass
 # --human-user "<name>" explicitly OR pipe the name into stdin (e.g.
 # `echo "Name" | bash install.sh --slug ...`).
+if [ "$POSTGRES_SCHEMAS_SET" -eq 1 ]; then
+  if [ "$PROFILE" != postgres ] || ! printf '%s' "$POSTGRES_SCHEMAS" | jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' >/dev/null 2>&1; then
+    fail "--postgres-schemas requires --profile postgres and a non-empty JSON array of schema names"
+    exit 1
+  fi
+fi
+
 if [ -f "$TARGET_DIR/.harness.json" ]; then
   # Runtime configuration belongs to the project; reinstall does not replace it.
   HUMAN_USER="$(jq -r '.human_user // empty' "$TARGET_DIR/.harness.json")"
@@ -179,6 +190,8 @@ cp "$TOOLKIT_DIR/shared/persona.md" "$TARGET_DIR/harness/instructions/persona.md
 cp "$TOOLKIT_DIR/shared/timing.md" "$TARGET_DIR/harness/instructions/timing.md"
 if [ "$PROFILE" = postgres ]; then
   mkdir -p "$TARGET_DIR/scripts/templates"
+  cp "$TOOLKIT_DIR/profiles/postgres/mock_data.py" "$TARGET_DIR/scripts/mock_data.py"
+  cp "$TOOLKIT_DIR/profiles/postgres/mock_data.md" "$TARGET_DIR/harness/instructions/mock-data.md"
   cp "$TOOLKIT_DIR/profiles/postgres/assemble_migration.py" "$TARGET_DIR/scripts/assemble_migration.py"
   cp "$TOOLKIT_DIR/profiles/postgres/build_traceability.sh" "$TARGET_DIR/scripts/build_traceability.sh"
   chmod +x "$TARGET_DIR/scripts/build_traceability.sh"
@@ -262,14 +275,16 @@ echo ""
 echo "── 4. Writing .harness.json ─────────────────────────────"
 
 if [ -f "$TARGET_DIR/.harness.json" ]; then
-  if [ "$POSTGRES_DATABASE_SET" -eq 1 ]; then
+  if [ "$POSTGRES_DATABASE_SET" -eq 1 ] || [ "$POSTGRES_SCHEMAS_SET" -eq 1 ]; then
     config_tmp="$(mktemp "$TARGET_DIR/.harness.json.XXXXXX")"
-    if jq --arg database "$POSTGRES_DATABASE" '.postgres_database = $database' \
+    config_filter='(if $database_set == 1 then .postgres_database = $database else . end) | (if $schemas_set == 1 then .postgres_schemas = $schemas else . end)'
+    if [ "$POSTGRES_SCHEMAS_SET" -eq 0 ]; then config_filter='.postgres_database = $database'; fi
+    if jq --arg database "$POSTGRES_DATABASE" --argjson database_set "$POSTGRES_DATABASE_SET" --argjson schemas "$POSTGRES_SCHEMAS" --argjson schemas_set "$POSTGRES_SCHEMAS_SET" "$config_filter" \
         "$TARGET_DIR/.harness.json" > "$config_tmp"; then
       config_mode="$(stat -f '%Lp' "$TARGET_DIR/.harness.json" 2>/dev/null || stat -c '%a' "$TARGET_DIR/.harness.json" 2>/dev/null || true)"
       if [ -n "$config_mode" ]; then chmod "$config_mode" "$config_tmp"; fi
       if mv "$config_tmp" "$TARGET_DIR/.harness.json"; then
-        ok "updated postgres_database in .harness.json"
+        ok "updated explicit PostgreSQL configuration in .harness.json"
       else
         rm -f "$config_tmp"
         fail "could not atomically update .harness.json"
@@ -298,13 +313,14 @@ jq -n \
   --arg notion_status_spec_ready "$NOTION_STATUS_SPEC_READY" \
   --arg human_user "$HUMAN_USER" \
   --arg postgres_database "$POSTGRES_DATABASE" \
+  --argjson postgres_schemas "$POSTGRES_SCHEMAS" \
   '{harness_version: $version, db_path: "harness.db", snapshot_path: "state",
     project_slug: $slug, verify_command: $verify,
     supabase_url_env: $url_env, supabase_key_env: $key_env, supabase_rest_path: $rest_path,
     notion_database_id: $notion_db, notion_token_env: $notion_token_env,
     notion_status_in_progress: $notion_status_in_progress, notion_status_done: $notion_status_done,
     notion_status_spec_ready: $notion_status_spec_ready,
-    human_user: $human_user} + (if $postgres_database == "" then {} else {postgres_database: $postgres_database} end)' \
+    human_user: $human_user} + (if $postgres_database == "" then {} else {postgres_database: $postgres_database} end) + (if $postgres_schemas == [] then {} else {postgres_schemas: $postgres_schemas} end)' \
   > "$TARGET_DIR/.harness.json"
 ok "wrote .harness.json"
 fi
@@ -337,7 +353,7 @@ exclude_harness_files() {
   for name in "$TOOLKIT_DIR"/scripts/*.sh; do entries="$entries scripts/${name##*/}"; done
   # harness/ (above) already covers harness/test_helpers/; project-owned Tier 2
   # helpers live outside it (test_helpers.project_specific_dir) so git sees them.
-  entries="$entries scripts/time_phase.py scripts/assemble_migration.py scripts/build_traceability.sh scripts/templates/acceptance_test_prologue.sql"
+  entries="$entries scripts/mock_data.py scripts/time_phase.py scripts/assemble_migration.py scripts/build_traceability.sh scripts/templates/acceptance_test_prologue.sql"
 
   begin="# >>> harness-managed: /$prefix (written by install.sh — re-run it instead of editing)"
   end="# <<< harness-managed: /$prefix"

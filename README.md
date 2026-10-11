@@ -290,3 +290,11 @@ measurement. Neither tool changes verification defaults, accepts failing tests o
 bypasses independent review. Development errors in an agent’s own code/generator/tests
 are corrected as normal iteration; genuine external/environment blockers still need
 proper recovery or reporting.
+
+## Versioned PostgreSQL mock data
+
+Install with `--profile postgres --postgres-database DB --postgres-schemas '["schema"]'`.
+The harness distributes `mock-data-generate`, `mock-data-check` and `mock-data-load`;
+project-owned table templates and manifests live in `mock-data/`. See
+[the mock-data workflow](profiles/postgres/mock_data.md) for read-only generation,
+version reuse, explicit selections and disposable-target safeguards.

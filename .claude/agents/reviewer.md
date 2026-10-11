@@ -44,6 +44,15 @@ or PR descriptions; use conventional commits only.
      requirement that every `done` feature have passing tests is mandatory and overrides any looser or stale
      wording in `docs/verification.md` — if the two conflict, `CHECKPOINTS.md` wins, and note the stale doc
      under Required Changes instead of using it as an excuse.
+   For configured PostgreSQL mock-data projects (installed guide/tool and non-empty
+   `postgres_schemas` array), follow `harness/instructions/mock-data.md`'s reviewer workflow.
+   Verify the chosen base against actual intended branch/schema and approved dependencies,
+   inspect exact manifest/table versions and reuse, and independently run an online check,
+   fresh prepared disposable load and relevant feature tests. Check migration/data order,
+   immutable version handling, commands/results/timings and owned disposable cleanup.
+   Offline validation or a newer feature number is not runtime/base-selection evidence.
+   Missing applicable proof requires changes; mock-data checks do not replace normal tests
+   or the review gate. Unconfigured projects keep their existing workflow.
 4b. **For `sdd=1` features only** — verify requirement traceability directly, don't trust
    `progress/impl_<feature>.md`'s claimed `R<n> → test` map: for each `R<n>` in `requirements.md`,
    confirm the test file/name claimed for it actually exists and actually exercises the behavior

@@ -139,6 +139,7 @@ return only the reference, not the content — never the full content in chat.
 | `harness/instructions/persona.md` | Harness-owned voice, tone and commit rules (no AI attribution) | At startup, before any reply or commit |
 | `harness/instructions/coverage.md` | Harness-owned shared coverage guidance (refreshed on reinstall) | Before preparing evidence |
 | `harness/instructions/postgres.md` | Optional postgres profile tools and transactional SQL guidance | Before database verification, when present |
+| `harness/instructions/mock-data.md` | Optional PostgreSQL mock-data agent workflow; tools come from the harness, records/manifests belong to the project | Before planning configured PostgreSQL data verification |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
 | `docs/specs.md`           | Harness-owned spec-driven development guide: EARS format, file layout, traceability (§9) (refreshed on reinstall) | Before drafting, implementing, or reviewing an `sdd=1` feature |
 | `specs/<name>/{requirements,design,tasks}.md` | Spec content for `sdd=1` features — git-tracked, human/agent-authored (not generated) | Before implementing or reviewing an `sdd=1` feature |

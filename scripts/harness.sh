@@ -115,6 +115,10 @@
 #   delete-feature <TARGET>                   soft-delete a feature and its specs (sets deleted_at) — refuses
 #                                              while the feature has an open or paused session
 #   status                                     print current project/feature/session state
+#   mock-data-generate --version VERSION [--selection FILE] [--extends VERSION]
+#   mock-data-check --version VERSION [--offline] [--database DB]
+#   mock-data-load --version VERSION --target-database harness_mock_NAME
+#                                              PostgreSQL profile: project-owned immutable test data
 #   snapshot                                   regenerate state/*.md from harness.db
 #   sync                                       best-effort push to the Postgres mirror
 #   notion-check                               best-effort curl+jq query for new Notion tasks (prints notion-diff-ready JSON)
@@ -152,6 +156,19 @@
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Mock-data tools are independent of SQLite feature/session bookkeeping.
+case "${1:-}" in
+  mock-data-generate|mock-data-check|mock-data-load)
+    mock_command="${1#mock-data-}"
+    shift
+    if [ ! -f "$SCRIPT_DIR/mock_data.py" ]; then
+      printf '[FAIL] mock-data tools require install.sh --profile postgres\n' >&2
+      exit 1
+    fi
+    exec python3 "$SCRIPT_DIR/mock_data.py" "$mock_command" "$@"
+    ;;
+esac
+
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 

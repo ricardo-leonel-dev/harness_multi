@@ -36,6 +36,16 @@ or PR descriptions; use conventional commits only.
      pending one). This atomically marks the feature `in_progress` and opens a session — there is no separate "save"
      step, and a second concurrent claim is rejected by the database, not just discouraged by convention.
 3. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
+   **Configured PostgreSQL mock data:** when `harness/instructions/mock-data.md` and
+   `scripts/mock_data.py` exist and `.harness.json::postgres_schemas` is a non-empty array,
+   read that guide and execute its agent workflow yourself. Choose the dataset base from
+   the intended branch/dev schema and approved dependencies, prepare a marked disposable,
+   load the compatible base before applying this task's migration, then generate/check a
+   new immutable version only when needed. Never select the highest feature number as
+   the base or apply unrelated undeployed migrations. Reuse existing compatible versions
+   on resume; changed versions get a new unique name. Include mock-data work in the plan;
+   the human does not need to run those commands manually. Other projects keep their
+   existing verification workflow.
 4. **Implement** following `docs/conventions.md`. Stay within the scope of the feature's acceptance criteria
    (`scripts/harness.sh status` or the generated `state/features/*.md` snapshot shows them). For an
    `sdd=1` feature, `specs/<name>/tasks.md` is your implementation checklist instead — check off
@@ -64,6 +74,12 @@ or PR descriptions; use conventional commits only.
    requires explicit local alignment before closure, not an automatic override.
    Capture init output — a `[WARN]` line (e.g. mirror sync skipping) is not a verification failure,
    but note it down for step 9.
+   For configured mock-data tasks, also complete the guide's online compatibility check,
+   fresh disposable reload and feature-specific behavioral tests. Record the base choice
+   and branch/schema evidence, exact manifests/table versions reused or created, selection,
+   commands/results, elapsed preparation/verification time, and owned disposable cleanup
+   in the handoff. Offline checks alone do not prove runtime behavior. Clean up only
+   positively identified disposables created by this task; retain project data and evidence.
 8. **Do not log out, and do not spawn the reviewer yourself.** Write your handoff to `progress/impl_<feature>.md`
    (outcome, scope, verification — see the Anti-Telephone convention in `AGENTS.md`; for `sdd=1` features,
    include the `R<n> → test` traceability table from step 5) and end your turn reporting
