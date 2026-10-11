@@ -347,7 +347,7 @@ exclude_harness_files() {
   snapshot="$(jq -r '.snapshot_path // "state"' "$TARGET_DIR/.harness.json")"
   snapshot="${snapshot%/}"
 
-  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ docs/specs.md $snapshot/"
+  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ docs/specs.md $snapshot/ mock-data/"
   for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do entries="$entries .claude/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do entries="$entries .codex/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/scripts/*.sh; do entries="$entries scripts/${name##*/}"; done

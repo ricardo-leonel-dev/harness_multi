@@ -295,6 +295,7 @@ proper recovery or reporting.
 
 Install with `--profile postgres --postgres-database DB --postgres-schemas '["schema"]'`.
 The harness distributes `mock-data-generate`, `mock-data-check` and `mock-data-load`;
-project-owned table templates and manifests live in `mock-data/`. See
+project-local table templates and manifests live in `mock-data/`, excluded through
+`.git/info/exclude`. Their dataset versions are independent of Git. See
 [the mock-data workflow](profiles/postgres/mock_data.md) for read-only generation,
 version reuse, explicit selections and disposable-target safeguards.
