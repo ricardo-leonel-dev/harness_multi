@@ -36,6 +36,22 @@ or PR descriptions; use conventional commits only.
      pending one). This atomically marks the feature `in_progress` and opens a session — there is no separate "save"
      step, and a second concurrent claim is rejected by the database, not just discouraged by convention.
 3. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
+   Before creating deliverables, check `git status --short --untracked-files=all` and
+   `git check-ignore -v -- <planned paths>`. A check-ignore exit 1 means no matching exclusion.
+   Preserve harness-owned local exclusions. Resolve project delivery conflicts early against
+   the project's policy; do not remove exclusions merely to expose files in status.
+   Reuse existing fixtures/runners and keep checks proportional to the approved behavior;
+   one meaningful assertion may cover several requirements without duplicating tests.
+   **Configured PostgreSQL mock data:** when `harness/instructions/mock-data.md` and
+   `scripts/mock_data.py` exist and `.harness.json::postgres_schemas` is a non-empty array,
+   read that guide and execute its agent workflow yourself. Choose the dataset base from
+   the intended branch/dev schema and approved dependencies, prepare a marked disposable,
+   load the compatible base before applying this task's migration, then generate/check a
+   new immutable version only when needed. Never select the highest feature number as
+   the base or apply unrelated undeployed migrations. Reuse existing compatible versions
+   on resume; changed versions get a new unique name. Include mock-data work in the plan;
+   the human does not need to run those commands manually. Other projects keep their
+   existing verification workflow.
 4. **Implement** following `docs/conventions.md`. Stay within the scope of the feature's acceptance criteria
    (`scripts/harness.sh status` or the generated `state/features/*.md` snapshot shows them). For an
    `sdd=1` feature, `specs/<name>/tasks.md` is your implementation checklist instead — check off
@@ -51,8 +67,30 @@ or PR descriptions; use conventional commits only.
    requirement id in `requirements.md` must map to at least one concrete test you can point to by
    file+test-name; a requirement with no mapped test is a gap to close before reporting readiness.
 6. As you work, append short notes: `scripts/harness.sh append-log "<what you just did>"`.
-7. **Verify** by running `./init.sh`. If it fails, return to step 4. Capture its output — if it contains any
-   `[WARN]` line (e.g. the mirror sync skipping), that's not a verification failure, but note it down for step 9.
+7. **Verify** by running `./init.sh`. If it fails, return to step 4. Read `docs/verification.md` and,
+   when installed, `harness/instructions/postgres.md` for the accepted verification policy.
+   With an accepted PostgreSQL baseline captured before changes, run all active feature tests and changed
+   relevant tests without baseline suppression, then `bash scripts/run_tests.sh --all --baseline <accepted-path>`.
+   Every active acceptance/spec requirement needs independently passing evidence; a `[STALE]` filename
+   does not excuse failing changed behavior. Compare stale failure details against the original evidence:
+   filename matching alone cannot prove no new regression. Never widen/rewrite a baseline to absorb failures
+   introduced by this feature. Record its acceptance, pre-change evidence, revision, database/environment
+   applicability, executed commands, results and remaining `[STALE]` failures in the handoff. Without an
+   accepted applicable baseline, require ordinary green tests. An incompatible project-owned checkpoint
+   requires explicit local alignment before closure, not an automatic override.
+   Inspect `verify_command` before selecting commands. If this role's `./init.sh` already
+   executes a required suite with the same inputs, scope and environment, record that execution
+   as evidence instead of running the identical suite separately. Separate checks are still
+   needed for behavior not covered there; independent reviewer execution remains required.
+   Record the actual command, result and applicable revision/environment in the handoff.
+   Capture init output — a `[WARN]` line (e.g. mirror sync skipping) is not a verification failure,
+   but note it down for step 9.
+   For configured mock-data tasks, also complete the guide's online compatibility check,
+   fresh disposable reload and feature-specific behavioral tests. Record the base choice
+   and branch/schema evidence, exact manifests/table versions reused or created, selection,
+   commands/results, elapsed preparation/verification time, and owned disposable cleanup
+   in the handoff. Offline checks alone do not prove runtime behavior. Clean up only
+   positively identified disposables created by this task; retain project data and evidence.
 8. **Do not log out, and do not spawn the reviewer yourself.** Write your handoff to `progress/impl_<feature>.md`
    (outcome, scope, verification — see the Anti-Telephone convention in `AGENTS.md`; for `sdd=1` features,
    include the `R<n> → test` traceability table from step 5) and end your turn reporting
@@ -72,7 +110,15 @@ or PR descriptions; use conventional commits only.
      it — if it fails with that error, do not try to work around it (e.g. editing `harness.db` directly); it
      means the reviewer's approval never actually got recorded, so stop and report that back to the leader.
    - **Changes requested** — address the required changes from `progress/review.md`, return to step 4,
-     then re-verify (step 7) and re-report readiness (step 8). Do not log out until a subsequent review approves.
+     then re-verify (step 7) and re-report readiness (step 8). State exactly what changed since
+     the reviewed version and run checks affected by that change. Keep the mandatory init gate;
+     do not additionally repeat separate behavioral suites for a prose or Git-exclusion-only
+     revision when executable code, tests, dependencies, verification config and environment
+     are unchanged. Do not log out until a subsequent review approves.
+
+Optional closure measurement: see `harness/instructions/timing.md`. Wrap explicit evidence,
+init and approved log-out commands only when timing is requested; no timing mechanism
+changes the required checks, review gate or command failure status.
 
 Note: `claim` and `log-out` each best-effort push a status update to the feature's source Notion page, if it has
 one — a `[WARN]` about Notion in their output is non-fatal and never blocks the feature from being claimed/closed,
@@ -83,9 +129,12 @@ but it must still surface in your final report (see below), not be silently swal
 - Only one feature per session. If you discover that your change affects another feature, stop and report it as a
   blocking feature.
 - Every code entry is accompanied by a test before moving on to the next change.
-- If a tool fails unexpectedly (e.g., a shell command crashes), do NOT improvise a workaround. Stop, run
-  `scripts/harness.sh append-log "<what's blocking you>"`, leave the session open (do not log out), and end the
-  session.
+- Syntax errors, generator errors and failing assertions in your own new code/tests are normal
+  development iteration. Inspect, correct and rerun the affected check without ending the agent turn.
+  Log meaningful findings; this never bypasses verification or independent review.
+- If a tool/environment failure is genuinely external (unavailable dependency/service, permissions,
+  unsafe database state), do NOT improvise a bypass. Follow the applicable approval/environment recovery
+  procedure; if unresolved, append-log the blocker, leave the session open and report it to the leader.
 
 ## Communication with the leader
 

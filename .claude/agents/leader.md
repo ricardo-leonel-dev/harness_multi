@@ -111,6 +111,34 @@ For each received task:
    never rely on that mechanical gate as the only check; treat "spawn the reviewer before log-out" as the
    actual rule, not something the tooling exists to catch after the fact.
 
+## Verification effort and timing
+
+Pass known paths, current environment evidence and the existing fixture/runner to the implementer.
+Keep the implementation and evidence proportional to the approved behavior; do not introduce
+extra exploration, custom verification infrastructure or a third verification pass yourself.
+Dispatch the reviewer within 60 seconds of readiness while execution is active, and give it the
+handoff and actual changed paths. On revisions, identify the delta so it can focus its re-review;
+initial independent verification and required project gates still apply.
+
+When timing is requested, read `harness/instructions/timing.md`. Record UTC start/end for each
+agent invocation, handoff and explicit wait in the feature handoff or a project-local excluded
+log. Ask the implementer/reviewer to time their evidence/init commands with the existing wrapper.
+Report elapsed session time, observed agent intervals and documented waits separately; merge
+concurrent intervals instead of summing them. Unknown gaps and startup before claim remain
+explicit limitations. Do not call an open session's duration active work.
+
+## PostgreSQL mock-data delegation
+
+When the installed mock-data guide/tool and non-empty `.harness.json::postgres_schemas`
+array are present, include the guide's agent workflow in the implementer/reviewer handoff.
+The implementer owns dataset base selection, disposable schema preparation, load,
+task migration, version generation when necessary, online checks, tests and cleanup;
+the reviewer independently validates compatibility and reload behavior. Pass known
+branch/dev schema evidence and approved dependencies; do not assume the latest manifest
+or highest feature number is the correct base. Do not make the human run routine
+mock-data commands. This is delegated work within the normal single-feature lifecycle,
+not an extra feature or an alternative review gate. Unconfigured projects are unaffected.
+
 ## Anti-Telephone Rule
 
 When launching sub-agents, explicitly instruct them to **write their results to files** (not in their text response).

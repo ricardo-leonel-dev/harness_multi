@@ -44,6 +44,15 @@ or PR descriptions; use conventional commits only.
      requirement that every `done` feature have passing tests is mandatory and overrides any looser or stale
      wording in `docs/verification.md` — if the two conflict, `CHECKPOINTS.md` wins, and note the stale doc
      under Required Changes instead of using it as an excuse.
+   For configured PostgreSQL mock-data projects (installed guide/tool and non-empty
+   `postgres_schemas` array), follow `harness/instructions/mock-data.md`'s reviewer workflow.
+   Verify the chosen base against actual intended branch/schema and approved dependencies,
+   inspect exact manifest/table versions and reuse, and independently run an online check,
+   fresh prepared disposable load and relevant feature tests. Check migration/data order,
+   immutable version handling, commands/results/timings and owned disposable cleanup.
+   Offline validation or a newer feature number is not runtime/base-selection evidence.
+   Missing applicable proof requires changes; mock-data checks do not replace normal tests
+   or the review gate. Unconfigured projects keep their existing workflow.
 4b. **For `sdd=1` features only** — verify requirement traceability directly, don't trust
    `progress/impl_<feature>.md`'s claimed `R<n> → test` map: for each `R<n>` in `requirements.md`,
    confirm the test file/name claimed for it actually exists and actually exercises the behavior
@@ -51,7 +60,28 @@ or PR descriptions; use conventional commits only.
    `tasks.md` checkbox, confirm it's genuinely `[x]` only if the corresponding code change exists; a
    task marked done with no matching diff is a `CHANGES_REQUESTED` reason, same standing as an untested
    source file.
-5. Run `./init.sh`. It should finish with a green checkmark.
+5. Run `./init.sh`; it must exit 0 under the project's accepted verification policy. When an accepted
+   PostgreSQL baseline applies, independently run `bash scripts/run_tests.sh --all --baseline <accepted-path>`
+   and inspect its logs. Confirm the baseline was captured before changes, its acceptance and revision/
+   database/environment applicability are documented, and it has not been widened to absorb new failures.
+   Independently run all active feature tests and changed relevant tests without baseline suppression;
+   every active acceptance/spec requirement must pass even when its file is listed `[STALE]`. Compare
+   remaining stale failure details to the pre-change evidence: filename matching can hide a new failure.
+   Any new regression or unverified changed behavior blocks approval. Record commands, results, baseline
+   provenance and remaining `[STALE]` failures in `progress/review.md`; say "no new regressions with accepted
+   stale failures", not "all tests pass". Without an accepted applicable baseline, require ordinary green tests.
+   Install preserves project-owned `CHECKPOINTS.md`: if it conflicts with this policy, require explicit
+   local alignment before approval; do not silently override it.
+   Avoid duplicate execution within this review: if your `./init.sh` runs the required suite
+   with the same inputs, scope and environment, its actual execution satisfies that suite gate.
+   Separately execute checks that init does not cover. The implementer's run never replaces
+   your first independent behavioral verification.
+   On re-review, inspect the actual revision since your prior review. For prose or Git-exclusion-only
+   changes, reuse your own earlier passing behavioral evidence only after confirming executable
+   code, tests, dependencies, verification configuration and environment are unchanged. Record
+   the earlier command/result and why it still applies; verify the changed prose/exclusions.
+   Rerun affected behavior if any relevant input changed or applicability is uncertain. This
+   does not waive mandatory init runs, project checkpoints, failures or the recorded review gate.
 6. Iterate through `CHECKPOINTS.md`. Mark `[x]` those that are met, `[ ]` those that are not — including
    the C6 group if present and the feature has `sdd=1`; omit C6 (or mark it N/A) for `sdd=0` features.
 7. Use the **Write tool** to create `progress/review.md` with the block below — this is a required
@@ -113,7 +143,8 @@ CHANGES_REQUESTED -> see progress/review.md
 
 ## Hard Rules
 
-- ❌ Never pass with red tests.
+- ❌ Never pass with failing active feature/changed relevant tests or new regressions. Only documented,
+  accepted pre-existing `[STALE]` failures under the policy above may remain.
 - ❌ Never pass with `./init.sh` in red.
 - ❌ Never edit the implementer's code. Your job is to point out what's wrong, not fix it.
 - ❌ Never send the one-line final response before `progress/review.md` has actually been written to

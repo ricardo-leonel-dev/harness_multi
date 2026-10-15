@@ -114,6 +114,28 @@ the work itself.
 When launching sub-agents, instruct them to **write results to files** (e.g., `progress/explore_<topic>.md`) and
 return only the reference, not the content — never the full content in chat.
 
+## Verification effort and timing
+
+Use the smallest existing fixtures and checks that prove the approved behavior. One check may
+cover several requirements; do not create a new test framework or expand unrelated coverage
+merely to fill a traceability table. Required project gates and independent review still apply.
+Before creating deliverables, inspect `git status --short --untracked-files=all` and
+`git check-ignore -v -- <planned paths>`. Distinguish harness-owned local exclusions from
+project-owned delivery requirements; do not remove exclusions or change `.gitignore` merely
+to make status show a file. Resolve conflicts against the project's delivery policy early.
+
+Each role runs its required verification, but a command already executed by that role's
+`./init.sh` need not also be run separately against the same inputs/environment. The leader
+never adds a third verification pass. On re-review, the reviewer may reuse its own earlier
+passing behavioral evidence only after checking that executable code, tests, dependencies,
+verification configuration and environment are unchanged; rerun checks affected by the revision.
+Required `./init.sh` runs and stricter project checkpoints remain mandatory.
+
+When timing is requested, follow `harness/instructions/timing.md`: record agent intervals,
+explicit waits and timed commands separately. Session start-to-close is elapsed time, not
+active work; never subtract an unexplained gap as a confirmed pause or sum overlapping agents
+as user-visible elapsed time. Report missing timing evidence rather than inventing precision.
+
 ## 1. Before You Start (Required)
 
 1. Run `./init.sh` and verify that it finishes without errors. If it fails, **stop** and resolve the environment before
@@ -139,6 +161,7 @@ return only the reference, not the content — never the full content in chat.
 | `harness/instructions/persona.md` | Harness-owned voice, tone and commit rules (no AI attribution) | At startup, before any reply or commit |
 | `harness/instructions/coverage.md` | Harness-owned shared coverage guidance (refreshed on reinstall) | Before preparing evidence |
 | `harness/instructions/postgres.md` | Optional postgres profile tools and transactional SQL guidance | Before database verification, when present |
+| `harness/instructions/mock-data.md` | Optional PostgreSQL mock-data agent workflow; tools come from the harness, records/manifests belong to the project | Before planning configured PostgreSQL data verification |
 | `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
 | `docs/specs.md`           | Harness-owned spec-driven development guide: EARS format, file layout, traceability (§9) (refreshed on reinstall) | Before drafting, implementing, or reviewing an `sdd=1` feature |
 | `specs/<name>/{requirements,design,tasks}.md` | Spec content for `sdd=1` features — git-tracked, human/agent-authored (not generated) | Before implementing or reviewing an `sdd=1` feature |
@@ -162,7 +185,12 @@ docs, specs, tests, CHECKPOINTS.md and .harness.json belong to the project.
   `claim` mechanically refuses it until every one of them is `done` — see "Local Feature Dependencies" in §4. A
   feature's free-text description saying "depends on X" is not enough on its own; record it with `--depends-on` /
   `set-depends-on` so `claim` actually enforces it instead of relying on whoever picks the next task to notice.
-- **Don't declare a task `done` without green tests.** Run `./init.sh` and make sure the verification command passes.
+- **Don't declare a task `done` without passing verification.** Run `./init.sh` and make sure the verification
+  command passes. Ordinary green tests are required unless the project explicitly accepts an applicable
+  PostgreSQL baseline captured before changes: then active feature/changed relevant tests must pass without
+  suppression, the reviewer must independently confirm zero new regressions with `--all --baseline`, and
+  remaining pre-existing `[STALE]` failures must be documented. Never widen a baseline to absorb new failures.
+  See `harness/instructions/postgres.md`; incompatible project-owned checkpoints need explicit local alignment.
 - **Document what you do** via `scripts/harness.sh append-log "<note>"` while you work, not at the end.
 - **Clean up the repository** before closing the session (see [5](#5-log-out-lifecycle)).
 - **If you don't know something, look it up in `docs/`** before inventing it.
@@ -204,8 +232,9 @@ dependencies on a *different* project's harness; this one is for dependencies be
 
 Before finishing:
 
-1. Run `./init.sh` — everything is green (this also regenerates `state/` and best-effort syncs the Postgres/Supabase
-   mirror, if configured).
+1. Run `./init.sh` — verification passes under the accepted policy in §3 (this also regenerates `state/` and
+   best-effort syncs the Postgres/Supabase mirror, if configured). Accepted `[STALE]` failures remain explicitly
+   documented; passing with a baseline does not mean every historical test is green.
 2. If the task is finished, run:
    ```
    scripts/harness.sh log-out --changes <file1> <file2> ... --verification "<summary>" --closure "<summary>"
@@ -263,6 +292,12 @@ one-time reconciliation, not an alternate lifecycle.
   Notion, and is reversible with `unsupersede <target> <reason>`. Fix any `depends_on` it warns about.
 
 ## 6. If you get stuck
+
+Syntax errors, generator errors and failing assertions in code/tests you are developing
+are normal iteration: inspect the cause, fix your own work and rerun the affected check.
+Do not pause the whole agent solely for these failures. A genuinely unavailable tool,
+external service, permission or unsafe environment remains a blocker; do not bypass
+it or the reviewer gate.
 
 - Reread the relevant section of `docs/`.
 - If the tool is not doing what you expect, **do not create a workaround**: run
