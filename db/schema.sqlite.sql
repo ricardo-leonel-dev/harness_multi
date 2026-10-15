@@ -167,6 +167,18 @@ CREATE UNIQUE INDEX agent_runs_external_active ON agent_runs(project_id, runtime
 CREATE INDEX idx_agent_runs_feature ON agent_runs(feature_id, started_at);
 CREATE INDEX idx_agent_runs_session ON agent_runs(session_id);
 
+-- Incremental record-usage bookkeeping (local only: never mirrored to Postgres).
+-- One row per transcript/rollout already parsed; record-usage skips a file whose
+-- mtime_ns and size still match (--full ignores this table).
+CREATE TABLE agent_usage_files (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,                          -- transcript/rollout file record-usage last parsed
+  mtime_ns INTEGER NOT NULL,                   -- change key: unchanged mtime+size => skipped
+  size INTEGER NOT NULL,
+  recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (project_id, path)
+);
+
 CREATE INDEX idx_features_project_status ON features(project_id, status);
 CREATE INDEX idx_session_log_project_closed ON session_log(project_id, closed_at);
 CREATE INDEX idx_session_entries_session ON session_log_entries(session_id, created_at);

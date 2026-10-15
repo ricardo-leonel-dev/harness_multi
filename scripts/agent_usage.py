@@ -10,6 +10,12 @@ Subcommands (normally reached through scripts/harness.sh record-usage / stats):
            label, model, timestamps, ids and the source path — never prompt or
            transcript content. Unknown/malformed input is a [WARN] on stderr
            and the file is skipped; collect always exits 0.
+           Incremental: a transcript whose size and mtime match its
+           agent_usage_files record is skipped without parsing (--full
+           rescans everything; --transcript always parses the given file).
+           Bounded: --max-seconds (default 20) caps the run; at the limit it
+           stops scanning, records what it already parsed, prints one [WARN]
+           and the next run continues where this one stopped.
   stats    print the invocation tree (parent -> children) per feature with
            per-run duration/tokens, totals per feature and per project.
 
@@ -38,10 +44,14 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
+import time
 
 RUNTIMES = ('claude', 'codex')
 TOKEN_FIELDS = ('input_tokens', 'cache_read_tokens', 'cache_write_tokens',
                 'output_tokens', 'reasoning_tokens', 'total_tokens')
+DEFAULT_MAX_SECONDS = 20.0
+MAX_BUSY_SECONDS = 3.0  # sqlite busy wait, carved out of the --max-seconds budget
+_now = time.monotonic  # indirection so tests can drive the deadline with a fake clock
 ROW_FIELDS = ('runtime', 'agent_role', 'label', 'external_id', 'parent_external_id',
               'spawn_depth', 'model', 'started_at', 'finished_at', 'duration_seconds',
               *TOKEN_FIELDS, 'source_path')
@@ -49,6 +59,35 @@ ROW_FIELDS = ('runtime', 'agent_role', 'label', 'external_id', 'parent_external_
 
 def warn(message):
     print(f'[WARN]  agent_usage: {message}', file=sys.stderr)
+
+
+class DeadlineReached(Exception):
+    pass
+
+
+class Deadline:
+    """Wall-clock budget for one collect run. The scan stops busy_seconds
+    before the limit so the final commit (and its sqlite busy wait) still fits."""
+
+    def __init__(self, max_seconds):
+        self.max_seconds = max(float(max_seconds), 0.0)
+        self.busy_seconds = min(MAX_BUSY_SECONDS, self.max_seconds / 4)
+        self.scan_until = _now() + self.max_seconds - self.busy_seconds
+
+    def expired(self):
+        return _now() >= self.scan_until
+
+    def check(self):
+        if self.expired():
+            raise DeadlineReached()
+
+
+DEADLINE = None  # set by cmd_collect; read_lines/claude_spawner poll it on long files
+
+
+def poll_deadline(counter):
+    if DEADLINE is not None and counter % 2000 == 0:
+        DEADLINE.check()
 
 
 def parse_ts(value):
@@ -93,7 +132,8 @@ def read_lines(path):
 
     def gen():
         with open(path, 'r', encoding='utf-8', errors='replace') as handle:
-            for line in handle:
+            for count, line in enumerate(handle, 1):
+                poll_deadline(count)
                 if not line.strip():
                     continue
                 try:
@@ -199,7 +239,8 @@ def claude_spawner(path, tool_use_id):
     for candidate in candidates:
         try:
             with open(candidate, 'r', encoding='utf-8', errors='replace') as handle:
-                for line in handle:
+                for count, line in enumerate(handle, 1):
+                    poll_deadline(count)
                     if tool_use_id not in line:
                         continue
                     try:
@@ -299,55 +340,67 @@ def detect_and_parse(path, roots):
     return parse_claude(path, roots)
 
 
-def recent(path, since):
+def file_key(path):
+    """(mtime_ns, size) change key of a transcript, or None if it vanished. A
+    Claude subagent's .meta.json counts too (its mtime can move the key)."""
     try:
-        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) >= since
+        info = path.stat()
     except OSError:
-        return False
+        return None
+    mtime_ns, size = info.st_mtime_ns, info.st_size
+    if path.parent.name == 'subagents':
+        try:
+            mtime_ns = max(mtime_ns, path.with_name(path.name[:-len('.jsonl')] + '.meta.json').stat().st_mtime_ns)
+        except OSError:
+            pass
+    return mtime_ns, size
 
 
-def scan_claude(root_paths, since):
+def claude_candidates(root_paths):
     home = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude')
     files = []
     for slug in sorted({claude_slug(r) for r in root_paths}):
-        base = home / 'projects' / slug
+        base = (home / 'projects' / slug).resolve()  # resolved like --transcript paths
         if not base.is_dir():
             continue
-        files += [p for p in base.glob('*.jsonl') if recent(p, since)]
-        files += [p for p in base.glob('*/subagents/agent-*.jsonl') if recent(p, since)]
-    # The slug directory already scopes runs to this project; no cwd re-check.
-    return [row for row in (parse_claude(p) for p in sorted(files)) if row]
+        files += list(base.glob('*.jsonl')) + list(base.glob('*/subagents/agent-*.jsonl'))
+    return [('claude', p) for p in sorted(set(files))]
 
 
-def scan_codex(root_paths, since):
+def codex_candidates():
     home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
-    base = home / 'sessions'
+    base = (home / 'sessions').resolve()
     if not base.is_dir():
         return []
-    rows = []
     # No YYYY/MM/DD directory pre-filter: a long-running thread lives in the
     # directory of the day it started, so only the file mtime decides.
-    for day in sorted(base.glob('[0-9]*/[0-9]*/[0-9]*')):
-        for path in sorted(day.glob('rollout-*.jsonl')):
-            if not recent(path, since):
-                continue
-            meta = codex_meta(path)
-            if meta is None:
-                warn(f'{path}: no session_meta — unrecognized Codex rollout format, skipped')
-                continue
-            if not under_root(meta.get('cwd'), root_paths):
-                continue
-            row = parse_codex(path, root_paths)
-            if row:
-                rows.append(row)
-    return rows
+    return [('codex', p) for day in sorted(base.glob('[0-9]*/[0-9]*/[0-9]*'))
+            for p in sorted(day.glob('rollout-*.jsonl'))]
 
 
-def connect(db_path):
+def parse_candidate(kind, path, roots):
+    if kind == 'claude':
+        # The slug directory already scopes runs to this project; no cwd re-check.
+        return parse_claude(path)
+    meta = codex_meta(path)
+    if meta is None:
+        warn(f'{path}: no session_meta — unrecognized Codex rollout format, skipped')
+        return None
+    if not under_root(meta.get('cwd'), roots):
+        return None
+    return parse_codex(path, roots)
+
+
+def has_table(conn, name):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def connect(db_path, busy_seconds=5.0):
     # mode=rw: never create an empty database file for a mistyped/missing path.
-    conn = sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=rw', uri=True)
+    # timeout = sqlite busy wait when another writer holds the lock.
+    conn = sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=rw', uri=True, timeout=busy_seconds)
     conn.row_factory = sqlite3.Row
-    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs'").fetchone():
+    if not has_table(conn, 'agent_runs'):
         raise RuntimeError('agent_runs table missing — run through scripts/harness.sh (it migrates harness.db)')
     return conn
 
@@ -425,37 +478,92 @@ ON CONFLICT(project_id, runtime, external_id) WHERE deleted_at IS NULL DO UPDATE
   updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"""
 
 
+FILE_UPSERT = """INSERT INTO agent_usage_files (project_id, path, mtime_ns, size)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(project_id, path) DO UPDATE SET mtime_ns=excluded.mtime_ns, size=excluded.size,
+  recorded_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"""
+
+
+def reattribute(conn, pid, paths, sessions):
+    """Unchanged files are not re-parsed, but sessions may have opened/closed
+    since: refresh session/feature attribution of their stored rows (cheap)."""
+    if not paths:
+        return
+    updates = []
+    for row in conn.execute('SELECT id, started_at, finished_at, session_id, feature_id, source_path '
+                            'FROM agent_runs WHERE project_id=? AND deleted_at IS NULL', (pid,)):
+        if row['source_path'] not in paths:
+            continue
+        session = attribute(row, sessions)
+        sid, fid = (session['id'], session['feature_id']) if session else (None, None)
+        if (sid, fid) != (row['session_id'], row['feature_id']):
+            updates.append((sid, fid, row['id']))
+    conn.executemany("UPDATE agent_runs SET session_id=?, feature_id=?, "
+                     "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id=?", updates)
+
+
 def cmd_collect(args):
+    global DEADLINE
+    DEADLINE = deadline = Deadline(args.max_seconds)
     root = os.path.abspath(args.project_root)
     roots = sorted({root, os.path.realpath(root)})
     conn = None
     try:
-        conn = connect(args.db)
+        conn = connect(args.db, busy_seconds=deadline.busy_seconds)
         pid = project_id(conn, args.project_slug)
         sessions = load_sessions(conn, pid)
         since = parse_since(args.since) if args.since else default_since(conn, pid)
+        track = has_table(conn, 'agent_usage_files')
     except (RuntimeError, ValueError, sqlite3.Error) as error:
         if args.dry_run and conn is None:
-            pid, sessions, since = None, [], (parse_since(args.since) if args.since
-                                              else datetime.now(timezone.utc) - timedelta(days=30))
+            pid, sessions, track, since = None, [], False, (parse_since(args.since) if args.since
+                                                            else datetime.now(timezone.utc) - timedelta(days=30))
         else:
             warn(str(error))
             return 0
-    rows = []
+    # --dry-run always parses everything (it prints rows, it records nothing).
+    known = {}
+    if track and not (args.full or args.dry_run):
+        known = {r['path']: (r['mtime_ns'], r['size']) for r in conn.execute(
+            'SELECT path, mtime_ns, size FROM agent_usage_files WHERE project_id=?', (pid,))}
+    candidates = []
     if args.transcript:
         for item in args.transcript:
             path = Path(item)
-            if not path.is_file():
+            if path.is_file():
+                candidates.append(('transcript', path.resolve()))  # same key as a scan
+            else:
                 warn(f'{path}: transcript not found — skipped')
-                continue
-            row = detect_and_parse(path, roots)
-            if row and row['runtime'] in wanted(args.runtime):
-                rows.append(row)
     else:
         if 'claude' in wanted(args.runtime):
-            rows += scan_claude(roots, since)
+            candidates += claude_candidates(roots)
         if 'codex' in wanted(args.runtime):
-            rows += scan_codex(roots, since)
+            candidates += codex_candidates()
+    floor_ns = int(since.timestamp() * 1_000_000_000)
+    rows, parsed, skipped, stopped = [], [], set(), False
+    for kind, path in candidates:
+        if deadline.expired():
+            stopped = True
+            break
+        key = file_key(path)
+        if key is None:
+            continue
+        if kind != 'transcript':
+            if key[0] < floor_ns:
+                continue
+            if known.get(str(path)) == key:
+                skipped.add(str(path))
+                continue
+        try:
+            row = detect_and_parse(path, roots) if kind == 'transcript' else parse_candidate(kind, path, roots)
+        except DeadlineReached:
+            stopped = True
+            break
+        if row and row['runtime'] not in wanted(args.runtime):
+            continue  # filtered out by --runtime: not recorded, so not marked as seen
+        parsed.append((str(path), key))
+        if row:
+            rows.append(row)
     for row in rows:
         session = attribute(row, sessions)
         row['session_id'] = session['id'] if session else None
@@ -468,11 +576,18 @@ def cmd_collect(args):
     try:
         with conn:
             conn.executemany(UPSERT, rows)
+            if track:
+                conn.executemany(FILE_UPSERT, [(pid, path, key[0], key[1]) for path, key in parsed])
+                reattribute(conn, pid, skipped, sessions)
     except sqlite3.Error as error:
         warn(f'could not record agent runs: {error}')
         return 0
     counts = {r: sum(1 for row in rows if row['runtime'] == r) for r in RUNTIMES}
-    print(f'[OK]    recorded {len(rows)} agent run(s) (claude: {counts["claude"]}, codex: {counts["codex"]})')
+    note = f', skipped {len(skipped)} unchanged file(s)' if skipped else ''
+    print(f'[OK]    recorded {len(rows)} agent run(s) (claude: {counts["claude"]}, codex: {counts["codex"]}){note}')
+    if stopped:
+        warn(f'time limit of {deadline.max_seconds:g}s reached after parsing {len(parsed)} file(s); '
+             'partial progress recorded, the next run continues (raise --max-seconds to finish in one run)')
     return 0
 
 
@@ -653,6 +768,11 @@ def main(argv=None):
     collect.add_argument('--since', help='ISO date/time or Nd/Nh (default: earliest open session start, '
                          'else the last session start, minus 1 day; else 30 days)')
     collect.add_argument('--dry-run', action='store_true', help='print rows as JSON lines, write nothing')
+    collect.add_argument('--full', action='store_true',
+                         help='re-parse every transcript in the window, even unchanged ones')
+    collect.add_argument('--max-seconds', type=float, default=DEFAULT_MAX_SECONDS,
+                         help=f'time budget incl. sqlite busy wait (default {DEFAULT_MAX_SECONDS:g}); '
+                         'stops early and keeps partial progress')
     stats = sub.add_parser('stats', help='per-agent invocation tree, durations and tokens')
     stats.add_argument('feature', nargs='?')
     args = parser.parse_args(argv)

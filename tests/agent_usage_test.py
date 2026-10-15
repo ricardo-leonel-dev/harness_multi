@@ -5,6 +5,9 @@ Builds a throwaway installed project plus synthetic Claude Code transcripts and
 Codex CLI rollouts (fake CLAUDE_CONFIG_DIR / CODEX_HOME), then drives the real
 scripts/harness.sh entry points. Run: python3 tests/agent_usage_test.py
 """
+import contextlib
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,8 +15,11 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -297,6 +303,172 @@ INSERT INTO session_log (id, project_id, feature_id, agent, started_at, closed_a
         result = self.harness('record-usage', '--since', '2026-01-01')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.rows()), 12)
+
+    def test_unchanged_files_skipped_modified_reparsed_full_rescans(self):
+        first = self.harness('record-usage')
+        self.assertIn('garbage.jsonl', first.stderr)
+        before = self.rows()
+        # A session opened later still re-attributes unchanged files' rows (no re-parse needed).
+        self.sql("INSERT INTO session_log (id, project_id, feature_id, agent, started_at, closed_at) VALUES "
+                 "(3, 'p1', 1, 'implementer', '2026-01-09T07:00:00.000Z', '2026-01-09T09:00:00.000Z');")
+        # Corrupt an already-recorded file without changing its size or mtime: if it were
+        # parsed again it would warn; skipped, it must not.
+        sess0 = self.leader.with_name('sess-0.jsonl')
+        info = sess0.stat()
+        sess0.write_text('x' * (info.st_size - 1) + '\n')
+        os.utime(sess0, ns=(info.st_atime_ns, info.st_mtime_ns))
+        second = self.harness('record-usage')
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertNotIn('[WARN]', second.stderr)
+        self.assertIn('recorded 0 agent run(s)', second.stdout)
+        self.assertIn('skipped 15 unchanged file(s)', second.stdout)
+        after = self.rows()
+        self.assertEqual(after['sess-0']['total_tokens'], before['sess-0']['total_tokens'])
+        self.assertEqual((after['sess-0']['session_id'], after['sess-0']['feature_id']), (3, 1))
+
+        with open(self.leader, 'a', encoding='utf-8') as handle:
+            handle.write(json.dumps(claude_line('2026-01-10T11:45:00.000Z', str(self.project), 'sess-1',
+                                                kind='assistant', mid='m3', usage=usage(5, 0, 0, 5))) + '\n')
+        # A touched nested child is re-parsed; its spawner (gp1, unchanged and skipped)
+        # is still read from disk to resolve the parent.
+        nest1 = self.leader.parent / 'sess-1/subagents/agent-nest1.jsonl'
+        os.utime(nest1, ns=(info.st_atime_ns, nest1.stat().st_mtime_ns + 5_000_000_000))
+        third = self.harness('record-usage')
+        self.assertIn('recorded 2 agent run(s) (claude: 2, codex: 0)', third.stdout)
+        self.assertEqual(self.rows()['sess-1']['total_tokens'], 3133)
+        self.assertEqual((self.rows()['nest1']['parent_external_id'], self.rows()['nest1']['spawn_depth']),
+                         ('gp1', 2))
+        self.assertGreater(self.rows()['nest1']['updated_at'], after['nest1']['updated_at'])
+
+        full = self.harness('record-usage', '--full')
+        self.assertEqual(full.returncode, 0, full.stderr)
+        self.assertIn('sess-0.jsonl', full.stderr)  # the corrupted file is parsed again
+        self.assertIn('garbage.jsonl', full.stderr)
+        self.assertIn('recorded 11 agent run(s)', full.stdout)
+        self.assertNotIn('skipped', full.stdout)
+
+    def load_module(self):
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location('agent_usage_copy', self.project / 'scripts/agent_usage.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def collect_in_process(self, module, *extra):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.claude_home),
+                                          'CODEX_HOME': str(self.codex_home)}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = module.main(['--db', str(self.db), '--project-slug', 't', 'collect',
+                                '--project-root', str(self.project), *extra])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_deadline_keeps_partial_progress_and_next_run_continues(self):
+        module = self.load_module()
+        real_parse, clock, parsed = module.parse_candidate, [0.0], []
+
+        def slow_parse(kind, path, roots):  # every file "takes" 10s on a fake clock
+            parsed.append(str(path))
+            clock[0] += 10
+            return real_parse(kind, path, roots)
+        module.parse_candidate = slow_parse
+        module._now = lambda: clock[0]
+        # budget 25s - 3s reserved for the sqlite busy wait/commit = scan until t=22: 3 files.
+        code, out, err = self.collect_in_process(module, '--max-seconds', '25')
+        self.assertEqual(code, 0)
+        self.assertEqual(len(parsed), 3)
+        self.assertIn('time limit of 25s reached after parsing 3 file(s)', err)
+        self.assertEqual(err.count('time limit'), 1)
+        partial = self.rows()
+        self.assertTrue(0 < len(partial) <= 3, partial.keys())
+        self.assertIn(f'recorded {len(partial)} agent run(s)', out)
+
+        first, parsed[:] = list(parsed), []
+        module._now = time.monotonic
+        code, out, err = self.collect_in_process(module)
+        self.assertEqual(code, 0)
+        self.assertNotIn('time limit', err)
+        self.assertFalse(set(first) & set(parsed))  # already-parsed files are not parsed again
+        self.assertEqual(len(self.rows()), 12)
+        self.assertIn('skipped 3 unchanged file(s)', out)
+        second, parsed[:] = list(parsed), []
+        self.collect_in_process(module, '--full')
+        self.assertEqual(sorted(parsed), sorted(first + second))
+
+    def marked(self):
+        with sqlite3.connect(self.db) as conn:
+            return {r[0] for r in conn.execute('SELECT path FROM agent_usage_files')}
+
+    def test_deadline_inside_a_file_leaves_it_unmarked_and_reparsed(self):
+        module = self.load_module()
+        real_parse, clock, parsed = module.parse_candidate, [0.0], []
+
+        def parse(kind, path, roots):
+            parsed.append(path.name)
+            if len(parsed) == 3:
+                clock[0] = 1000  # the budget runs out while this file is being read
+            return real_parse(kind, path, roots)
+        module.parse_candidate = parse
+        module._now = lambda: clock[0]
+        module.poll_deadline = lambda count: module.DEADLINE.check()  # poll on every line
+        code, out, err = self.collect_in_process(module)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(parsed), 3)
+        interrupted, first_two = parsed[2], parsed[:2]
+        self.assertIn('after parsing 2 file(s)', err)
+        self.assertEqual({Path(p).name for p in self.marked()}, set(parsed[:2]))
+        self.assertEqual(len(self.rows()), 1)  # garbage.jsonl yields no row
+        module = self.load_module()
+        parsed[:] = []
+        module.parse_candidate = lambda kind, path, roots: (parsed.append(path.name), real_parse(kind, path, roots))[1]
+        self.collect_in_process(module)
+        self.assertIn(interrupted, parsed)
+        self.assertFalse(set(parsed) & set(first_two))
+        self.assertEqual(len(self.rows()), 12)
+
+    def test_runtime_filtered_transcript_not_marked_and_paths_resolved(self):
+        link = self.work / 'link.jsonl'
+        link.symlink_to(self.leader)
+        skipped = self.harness('record-usage', '--transcript', str(link), '--runtime', 'codex')
+        self.assertIn('recorded 0 agent run(s)', skipped.stdout)
+        self.assertEqual(self.marked(), set())
+        hooked = self.harness('record-usage', '--transcript', str(link))
+        self.assertIn('recorded 1 agent run(s)', hooked.stdout)
+        self.assertEqual(self.marked(), {str(self.leader.resolve())})
+        self.assertEqual(self.rows()['sess-1']['source_path'], str(self.leader.resolve()))
+        scan = self.harness('record-usage')
+        self.assertIn('skipped 1 unchanged file(s)', scan.stdout)  # the hook's mark matches the scan path
+
+    def test_failed_upsert_and_dry_run_leave_no_file_marks(self):
+        dry = self.harness('record-usage', '--dry-run')
+        self.assertEqual(len(dry.stdout.strip().splitlines()), 12)
+        self.assertEqual(self.marked(), set())
+        self.sql("CREATE TRIGGER no_runs BEFORE INSERT ON agent_runs BEGIN SELECT RAISE(ABORT, 'boom'); END;")
+        failed = self.harness('record-usage')
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        self.assertIn('could not record agent runs: boom', failed.stderr)
+        self.assertEqual((self.marked(), self.rows()), (set(), {}))
+
+    def test_tight_deadline_records_nothing_but_exits_cleanly(self):
+        result = self.harness('record-usage', '--max-seconds', '0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('recorded 0 agent run(s)', result.stdout)
+        self.assertEqual(result.stderr.count('time limit of 0s reached after parsing 0 file(s)'), 1)
+
+    def test_migration_adds_usage_files_table_to_old_database(self):
+        self.db.unlink()
+        schema = (ROOT / 'db/schema.sqlite.sql').read_text()
+        old = re.sub(r'CREATE TABLE agent_usage_files \(.*?\);', '', schema, flags=re.S)
+        self.assertNotIn('agent_usage_files (', old)
+        subprocess.run(['sqlite3', str(self.db)], input=old, text=True, check=True)
+        self.sql("INSERT INTO projects (id, slug) VALUES ('p1', 't');")
+        self.assertEqual(self.harness('status').returncode, 0)
+        with sqlite3.connect(self.db) as conn:
+            columns = [r[1] for r in conn.execute('PRAGMA table_info(agent_usage_files)')]
+        self.assertEqual(columns, ['project_id', 'path', 'mtime_ns', 'size', 'recorded_at'])
+        self.harness('record-usage', '--since', '2026-01-01')
+        again = self.harness('record-usage', '--since', '2026-01-01')
+        self.assertIn('recorded 0 agent run(s)', again.stdout)
 
     def test_long_running_codex_thread_in_old_day_directory(self):
         # Started two days before the default --since floor, still written to now (mtime).

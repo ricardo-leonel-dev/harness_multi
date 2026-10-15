@@ -293,6 +293,24 @@ COMMIT;
 SQL
 fi
 
+# Adds agent_usage_files: per-transcript mtime/size keys so record-usage skips
+# files unchanged since they were last parsed. Local only (sync_postgres.sh
+# never mirrors it). Brand-new table: CREATE ... IF NOT EXISTS is enough.
+# Keep in sync with db/schema.sqlite.sql.
+if [ -z "$(sqlite3 "$DB_PATH" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_usage_files';")" ]; then
+  sqlite3 "$DB_PATH" <<'SQL'
+.bail on
+CREATE TABLE IF NOT EXISTS agent_usage_files (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,                          -- transcript/rollout file record-usage last parsed
+  mtime_ns INTEGER NOT NULL,                   -- change key: unchanged mtime+size => skipped
+  size INTEGER NOT NULL,
+  recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (project_id, path)
+);
+SQL
+fi
+
 db() {
   sqlite3 "$DB_PATH" "$@"
 }

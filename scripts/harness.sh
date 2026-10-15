@@ -152,7 +152,8 @@
 #                                              is left as-is — fix it by hand)
 #   check-blockers                            best-effort: for every blocked feature with a BLOCKED_ON note,
 #                                              check the referenced sibling project's harness.db directly
-#   record-usage [--transcript P...] [--runtime claude|codex|all] [--since T] [--dry-run]
+#   record-usage [--transcript P...] [--runtime claude|codex|all] [--since T] [--dry-run] [--full]
+#                [--max-seconds N]
 #                                              best-effort, idempotent: read Claude Code transcripts / Codex CLI
 #                                              rollouts for this project and upsert one agent_runs row per agent
 #                                              invocation (leader, implementer, reviewer, spec_author, nested
@@ -160,7 +161,10 @@
 #                                              usage — never transcript content. Runs are attributed to the harness
 #                                              session whose window contains their start. --transcript reads only
 #                                              that file (the SubagentStop hook passes it); --since is an ISO
-#                                              date/time or Nd/Nh. Any parse/IO problem is a [WARN]; exits 0.
+#                                              date/time or Nd/Nh. Incremental: files unchanged (mtime+size)
+#                                              since last parsed are skipped; --full rescans them. --max-seconds
+#                                              (default 20) bounds the run: at the limit it keeps partial
+#                                              progress and warns. Any parse/IO problem is a [WARN]; exits 0.
 #   stats [TARGET]                            agent invocation tree (parent -> children) per feature with per-run
 #                                              duration/tokens, totals per feature and per project, plus agent effort
 #                                              vs. union of agent intervals vs. session elapsed (see
