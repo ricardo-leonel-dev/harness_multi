@@ -161,4 +161,25 @@ sqlite3 -json "$DB_PATH" "SELECT sl.id, f.name AS feature_name, sl.feature_id, s
   done
 done
 
+# Agent runs after sessions: upsert_agent_run resolves session/feature by
+# their local ids, so those rows must already be mirrored. A mirror without
+# migration 0004 just [WARN]s here (one per row, like the other steps).
+# source_path stays local: it is a path on this machine, meaningless (and
+# identifying) in a shared mirror.
+sqlite3 -json "$DB_PATH" "SELECT id, session_id, feature_id, runtime, agent_role, label, external_id,
+  parent_external_id, spawn_depth, model, started_at, finished_at, duration_seconds, input_tokens,
+  cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, deleted_at
+  FROM agent_runs WHERE project_id='$(sql_escape "$pid")';" | jq -c '.[]' | while IFS= read -r row; do
+  payload=$(jq -c --arg slug "$PROJECT_SLUG" '{p_project_slug:$slug, p_local_id:.id,
+    p_session_local_id:.session_id, p_feature_local_id:.feature_id, p_runtime:.runtime,
+    p_agent_role:.agent_role, p_label:.label, p_external_id:.external_id,
+    p_parent_external_id:.parent_external_id, p_spawn_depth:.spawn_depth, p_model:.model,
+    p_started_at:.started_at, p_finished_at:.finished_at, p_duration_seconds:.duration_seconds,
+    p_input_tokens:.input_tokens, p_cache_read_tokens:.cache_read_tokens,
+    p_cache_write_tokens:.cache_write_tokens, p_output_tokens:.output_tokens,
+    p_reasoning_tokens:.reasoning_tokens, p_total_tokens:.total_tokens,
+    p_deleted_at:.deleted_at}' <<<"$row")
+  out=$(rpc upsert_agent_run "$payload") || warn "upsert_agent_run failed for local_id $(jq '.id' <<<"$row"): $out"
+done
+
 ok "mirror sync complete"

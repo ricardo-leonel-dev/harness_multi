@@ -124,8 +124,15 @@ Dispatch the reviewer within 60 seconds of readiness while execution is active, 
 handoff and actual changed paths. On revisions, identify the delta so it can focus its re-review;
 initial independent verification and required project gates still apply.
 
-When timing is requested, read `harness/instructions/timing.md`. Record UTC start/end for each
-agent invocation, handoff and explicit wait in the feature handoff or a project-local excluded
+After each subagent finishes (implementer, reviewer, spec_author, research) and again before your
+final report, run `scripts/harness.sh record-usage`. It records every agent invocation's duration
+and token usage in `harness.db` (best-effort, idempotent, always exits 0 — never let it block you).
+Codex CLI has no hook for this, so it only happens if you run it; under Claude Code the
+`SubagentStop` hook already runs it, and rerunning is harmless.
+
+When timing is requested, read `harness/instructions/timing.md` and report agent intervals and
+tokens from `scripts/harness.sh stats [feature]` (summed durations are agent effort, not wall
+time). Record handoff times and explicit waits in the feature handoff or a project-local excluded
 log. Ask the implementer/reviewer to time their evidence/init commands with the existing wrapper.
 Report elapsed session time, observed agent intervals and documented waits separately; merge
 concurrent intervals instead of summing them. Unknown gaps and startup before claim remain

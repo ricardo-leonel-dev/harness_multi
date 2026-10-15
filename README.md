@@ -50,7 +50,8 @@ of a blanket network grant).
 - `db/schema.sqlite.sql` — the local primary schema (applied to each installed project's `harness.db`).
 - `db/schema.postgres.sql` + `db/rpc/*.sql` — the optional Postgres/Supabase mirror schema and RPC functions.
 - `templates/` — scaffolds for a new project's `docs/*.md`, `CHECKPOINTS.md`, and `features.seed.json`.
-- `scripts/harness.sh` — the single entry point agents use to read/write harness state (claim, log, log-out, snapshot, sync, notion-check, notion-diff, notion-import).
+- `scripts/harness.sh` — the single entry point agents use to read/write harness state (claim, log, log-out, snapshot, sync, notion-check, notion-diff, notion-import, record-usage, stats).
+- `scripts/agent_usage.py` — backs `record-usage`/`stats`: per-agent duration and token usage from Claude Code transcripts and Codex CLI rollouts (see [timing guidance](shared/timing.md)).
 - `.codex/config.toml.example` — optional, hand-copy-only template for enabling Codex CLI network access (see above).
 - `examples/notes-cli/` — a fully worked reference installation (see below).
 
@@ -133,6 +134,11 @@ without a restart), then re-apply `db/rpc/upsert_feature.sql` (updated) and
 the new `db/rpc/upsert_spec.sql`. Local `docker compose` stacks don't need
 this — `docker compose down -v && docker compose up -d` re-applies
 everything from the current, already-updated `db/schema.postgres.sql`.
+
+**Mirror deployed before per-agent usage existed?** Run
+`db/migrations/0004_agent_runs.sql` once, then apply the new
+`db/rpc/upsert_agent_run.sql`. Until both are applied, `sync` only `[WARN]`s on
+the agent-runs step; everything else keeps syncing.
 
 **Mirror deployed before specs/sessions were resolved by feature local id?**
 Re-apply `db/rpc/upsert_spec.sql` and `db/rpc/upsert_session.sql` (each drops
@@ -287,7 +293,19 @@ without extracting SQL bodies or executing SQL. See [PostgreSQL guidance](profil
 for its narrow input format and validation limits. Generic installation also refreshes
 `scripts/time_phase.py` and [timing guidance](shared/timing.md) for opt-in command
 measurement. Neither tool changes verification defaults, accepts failing tests or
-bypasses independent review. Development errors in an agent’s own code/generator/tests
+bypasses independent review.
+
+### Per-agent duration and token usage
+
+`scripts/harness.sh record-usage` reads this project's Claude Code transcripts
+(`~/.claude/projects/<slug>/`) and Codex CLI rollouts (`~/.codex/sessions/`) and
+upserts one `agent_runs` row per agent invocation (leader, implementer, every
+reviewer pass, spec_author, nested spawns) with parent/depth, model, duration and
+input/cache/output/reasoning/total tokens — numbers only, never transcript content.
+Claude Code runs it from the scaffolded `SubagentStop` hook; under Codex CLI the
+leader runs it after each subagent. `scripts/harness.sh stats [feature]` prints the
+invocation tree with per-run and per-feature/project totals. Covered by
+`python3 tests/agent_usage_test.py`. Development errors in an agent’s own code/generator/tests
 are corrected as normal iteration; genuine external/environment blockers still need
 proper recovery or reporting.
 

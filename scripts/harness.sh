@@ -152,6 +152,19 @@
 #                                              is left as-is — fix it by hand)
 #   check-blockers                            best-effort: for every blocked feature with a BLOCKED_ON note,
 #                                              check the referenced sibling project's harness.db directly
+#   record-usage [--transcript P...] [--runtime claude|codex|all] [--since T] [--dry-run]
+#                                              best-effort, idempotent: read Claude Code transcripts / Codex CLI
+#                                              rollouts for this project and upsert one agent_runs row per agent
+#                                              invocation (leader, implementer, reviewer, spec_author, nested
+#                                              spawns) with role, label, parent/depth, model, duration and token
+#                                              usage — never transcript content. Runs are attributed to the harness
+#                                              session whose window contains their start. --transcript reads only
+#                                              that file (the SubagentStop hook passes it); --since is an ISO
+#                                              date/time or Nd/Nh. Any parse/IO problem is a [WARN]; exits 0.
+#   stats [TARGET]                            agent invocation tree (parent -> children) per feature with per-run
+#                                              duration/tokens, totals per feature and per project, plus agent effort
+#                                              vs. union of agent intervals vs. session elapsed (see
+#                                              harness/instructions/timing.md); TARGET limits it to one feature
 
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -1567,6 +1580,26 @@ COMMIT;"
   ok "soft-deleted feature $target (and its specs)"
 }
 
+# record-usage/stats live in scripts/agent_usage.py (python3 stdlib only).
+# record-usage must never block the caller (SubagentStop hook, leader): a
+# missing python3/script is a [WARN] and exit 0, same as every parse problem.
+cmd_record_usage() {
+  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$SCRIPT_DIR/agent_usage.py" ]; then
+    warn "record-usage needs python3 and scripts/agent_usage.py (re-run install.sh) — skipping"
+    return 0
+  fi
+  python3 "$SCRIPT_DIR/agent_usage.py" --db "$DB_PATH" --project-slug "$PROJECT_SLUG" \
+    collect --project-root "$(pwd)" "$@" || true
+}
+
+cmd_stats() {
+  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$SCRIPT_DIR/agent_usage.py" ]; then
+    fail "stats needs python3 and scripts/agent_usage.py (re-run install.sh)"
+    exit 1
+  fi
+  python3 "$SCRIPT_DIR/agent_usage.py" --db "$DB_PATH" --project-slug "$PROJECT_SLUG" stats "$@"
+}
+
 cmd_snapshot() {
   bash "$SCRIPT_DIR/snapshot.sh"
 }
@@ -1635,6 +1668,8 @@ main() {
     supersede) cmd_supersede "$@" ;;
     unsupersede) cmd_unsupersede "$@" ;;
     check-blockers) cmd_check_blockers ;;
+    record-usage) cmd_record_usage "$@" ;;
+    stats) cmd_stats "$@" ;;
     *)
       fail "unknown subcommand: $sub"
       print_usage >&2

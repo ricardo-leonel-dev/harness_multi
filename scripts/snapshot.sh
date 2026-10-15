@@ -53,6 +53,23 @@ sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, a
       echo "## Notes"
       jq -r '.[] | "- \(.created_at) \(.entry)"' <<<"$notes"
     fi
+    # Filled by `harness.sh record-usage`; numbers only. Summed durations are
+    # agent effort, not wall time — `harness.sh stats` shows the full tree.
+    runs=$(sqlite3 -json "$DB_PATH" "SELECT agent_role, label, runtime, model, spawn_depth, started_at,
+      duration_seconds, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+      reasoning_tokens, total_tokens FROM agent_runs
+      WHERE feature_id=$fid AND deleted_at IS NULL ORDER BY started_at, id;")
+    if [ -n "$runs" ] && [ "$runs" != "[]" ]; then
+      echo
+      echo "## Agent usage"
+      echo
+      echo "| agent | runtime | model | started_at | duration_s | input | cache_read | cache_write | output | reasoning | total |"
+      echo "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|"
+      jq -r 'def n: if . == null then "-" else tostring end;
+        def esc: tostring | gsub("\\|"; "/");
+        (.[] | "| \(if (.spawn_depth // 0) > 0 then "&nbsp;&nbsp;" * .spawn_depth else "" end) \(.agent_role // "?" | esc)\(if .label then " (" + (.label | esc) + ")" else "" end) | \(.runtime) | \(.model // "-" | esc) | \(.started_at // "-") | \(.duration_seconds | n) | \(.input_tokens | n) | \(.cache_read_tokens | n) | \(.cache_write_tokens | n) | \(.output_tokens | n) | \(.reasoning_tokens | n) | \(.total_tokens | n) |"),
+        "| **total** | | | | \(map(.duration_seconds // 0) | add * 1000 | round / 1000) | \(map(.input_tokens // 0) | add) | \(map(.cache_read_tokens // 0) | add) | \(map(.cache_write_tokens // 0) | add) | \(map(.output_tokens // 0) | add) | \(map(.reasoning_tokens // 0) | add) | \(map(.total_tokens // 0) | add) |"' <<<"$runs"
+    fi
   } > "$file"
 done
 

@@ -105,6 +105,43 @@ create table specs (
 create unique index specs_local_id on specs (project_id, local_id);
 create unique index specs_feature_active on specs (feature_id) where deleted_at is null;
 
+-- One row per agent invocation, mirroring SQLite's agent_runs (filled locally
+-- by `record-usage`; see db/schema.sqlite.sql for the token column semantics:
+-- total_tokens = input + cache_read + cache_write + output, reasoning is a
+-- subset of output). Numbers/ids/timestamps only — never transcript content.
+create table agent_runs (
+  id bigserial primary key,
+  project_id uuid not null references projects(id) on delete cascade,
+  local_id bigint not null,   -- agent_runs.id from the SQLite primary
+  session_id bigint references session_log(id) on delete set null,
+  feature_id bigint references features(id) on delete set null,
+  runtime text not null check (runtime in ('claude', 'codex')),
+  agent_role text,
+  label text,
+  external_id text not null,
+  parent_external_id text,
+  spawn_depth integer,
+  model text,
+  started_at timestamptz,
+  finished_at timestamptz,
+  duration_seconds double precision,
+  input_tokens bigint,
+  cache_read_tokens bigint,
+  cache_write_tokens bigint,
+  output_tokens bigint,
+  reasoning_tokens bigint,
+  total_tokens bigint,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  deleted_at timestamptz
+);
+
+create unique index agent_runs_local_id on agent_runs (project_id, local_id);
+create unique index agent_runs_external_active on agent_runs (project_id, runtime, external_id)
+  where deleted_at is null;
+create index idx_agent_runs_feature on agent_runs (feature_id, started_at);
+create index idx_agent_runs_session on agent_runs (session_id);
+
 create index idx_features_project_status on features (project_id, status);
 create index idx_session_log_project_closed on session_log (project_id, closed_at);
 create index idx_session_entries_session on session_log_entries (session_id, created_at);
@@ -114,3 +151,4 @@ create index idx_specs_feature on specs (feature_id);
 create view active_features as select * from features where deleted_at is null;
 create view active_sessions as select * from session_log where deleted_at is null;
 create view active_specs as select * from specs where deleted_at is null;
+create view active_agent_runs as select * from agent_runs where deleted_at is null;
