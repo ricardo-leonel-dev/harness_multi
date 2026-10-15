@@ -42,10 +42,15 @@ transcript content. Each run is attributed to the harness session whose window c
 start (else the one it overlaps most; else none). It is idempotent and best-effort: parse
 problems are `[WARN]`s and it always exits 0.
 
-- Claude Code: the installed `SubagentStop` hook (`.claude/settings.json`) runs it after each
+- Both runtimes: `./init.sh` runs it on every invocation (start of session, before declaring
+  work done, and from the Claude Code `Stop` hook), before the snapshot and the Postgres/Supabase
+  mirror sync, so both always see fresh `agent_runs`. It uses the default `--since` window, prints
+  one `[OK]`/`[WARN]` line and never changes init's exit status. Opt out with
+  `"record_agent_usage": false` in `.harness.json` (default true).
+- Claude Code: the installed `SubagentStop` hook (`.claude/settings.json`) also runs it after each
   subagent with that subagent's and the leader's transcript paths.
-- Codex CLI has no such hook: the leader runs `scripts/harness.sh record-usage` after each
-  subagent finishes and before its final report (harmless to rerun under Claude Code too).
+- Codex CLI has no such hook: `./init.sh` covers it; the leader may still run
+  `scripts/harness.sh record-usage` after each subagent and before its final report (idempotent).
 
 `scripts/harness.sh stats [TARGET]` prints the invocation tree (parent -> children) per feature
 with per-run duration/tokens and totals, plus summed agent effort, the union of agent intervals,

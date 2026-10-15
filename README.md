@@ -302,8 +302,10 @@ bypasses independent review.
 upserts one `agent_runs` row per agent invocation (leader, implementer, every
 reviewer pass, spec_author, nested spawns) with parent/depth, model, duration and
 input/cache/output/reasoning/total tokens — numbers only, never transcript content.
-Claude Code runs it from the scaffolded `SubagentStop` hook; under Codex CLI the
-leader runs it after each subagent. `scripts/harness.sh stats [feature]` prints the
+`./init.sh` runs it automatically for both runtimes (best-effort, before the snapshot
+and mirror sync, one `[OK]`/`[WARN]` line, never affects init's exit status; set
+`"record_agent_usage": false` in `.harness.json` to opt out). Claude Code also runs it
+from the scaffolded `SubagentStop` hook, and the leader may rerun it (idempotent). `scripts/harness.sh stats [feature]` prints the
 invocation tree with per-run and per-feature/project totals. Covered by
 `python3 tests/agent_usage_test.py`. Development errors in an agent’s own code/generator/tests
 are corrected as normal iteration; genuine external/environment blockers still need

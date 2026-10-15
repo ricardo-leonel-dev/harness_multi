@@ -312,6 +312,53 @@ INSERT INTO session_log (id, project_id, feature_id, agent, started_at, closed_a
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('recorded 0 agent run(s)', result.stdout)
 
+    def init(self):
+        """Run init.sh with a sync stub that reports how many agent_runs exist when it runs."""
+        shutil.copy(ROOT / 'init.sh', self.project / 'init.sh')
+        for doc in ('docs/architecture.md', 'docs/conventions.md', 'docs/verification.md', 'CHECKPOINTS.md'):
+            (self.project / doc).parent.mkdir(parents=True, exist_ok=True)
+            (self.project / doc).write_text('# doc\n')
+        (self.project / 'scripts/sync_postgres.sh').write_text(
+            '#!/usr/bin/env bash\ncd "$(dirname "$0")/.." && echo "SYNC_SAW_RUNS=$(sqlite3 harness.db '
+            '"SELECT count(*) FROM agent_runs" 2>/dev/null || echo none)"\n')
+        return subprocess.run(['bash', 'init.sh'], cwd=self.project, env=self.env, capture_output=True, text=True)
+
+    def usage_lines(self, output):
+        return [line for line in output.splitlines() if not line.startswith('──')
+                and ('agent usage' in line or 'record_agent_usage' in line)]
+
+    def test_init_records_usage_before_mirror_sync(self):
+        result = self.init()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('SYNC_SAW_RUNS=12', result.stdout)
+        lines = self.usage_lines(result.stdout)
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertIn('recorded 12 agent run(s)', lines[0])
+        self.assertIn('[WARN]', lines[0])  # the broken fixtures collapse into one counted warning
+        self.assertNotIn('garbage.jsonl', result.stdout + result.stderr)
+
+    def test_init_exit_status_unaffected_when_record_usage_fails_or_is_missing(self):
+        script = self.project / 'scripts/agent_usage.py'
+        script.write_text('import sys\nsys.stderr.write("Traceback: boom\\n")\nsys.exit(3)\n')
+        failed = self.init()
+        self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertEqual(len(self.usage_lines(failed.stdout)), 1, failed.stdout)
+        self.assertIn('agent usage not recorded', failed.stdout)
+        self.assertNotIn('boom', failed.stdout + failed.stderr)
+        script.unlink()
+        missing = self.init()
+        self.assertEqual(missing.returncode, 0, missing.stdout + missing.stderr)
+        self.assertIn('agent usage not recorded', missing.stdout)
+        self.assertIn('SYNC_SAW_RUNS=0', missing.stdout)
+
+    def test_init_opt_out_skips_record_usage(self):
+        (self.project / '.harness.json').write_text(
+            '{"project_slug":"t","db_path":"harness.db","snapshot_path":"state","record_agent_usage":false}')
+        result = self.init()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('record_agent_usage is false', result.stdout)
+        self.assertIn('SYNC_SAW_RUNS=0', result.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()

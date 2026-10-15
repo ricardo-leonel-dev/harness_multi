@@ -127,8 +127,9 @@ initial independent verification and required project gates still apply.
 After each subagent finishes (implementer, reviewer, spec_author, research) and again before your
 final report, run `scripts/harness.sh record-usage`. It records every agent invocation's duration
 and token usage in `harness.db` (best-effort, idempotent, always exits 0 — never let it block you).
-Codex CLI has no hook for this, so it only happens if you run it; under Claude Code the
-`SubagentStop` hook already runs it, and rerunning is harmless.
+`./init.sh` now runs it automatically for both Claude Code and Codex CLI (before the mirror sync;
+opt-out `"record_agent_usage": false` in `.harness.json`), and Claude Code's `SubagentStop` hook
+also runs it; your call is a belt-and-braces refresh, and rerunning is harmless.
 
 When timing is requested, read `harness/instructions/timing.md` and report agent intervals and
 tokens from `scripts/harness.sh stats [feature]` (summed durations are agent effort, not wall

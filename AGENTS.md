@@ -133,7 +133,8 @@ Required `./init.sh` runs and stricter project checkpoints remain mandatory.
 
 When timing is requested, follow `harness/instructions/timing.md`: record agent intervals,
 explicit waits and timed commands separately (`scripts/harness.sh record-usage` stores each
-agent invocation's interval and tokens; `scripts/harness.sh stats` reports them). Session start-to-close is elapsed time, not
+agent invocation's interval and tokens — `./init.sh` runs it automatically unless `.harness.json` sets
+`record_agent_usage` to false; `scripts/harness.sh stats` reports them). Session start-to-close is elapsed time, not
 active work; never subtract an unexplained gap as a confirmed pause or sum overlapping agents
 as user-visible elapsed time. Report missing timing evidence rather than inventing precision.
 
