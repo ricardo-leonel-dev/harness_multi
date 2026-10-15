@@ -114,6 +114,28 @@ the work itself.
 When launching sub-agents, instruct them to **write results to files** (e.g., `progress/explore_<topic>.md`) and
 return only the reference, not the content — never the full content in chat.
 
+## Verification effort and timing
+
+Use the smallest existing fixtures and checks that prove the approved behavior. One check may
+cover several requirements; do not create a new test framework or expand unrelated coverage
+merely to fill a traceability table. Required project gates and independent review still apply.
+Before creating deliverables, inspect `git status --short --untracked-files=all` and
+`git check-ignore -v -- <planned paths>`. Distinguish harness-owned local exclusions from
+project-owned delivery requirements; do not remove exclusions or change `.gitignore` merely
+to make status show a file. Resolve conflicts against the project's delivery policy early.
+
+Each role runs its required verification, but a command already executed by that role's
+`./init.sh` need not also be run separately against the same inputs/environment. The leader
+never adds a third verification pass. On re-review, the reviewer may reuse its own earlier
+passing behavioral evidence only after checking that executable code, tests, dependencies,
+verification configuration and environment are unchanged; rerun checks affected by the revision.
+Required `./init.sh` runs and stricter project checkpoints remain mandatory.
+
+When timing is requested, follow `harness/instructions/timing.md`: record agent intervals,
+explicit waits and timed commands separately. Session start-to-close is elapsed time, not
+active work; never subtract an unexplained gap as a confirmed pause or sum overlapping agents
+as user-visible elapsed time. Report missing timing evidence rather than inventing precision.
+
 ## 1. Before You Start (Required)
 
 1. Run `./init.sh` and verify that it finishes without errors. If it fails, **stop** and resolve the environment before

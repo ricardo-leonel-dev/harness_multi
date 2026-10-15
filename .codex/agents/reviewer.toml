@@ -77,6 +77,16 @@ or PR descriptions; use conventional commits only.
    stale failures", not "all tests pass". Without an accepted applicable baseline, require ordinary green tests.
    Install preserves project-owned `CHECKPOINTS.md`: if it conflicts with this policy, require explicit
    local alignment before approval; do not silently override it.
+   Avoid duplicate execution within this review: if your `./init.sh` runs the required suite
+   with the same inputs, scope and environment, its actual execution satisfies that suite gate.
+   Separately execute checks that init does not cover. The implementer's run never replaces
+   your first independent behavioral verification.
+   On re-review, inspect the actual revision since your prior review. For prose or Git-exclusion-only
+   changes, reuse your own earlier passing behavioral evidence only after confirming executable
+   code, tests, dependencies, verification configuration and environment are unchanged. Record
+   the earlier command/result and why it still applies; verify the changed prose/exclusions.
+   Rerun affected behavior if any relevant input changed or applicability is uncertain. This
+   does not waive mandatory init runs, project checkpoints, failures or the recorded review gate.
 6. Iterate through `CHECKPOINTS.md`. Mark `[x]` those that are met, `[ ]` those that are not — including
    the C6 group if present and the feature has `sdd=1`; omit C6 (or mark it N/A) for `sdd=0` features.
 7. Use the **Write tool** to create `progress/review.md` with the block below — this is a required

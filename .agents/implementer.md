@@ -30,6 +30,12 @@ or PR descriptions; use conventional commits only.
      pending one). This atomically marks the feature `in_progress` and opens a session — there is no separate "save"
      step, and a second concurrent claim is rejected by the database, not just discouraged by convention.
 3. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
+   Before creating deliverables, check `git status --short --untracked-files=all` and
+   `git check-ignore -v -- <planned paths>`. A check-ignore exit 1 means no matching exclusion.
+   Preserve harness-owned local exclusions. Resolve project delivery conflicts early against
+   the project's policy; do not remove exclusions merely to expose files in status.
+   Reuse existing fixtures/runners and keep checks proportional to the approved behavior;
+   one meaningful assertion may cover several requirements without duplicating tests.
    **Configured PostgreSQL mock data:** when `harness/instructions/mock-data.md` and
    `scripts/mock_data.py` exist and `.harness.json::postgres_schemas` is a non-empty array,
    read that guide and execute its agent workflow yourself. Choose the dataset base from
@@ -69,6 +75,11 @@ or PR descriptions; use conventional commits only.
    applicability, executed commands, results and remaining `[STALE]` failures in the handoff. Without an
    accepted applicable baseline, require ordinary green tests. An incompatible project-owned checkpoint
    requires explicit local alignment before closure, not an automatic override.
+   Inspect `verify_command` before selecting commands. If this role's `./init.sh` already
+   executes a required suite with the same inputs, scope and environment, record that execution
+   as evidence instead of running the identical suite separately. Separate checks are still
+   needed for behavior not covered there; independent reviewer execution remains required.
+   Record the actual command, result and applicable revision/environment in the handoff.
    Capture init output — a `[WARN]` line (e.g. mirror sync skipping) is not a verification failure,
    but note it down for step 9.
    For configured mock-data tasks, also complete the guide's online compatibility check,
@@ -96,7 +107,11 @@ or PR descriptions; use conventional commits only.
      it — if it fails with that error, do not try to work around it (e.g. editing `harness.db` directly); it
      means the reviewer's approval never actually got recorded, so stop and report that back to the leader.
    - **Changes requested** — address the required changes from `progress/review.md`, return to step 4,
-     then re-verify (step 7) and re-report readiness (step 8). Do not log out until a subsequent review approves.
+     then re-verify (step 7) and re-report readiness (step 8). State exactly what changed since
+     the reviewed version and run checks affected by that change. Keep the mandatory init gate;
+     do not additionally repeat separate behavioral suites for a prose or Git-exclusion-only
+     revision when executable code, tests, dependencies, verification config and environment
+     are unchanged. Do not log out until a subsequent review approves.
 
 Optional closure measurement: see `harness/instructions/timing.md`. Wrap explicit evidence,
 init and approved log-out commands only when timing is requested; no timing mechanism
