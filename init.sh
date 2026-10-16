@@ -164,6 +164,36 @@ else
     warn "Linter script not found; skipping"
 fi
 
+echo ""
+echo "── 4.6. Recording agent usage (best-effort) ────────────"
+
+# Runs before the snapshot and the mirror sync so both see fresh agent_runs,
+# for Claude Code and Codex CLI alike (this script also runs from the Claude
+# Code Stop hook). Cheap per turn: the --since window plus skipping transcripts
+# unchanged since they were last parsed. Bounded: --max-seconds is the primary
+# limit (macOS has no timeout(1)); timeout/gtimeout, when present, is only an
+# outer guard. Never affects EXIT_CODE; per-file warnings collapse into one line.
+# Opt out with "record_agent_usage": false in .harness.json.
+if jq -e '.record_agent_usage == false' .harness.json >/dev/null 2>&1; then
+  ok "record_agent_usage is false in .harness.json (skipping)"
+else
+  USAGE_GUARD=()
+  if command -v timeout >/dev/null 2>&1; then USAGE_GUARD=(timeout 30)
+  elif command -v gtimeout >/dev/null 2>&1; then USAGE_GUARD=(gtimeout 30); fi
+  USAGE_OUT="$(${USAGE_GUARD[@]+"${USAGE_GUARD[@]}"} bash "$SCRIPT_DIR/scripts/harness.sh" record-usage \
+    --max-seconds 15 2>&1 | sed $'s/\033\\[[0-9;]*m//g')" || true
+  USAGE_RECORDED="$(printf '%s\n' "$USAGE_OUT" | grep -o 'recorded [0-9]* agent run(s).*' | tail -n 1)"
+  USAGE_WARNS="$(printf '%s\n' "$USAGE_OUT" | grep -c '\[WARN\]')"
+  if [ -n "$USAGE_RECORDED" ] && [ "${USAGE_WARNS:-0}" -eq 0 ]; then
+    ok "agent usage: $USAGE_RECORDED"
+  elif [ -n "$USAGE_RECORDED" ]; then
+    warn "agent usage: $USAGE_RECORDED; $USAGE_WARNS warning(s) — run scripts/harness.sh record-usage for details"
+  else
+    warn "agent usage not recorded — run scripts/harness.sh record-usage for details (continuing)"
+  fi
+fi
+
+echo ""
 echo "── 5. Regenerating markdown snapshot ───────────────────"
 
 if bash "$SCRIPT_DIR/scripts/snapshot.sh"; then

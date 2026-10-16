@@ -180,8 +180,9 @@ cp "$TOOLKIT_DIR/init.sh" "$TARGET_DIR/init.sh"
 mkdir -p "$TARGET_DIR/scripts"
 cp "$TOOLKIT_DIR"/scripts/*.sh "$TARGET_DIR/scripts/"
 cp "$TOOLKIT_DIR/scripts/time_phase.py" "$TARGET_DIR/scripts/time_phase.py"
+cp "$TOOLKIT_DIR/scripts/agent_usage.py" "$TARGET_DIR/scripts/agent_usage.py"
 chmod +x "$TARGET_DIR/init.sh" "$TARGET_DIR"/scripts/*.sh
-ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*.toml, init.sh, scripts/*.sh"
+ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*.toml, init.sh, scripts/*.sh, scripts/{time_phase,agent_usage}.py"
 
 # Shared instructions are harness-owned and refreshed even in existing projects.
 mkdir -p "$TARGET_DIR/harness/instructions"
@@ -212,6 +213,9 @@ fi
 mkdir -p "$TARGET_DIR/.claude"
 if [ -f "$TARGET_DIR/.claude/settings.json" ]; then
   warn ".claude/settings.json already exists — leaving as-is (may have project-specific hooks)"
+  if ! jq -e '.hooks.SubagentStop' "$TARGET_DIR/.claude/settings.json" >/dev/null 2>&1; then
+    warn "  it has no SubagentStop hook: copy the record-usage hook from templates/settings.json.tmpl to log agent usage automatically"
+  fi
 else
   cp "$TOOLKIT_DIR/templates/settings.json.tmpl" "$TARGET_DIR/.claude/settings.json"
   ok "scaffolded .claude/settings.json (Claude Code hooks: verify_command after edits, init.sh on session stop — Codex CLI has no equivalent hook mechanism, see docs/specs.md)"
@@ -353,7 +357,7 @@ exclude_harness_files() {
   for name in "$TOOLKIT_DIR"/scripts/*.sh; do entries="$entries scripts/${name##*/}"; done
   # harness/ (above) already covers harness/test_helpers/; project-owned Tier 2
   # helpers live outside it (test_helpers.project_specific_dir) so git sees them.
-  entries="$entries scripts/mock_data.py scripts/time_phase.py scripts/assemble_migration.py scripts/build_traceability.sh scripts/templates/acceptance_test_prologue.sql"
+  entries="$entries scripts/mock_data.py scripts/time_phase.py scripts/agent_usage.py scripts/assemble_migration.py scripts/build_traceability.sh scripts/templates/acceptance_test_prologue.sql"
 
   begin="# >>> harness-managed: /$prefix (written by install.sh — re-run it instead of editing)"
   end="# <<< harness-managed: /$prefix"

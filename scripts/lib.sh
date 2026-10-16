@@ -248,6 +248,69 @@ COMMIT;
 SQL
 fi
 
+# Adds the agent_runs table: one row per agent invocation (leader, implementer,
+# reviewer, spec_author, nested spawns) with duration and token usage, filled
+# by `record-usage` (scripts/agent_usage.py) from Claude Code transcripts and
+# Codex CLI rollouts. A brand-new table, so a plain CREATE ... IF NOT EXISTS
+# gated on a sqlite_master probe is enough (no rebuild). Keep in sync with
+# db/schema.sqlite.sql.
+if [ -z "$(sqlite3 "$DB_PATH" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs';")" ]; then
+  sqlite3 "$DB_PATH" <<'SQL'
+.bail on
+BEGIN TRANSACTION;
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  session_id INTEGER REFERENCES session_log(id) ON DELETE SET NULL,  -- harness session whose window contains the run
+  feature_id INTEGER REFERENCES features(id) ON DELETE SET NULL,     -- that session's feature
+  runtime TEXT NOT NULL CHECK (runtime IN ('claude', 'codex')),
+  agent_role TEXT,                             -- 'leader' for a main session; subagent type otherwise
+  label TEXT,                                  -- Claude meta.json description / Codex agent_nickname or agent_path
+  external_id TEXT NOT NULL,                   -- Claude session/agent id, Codex thread id
+  parent_external_id TEXT,                     -- spawning session/thread id (NULL for depth 0)
+  spawn_depth INTEGER,                         -- 0 = top-level leader/main session
+  model TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  duration_seconds REAL,
+  input_tokens INTEGER,
+  cache_read_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  output_tokens INTEGER,
+  reasoning_tokens INTEGER,
+  total_tokens INTEGER,
+  source_path TEXT,                            -- transcript/rollout file the numbers came from (local only: never mirrored)
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_external_active ON agent_runs(project_id, runtime, external_id)
+  WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_agent_runs_feature ON agent_runs(feature_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id);
+COMMIT;
+SQL
+fi
+
+# Adds agent_usage_files: per-transcript mtime/size keys so record-usage skips
+# files unchanged since they were last parsed. Local only (sync_postgres.sh
+# never mirrors it). Brand-new table: CREATE ... IF NOT EXISTS is enough.
+# Keep in sync with db/schema.sqlite.sql.
+if [ -z "$(sqlite3 "$DB_PATH" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_usage_files';")" ]; then
+  sqlite3 "$DB_PATH" <<'SQL'
+.bail on
+CREATE TABLE IF NOT EXISTS agent_usage_files (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,                          -- transcript/rollout file record-usage last parsed
+  mtime_ns INTEGER NOT NULL,                   -- change key: unchanged mtime+size => skipped
+  size INTEGER NOT NULL,
+  recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (project_id, path)
+);
+SQL
+fi
+
 db() {
   sqlite3 "$DB_PATH" "$@"
 }
