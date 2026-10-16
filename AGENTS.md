@@ -132,7 +132,9 @@ verification configuration and environment are unchanged; rerun checks affected 
 Required `./init.sh` runs and stricter project checkpoints remain mandatory.
 
 When timing is requested, follow `harness/instructions/timing.md`: record agent intervals,
-explicit waits and timed commands separately. Session start-to-close is elapsed time, not
+explicit waits and timed commands separately (`scripts/harness.sh record-usage` stores each
+agent invocation's interval and tokens — `./init.sh` runs it automatically unless `.harness.json` sets
+`record_agent_usage` to false; `scripts/harness.sh stats` reports them). Session start-to-close is elapsed time, not
 active work; never subtract an unexplained gap as a confirmed pause or sum overlapping agents
 as user-visible elapsed time. Report missing timing evidence rather than inventing precision.
 
@@ -156,6 +158,7 @@ as user-visible elapsed time. Report missing timing evidence rather than inventi
 | `scripts/notion_check.sh` | Best-effort curl+jq Notion task check (see "Notion Task Intake" above)   | Setting up or troubleshooting Notion task intake      |
 | `scripts/notion_set_status.sh` | Best-effort curl+jq Notion status push-back, called by `claim`/`log-out` | Setting up or troubleshooting Notion status push-back |
 | `scripts/notion_create_feature.sh` | Creates a new Notion page (feature card) — used for cross-project dependency requests (§8) | Setting up or troubleshooting cross-project requests |
+| `scripts/agent_usage.py` | Backs `harness.sh record-usage`/`stats`: per-agent duration + token usage (Claude Code transcripts, Codex rollouts) into `harness.db`'s `agent_runs` | After each subagent finishes (leader), or when timing/usage is requested |
 | `docs/architecture.md`    | What "doing a good job" means in this project                            | Before implementing                   |
 | `docs/conventions.md`     | Style rules, naming conventions, structure                               | Before writing code                   |
 | `harness/instructions/persona.md` | Harness-owned voice, tone and commit rules (no AI attribution) | At startup, before any reply or commit |

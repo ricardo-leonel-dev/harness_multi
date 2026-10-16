@@ -120,6 +120,65 @@ CREATE TABLE specs (
 
 CREATE UNIQUE INDEX specs_feature_active ON specs(feature_id) WHERE deleted_at IS NULL;
 
+-- One row per agent invocation (leader/main session, implementer, reviewer,
+-- spec_author, research/nested spawns) read from Claude Code transcripts or
+-- Codex CLI rollouts by scripts/agent_usage.py (record-usage). Numbers,
+-- role, model, timestamps and ids only — never prompt/transcript content.
+-- Token columns (NULL when the runtime doesn't report them):
+--   input_tokens       uncached input (Codex: input_tokens - cached - cache_write)
+--   cache_read_tokens  Claude cache_read_input_tokens / Codex cached_input_tokens
+--   cache_write_tokens Claude cache_creation_input_tokens / Codex cache_write_input_tokens
+--   output_tokens      output incl. reasoning (Codex reasoning is a subset of it)
+--   reasoning_tokens   Codex reasoning_output_tokens; NULL for Claude (not reported)
+--   total_tokens       input + cache_read + cache_write + output (Claude: summed;
+--                      Codex: its own cumulative total_tokens, the same quantity)
+-- duration_seconds = finished_at - started_at of the transcript (first to last
+-- event): an agent interval, not CPU time. Summed durations are agent effort,
+-- not wall time (see harness/instructions/timing.md).
+CREATE TABLE agent_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  session_id INTEGER REFERENCES session_log(id) ON DELETE SET NULL,  -- harness session whose window contains the run
+  feature_id INTEGER REFERENCES features(id) ON DELETE SET NULL,     -- that session's feature
+  runtime TEXT NOT NULL CHECK (runtime IN ('claude', 'codex')),
+  agent_role TEXT,                             -- 'leader' for a main session; subagent type otherwise
+  label TEXT,                                  -- Claude meta.json description / Codex agent_nickname or agent_path
+  external_id TEXT NOT NULL,                   -- Claude session/agent id, Codex thread id
+  parent_external_id TEXT,                     -- spawning session/thread id (NULL for depth 0)
+  spawn_depth INTEGER,                         -- 0 = top-level leader/main session
+  model TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  duration_seconds REAL,
+  input_tokens INTEGER,
+  cache_read_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  output_tokens INTEGER,
+  reasoning_tokens INTEGER,
+  total_tokens INTEGER,
+  source_path TEXT,                            -- transcript/rollout file the numbers came from (local only: never mirrored)
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+
+CREATE UNIQUE INDEX agent_runs_external_active ON agent_runs(project_id, runtime, external_id)
+  WHERE deleted_at IS NULL;
+CREATE INDEX idx_agent_runs_feature ON agent_runs(feature_id, started_at);
+CREATE INDEX idx_agent_runs_session ON agent_runs(session_id);
+
+-- Incremental record-usage bookkeeping (local only: never mirrored to Postgres).
+-- One row per transcript/rollout already parsed; record-usage skips a file whose
+-- mtime_ns and size still match (--full ignores this table).
+CREATE TABLE agent_usage_files (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,                          -- transcript/rollout file record-usage last parsed
+  mtime_ns INTEGER NOT NULL,                   -- change key: unchanged mtime+size => skipped
+  size INTEGER NOT NULL,
+  recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (project_id, path)
+);
+
 CREATE INDEX idx_features_project_status ON features(project_id, status);
 CREATE INDEX idx_session_log_project_closed ON session_log(project_id, closed_at);
 CREATE INDEX idx_session_entries_session ON session_log_entries(session_id, created_at);

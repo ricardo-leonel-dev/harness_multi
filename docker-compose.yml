@@ -31,6 +31,7 @@ services:
       - ./db/rpc/upsert_session.sql:/docker-entrypoint-initdb.d/04_upsert_session.sql:ro
       - ./db/rpc/upsert_spec.sql:/docker-entrypoint-initdb.d/05_upsert_spec.sql:ro
       - ./db/migrations/0001_sdd.sql:/docker-entrypoint-initdb.d/06_migration_0001_sdd.sql:ro
+      - ./db/rpc/upsert_agent_run.sql:/docker-entrypoint-initdb.d/07_upsert_agent_run.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
