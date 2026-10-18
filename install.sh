@@ -189,6 +189,9 @@ mkdir -p "$TARGET_DIR/harness/instructions"
 cp "$TOOLKIT_DIR/shared/coverage.md" "$TARGET_DIR/harness/instructions/coverage.md"
 cp "$TOOLKIT_DIR/shared/persona.md" "$TARGET_DIR/harness/instructions/persona.md"
 cp "$TOOLKIT_DIR/shared/timing.md" "$TARGET_DIR/harness/instructions/timing.md"
+for name in testing lifecycle notion cross-project; do
+  cp "$TOOLKIT_DIR/shared/$name.md" "$TARGET_DIR/harness/instructions/$name.md"
+done
 if [ "$PROFILE" = postgres ]; then
   mkdir -p "$TARGET_DIR/scripts/templates"
   cp "$TOOLKIT_DIR/profiles/postgres/mock_data.py" "$TARGET_DIR/scripts/mock_data.py"
