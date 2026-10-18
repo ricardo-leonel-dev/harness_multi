@@ -181,7 +181,8 @@
 #   test [file...]                            run tests with output to progress/test_last.log, printing only
 #                                              the result (and the log's tail on failure): with files and
 #                                              .harness.json::test_targeted_command (its {files} placeholder
-#                                              becomes the quoted paths) only those; else verify_command.
+#                                              becomes the quoted paths; {files:FLAG} repeats FLAG before each
+#                                              one, e.g. {files:--include}) only those; else verify_command.
 #                                              Exits with the tests' status
 
 set -u
@@ -1722,7 +1723,8 @@ FROM features f WHERE f.id = (SELECT feature_id FROM session_log
 # result (plus the log's tail on failure) is printed; grep the log instead of
 # re-running. With files and .harness.json::test_targeted_command set, runs
 # only those (its {files} placeholder is replaced with the shell-quoted paths,
-# or they're appended if it has none); otherwise runs verify_command.
+# {files:FLAG} with "FLAG path" per file, or they're appended if it has
+# neither); otherwise runs verify_command.
 cmd_test() {
   local targeted verify cmd quoted="" f
   targeted="$(config '.test_targeted_command' '')"
@@ -1730,7 +1732,13 @@ cmd_test() {
   if [ $# -gt 0 ] && [ -n "$targeted" ]; then
     for f in "$@"; do quoted="$quoted $(printf '%q' "$f")"; done
     quoted="${quoted# }"
-    if [[ "$targeted" == *"{files}"* ]]; then
+    if [[ "$targeted" =~ \{files:([^}]+)\} ]]; then
+      # {files:FLAG} repeats FLAG before each file, for CLIs whose option
+      # takes one value per occurrence (ng test --include a --include b).
+      local token="${BASH_REMATCH[0]}" flag="${BASH_REMATCH[1]}" each=""
+      for f in "$@"; do each="$each $flag $(printf '%q' "$f")"; done
+      cmd="${targeted//"$token"/${each# }}"
+    elif [[ "$targeted" == *"{files}"* ]]; then
       cmd="${targeted//\{files\}/$quoted}"
     else
       cmd="$targeted $quoted"
