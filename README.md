@@ -319,7 +319,9 @@ feature reaches that share of the quota.
 
 - `spec_max_requirements` (default 15, 0 disables): `mark-spec-ready`/`approve-spec`
   refuse a bigger spec; the `spec_author` proposes a split instead (`docs/specs.md`).
-- `test_targeted_command` (optional, `{files}` placeholder): `scripts/harness.sh test
+- `test_targeted_command` (optional, `{files}` placeholder, or `{files:FLAG}` to repeat
+  a flag per file, e.g. `ng test --watch=false {files:--include}`; check it with **two**
+  test files, since a wrong form often works with one): `scripts/harness.sh test
   <file...>` runs only those tests; output goes to `progress/test_last.log`, as does
   `./init.sh`'s full suite. The scaffolded Claude Code hooks no longer run the suite
   after every edit.

@@ -410,8 +410,9 @@ user and creates the parts (`add-feature --sdd --depends-on`, then `supersede` t
 ## 10. Test Runs and Budgets
 
 - **Targeted tests:** `scripts/harness.sh test <file...>` runs only those files via
-  `.harness.json::test_targeted_command` (`{files}` = the quoted paths; e.g. `npx ng test --watch=false
-  --include {files}`), falling back to `verify_command`. Output goes to `progress/test_last.log`; only the result
+  `.harness.json::test_targeted_command` (`{files}` = the quoted paths; `{files:FLAG}` repeats FLAG per file,
+  e.g. `bunx ng test --watch=false {files:--include}`; when setting it, check it with two files — a wrong form
+  often passes with one), falling back to `verify_command`. Output goes to `progress/test_last.log`; only the result
   and the failure tail are printed. `./init.sh` runs the full suite once the same way. Grep the log — never
   re-run a suite just to read its output.
 - **Review budget (advisory):** `log-out` logs `DIFF: code=N, tests=M` for its `--changes` and warns when
