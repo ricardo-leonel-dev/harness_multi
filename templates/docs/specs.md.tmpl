@@ -14,7 +14,7 @@ claim → in_progress → done`.
 Opt a feature in with any of:
 - `scripts/harness.sh add-feature --name <slug> --title <t> --sdd`
 - a `features.seed.json` item with `"sdd": true`
-- a Notion database checkbox property named `SDD` (if Notion intake is configured — see `AGENTS.md` §0)
+- a Notion database checkbox property named `SDD` (if Notion intake is configured — see `harness/instructions/notion.md`)
 
 ## Lifecycle
 
@@ -79,22 +79,71 @@ patterns:
 | Unwanted | `IF <unwanted event> THEN the system SHALL <action>.` |
 
 Hard rules:
-- Each requirement has exactly one verifiable `SHALL` clause — never mix two behaviors into one `R<n>`;
-  split them.
-- No soft/unverifiable verbs ("should probably", "handle appropriately", "supports"). If it can't be
-  turned into a pass/fail test, it isn't a requirement yet — sharpen it or move it to `design.md` as a
-  note instead.
+- **One requirement per business rule**, not one per clause. A business rule is a decision the user
+  recognizes by name ("valid draft name", "bypass toggle"). Its variants (each error, each state) are
+  rows of a case table inside that requirement, not separate `R<n>`s. Two behaviors the user would
+  name differently are two requirements — never mix them.
+- Every case must be verifiable: no soft verbs ("should probably", "handle appropriately",
+  "supports"). If it can't be turned into a pass/fail check, sharpen it or move it to `design.md`.
+- Existing behavior the feature touches but must not change is a **preservation** item (`P<n>`), not
+  a requirement: it needs a test proving it still holds, never new code.
 
 Example:
 
 ```markdown
-## R1
+## R1 — Export to file
 WHEN the user runs `export`, the system SHALL write a JSON file to the given path.
 
-## R2
-IF the output path already exists THEN the system SHALL fail with a non-zero exit code and SHALL NOT
-overwrite the existing file.
+## R2 — Valid draft name
+WHEN the draft name changes, the system SHALL validate it and, while invalid, SHALL disable Export
+and Send.
+
+| Case | Input | Expected |
+|---|---|---|
+| a | empty | error `name_required` |
+| b | contains `/` | error `name_unsupported` |
+| c | matches an existing preset | error `name_duplicate` |
+| d | any case above | Export and Send disabled |
+
+## P1 — Source presets stay read-only
+Opening a source preset still shows it read-only (existing behavior, test only).
 ```
+
+Before this rule, R2 above would have been four requirements (one per error plus the disabled
+buttons) — four test blocks, four traceability rows, four review checks for one decision.
+
+## Scope limit
+
+A spec may have at most **15 requirements** (`.harness.json::spec_max_requirements`, default 15;
+0 disables). `mark-spec-ready` and `approve-spec` refuse a spec above it. Agent cost grows faster
+than linearly with scope — every extra rule adds reads, edits and test runs to one ever-growing
+context — so a feature that needs more is split, not squeezed.
+
+The `spec_author` estimates scope **before** `claim-spec`. If the feature has more than 15
+business rules, or its production code would clearly exceed the review budget (below), it writes
+`progress/split_<name>.md` and reports `split-proposed`, without claiming:
+
+```markdown
+# Split proposal — <name>
+Rules found: 22 (limit 15). Estimated production diff: ~1,100 lines (budget 400).
+
+| Part | Name | Title | Rules | Est. code lines | Depends on |
+|---|---|---|---|---|---|
+| 1 | preset-duplicate | Duplicate a preset | 8 | ~350 | — |
+| 2 | preset-edit-validation | Edit and validate the draft | 9 | ~400 | preset-duplicate |
+| 3 | preset-export | Export and send | 5 | ~300 | preset-edit-validation |
+```
+
+The leader shows it to the user. On approval it creates each part with `add-feature --sdd
+--depends-on <previous>` (plus a Notion card per part if configured) and supersedes the original
+with `supersede <name> --by <first part>`. Each part then gets its own spec and session.
+
+## Review budget (advisory)
+
+About **400 production-code lines** per feature (`.harness.json::review_budget_lines`; 0 disables)
+is what a person can review well in one pass. It is advisory: the split estimate above flags parts
+over it, and `log-out` records a `DIFF: code=N, tests=M` entry for the feature and prints a `[WARN]`
+when code exceeds it. Nothing blocks on it; the logged numbers calibrate future splits.
 
 ## `design.md`
 
@@ -105,13 +154,13 @@ made *within* those boundaries, not restate them.
 
 ## `tasks.md`
 
-Ordered checkboxes (`T1`, `T2`, ...), each tagged with the `R<n>` id(s) it covers:
+Ordered checkboxes (`T1`, `T2`, ...), each tagged with the `R<n>`/`P<n>` id(s) it covers. Write the
+failing test for a rule before the code that satisfies it:
 
 ```markdown
-- [ ] T1 (R1) Add `cmd_export` to the CLI.
-- [ ] T2 (R2) Add the existing-file check.
-- [ ] T3 (R1) Add `test_export_default`.
-- [ ] T4 (R2) Add `test_export_existing_path`.
+- [ ] T1 (R1) Add `test_export_default`, then `cmd_export`.
+- [ ] T2 (R2) Add `test_draft_name_validation` (cases a–d), then the validator.
+- [ ] T3 (P1) Add `test_source_preset_read_only` against the unchanged behavior.
 ```
 
 The `implementer` checks these off in order as it works; the `reviewer` rejects the feature if any are
@@ -119,13 +168,17 @@ left `[ ]` without a documented justification in `progress/impl_<feature>.md`.
 
 ## Traceability
 
-Every `R<n>` must be covered by **at least one concrete, currently-passing test**. The `implementer`
-documents this mapping in `progress/impl_<feature>.md`:
+Every `R<n>` must be covered by **at least one concrete, currently-passing test**, and every case
+row by an assertion — a table-driven test (`it.each`, `@pytest.mark.parametrize`, subtests) is the
+natural shape: one test per rule, one row per case. Every `P<n>` needs one test proving the
+existing behavior still holds. No padding tests beyond that. The `implementer` documents the
+mapping in `progress/impl_<feature>.md`:
 
 ```markdown
 ## Traceability
 - R1 → `test_export_default`
-- R2 → `test_export_existing_path`
+- R2 (a–d) → `test_draft_name_validation` (it.each, 4 rows)
+- P1 → `test_source_preset_read_only`
 ```
 
 The `reviewer` does not trust this claim — it independently confirms each named test exists and

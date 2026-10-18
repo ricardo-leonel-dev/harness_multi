@@ -1,16 +1,5 @@
 {
   "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c \"$(jq -r '.verify_command // empty' .harness.json)\" 2>&1 | tail -5"
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [

@@ -59,10 +59,20 @@ or PR descriptions; use conventional commits only.
    If the feature touches user-facing UI and has **no** such section (e.g. an `sdd=0` feature), load the
    `frontend-design:frontend-design` skill with the Skill tool when it appears in your available skills,
    and record the visual decisions you made in `progress/impl_<feature>.md`.
+   **Reading large files:** locate what you need with `Grep` (or `grep -n`) and `Read` only that line
+   range (`offset`/`limit`); never re-read a whole large file you already read this session. For JSON
+   resources such as i18n catalogs, add or change keys with `jq` or an `Edit` anchored on a neighboring
+   key — don't read the whole file to append to it.
 5. **Write the tests** that validate the acceptance criteria. For an `sdd=1` feature, additionally
    maintain an `R<n> → test` traceability map in `progress/impl_<feature>.md` (see below) — every
    requirement id in `requirements.md` must map to at least one concrete test you can point to by
    file+test-name; a requirement with no mapped test is a gap to close before reporting readiness.
+   One test per rule (table-driven for its cases), one per `P<n>` preservation item, no padding.
+   **Running tests while you iterate:** run only the files you're working on with
+   `scripts/harness.sh test <test-file...>` — it uses `.harness.json::test_targeted_command` (falls back
+   to the full `verify_command` when unset), writes the whole output to `progress/test_last.log`, and
+   prints just the result plus the failure tail. To find a failure detail, `grep -n` that log; never
+   re-run a suite only to read its output again. The full suite runs once, in step 7's `./init.sh`.
 6. As you work, append short notes: `scripts/harness.sh append-log "<what you just did>"`.
 7. **Verify** by running `./init.sh`. If it fails, return to step 4. Read `docs/verification.md` and,
    when installed, `harness/instructions/postgres.md` for the accepted verification policy.
@@ -80,7 +90,8 @@ or PR descriptions; use conventional commits only.
    as evidence instead of running the identical suite separately. Separate checks are still
    needed for behavior not covered there; independent reviewer execution remains required.
    Record the actual command, result and applicable revision/environment in the handoff.
-   Capture init output — a `[WARN]` line (e.g. mirror sync skipping) is not a verification failure,
+   `./init.sh` writes the suite's output to `progress/test_last.log` and prints only the result (and the
+   tail on failure) — grep the log for details. Capture init output — a `[WARN]` line (e.g. mirror sync skipping) is not a verification failure,
    but note it down for step 9.
    For configured mock-data tasks, also complete the guide's online compatibility check,
    fresh disposable reload and feature-specific behavioral tests. Record the base choice
@@ -103,6 +114,8 @@ or PR descriptions; use conventional commits only.
      This closes the session and marks the feature `done` in one step. Capture this command's output too — if it
      (or `./init.sh` from step 7) printed any `[WARN]` line, carry it into your final report per "Communication
      with the leader" below instead of letting it disappear into scrollback the leader/user never reads.
+     `log-out` also prints a `DIFF: code=N, tests=M` line measured from your `--changes`; a `[WARN]` that
+     code exceeds the review budget is advisory — report it like any other warning, don't split or undo.
      `log-out` mechanically refuses to close a session that doesn't have a `record-review approved` verdict on
      it — if it fails with that error, do not try to work around it (e.g. editing `harness.db` directly); it
      means the reviewer's approval never actually got recorded, so stop and report that back to the leader.
