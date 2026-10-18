@@ -332,6 +332,23 @@ Development errors in an agent’s own code/generator/tests are corrected as nor
 iteration; genuine external/environment blockers still need proper recovery or
 reporting.
 
+### Small tasks and learnings
+
+- The leader marks a contained `sdd=0` task `size=small` (`add-feature --size small` /
+  `set-size`) and hands it to the `quick_implementer`. `log-out --quick` closes it without
+  a reviewer only when the change, measured from git against the session's start (files
+  already uncommitted at claim excluded), stays within `quick_max_diff_lines` (80) and
+  `quick_max_files` (4; both configurable in `.harness.json`), touches no dependency file, matches the files declared in
+  `progress/quick_<name>.md` with `Risk: none`, and the last `./init.sh` passed on that
+  same tree. Otherwise it refuses with the reasons and the reviewer runs as usual.
+- An agent that finds the task bigger escalates; the user decides. A rejection runs
+  `hold`: the session keeps the project's slot, so claim and log-out refuse until
+  `unhold` (or `block`).
+- `learn` keeps one lesson of up to 300 characters in `harness.db`; the leader runs
+  `recall <keywords>` once per claim (at most 5 notes) and `forget <id>` drops stale ones.
+  Nothing is loaded automatically.
+Covered by `bash tests/quick_path_test.sh`.
+
 ## Versioned PostgreSQL mock data
 
 Install with `--profile postgres --postgres-database DB --postgres-schemas '["schema"]'`.
