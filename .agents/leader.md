@@ -38,6 +38,17 @@ drafting). When `spec_author` reports `spec-ready -> ... (specs/<name>/)`, **sto
 to the user** — present the three files (or a pointer to them) and explicitly ask for approval before
 doing anything else with that feature.
 
+When `spec_author` reports `split-proposed -> ... (progress/split_<name>.md)` instead, the feature is too
+big for one spec (docs/specs.md "Scope limit"). Show the user the proposal's parts table and ask
+(Claude Code: `AskUserQuestion`) whether to split as proposed. On approval, create each part in order with
+`scripts/harness.sh add-feature --name <part> --title "<title>" --description "<rules it owns>" --sdd
+--depends-on <previous part>` (first part: no `--depends-on`; plus the "Ad-hoc Task → Notion" card flow
+per part when Notion is configured), then `scripts/harness.sh supersede <name> --by <first part>
+--reason "split into <parts>"`, and launch the `spec_author` on the first part. If the user rejects the
+split, relaunch the `spec_author` on the original feature telling it the user wants it as one feature —
+`mark-spec-ready` will still enforce `spec_max_requirements`, so it must merge clauses into rules or the
+user must raise that limit in `.harness.json`.
+
 **The moment the user approves in this conversation, immediately run
 `scripts/harness.sh approve-spec <target> --by "<actual human name>"` yourself** (the leader, not a
 subagent) before doing anything else. This is what turns "the user said yes in chat" into something
@@ -124,6 +135,13 @@ and token usage in `harness.db` (best-effort, idempotent, always exits 0 — nev
 `./init.sh` now runs it automatically for both Claude Code and Codex CLI (before the mirror sync;
 opt-out `"record_agent_usage": false` in `.harness.json`), and Claude Code's `SubagentStop` hook
 also runs it; your call is a belt-and-braces refresh, and rerunning is harmless.
+If its output has a `[WARN] token budget:` line (`.harness.json::token_quota` set and the feature passed
+`token_warn_percent`), tell the user in one line before launching the next agent on that feature, and let
+them decide whether to continue, split the remaining work or stop.
+
+Don't ask subagents to run the full suite repeatedly: implementer and reviewer iterate with
+`scripts/harness.sh test <files>` (targeted, output to `progress/test_last.log`) and run the full suite
+once each through `./init.sh`.
 
 When timing is requested, read `harness/instructions/timing.md` and report agent intervals and
 tokens from `scripts/harness.sh stats [feature]` (summed durations are agent effort, not wall
@@ -166,6 +184,7 @@ Example of a correct instruction for a subagent:
 | Medium (2-3 files, or reference paths already given — own project or another project cited by path) | 1 implementer, then 1 reviewer | No research — implementer reads what it needs directly |
 | Genuinely uncertain scope (relevant location unknown, needs discovery) | 2-3 research subagents, then implementer, then reviewer | Not triggered by "refactor" or "mentions another project" alone |
 | SDD feature, spec not yet drafted (`sdd=1`, `status=pending`) | 1 `spec_author` → human approval (hard stop, see SDD Gate above) → 1 implementer → 1 reviewer | Human approval is a hard stop, not a delegation step |
+| SDD feature over the scope limit (`split-proposed`) | user approves split → `add-feature --sdd --depends-on` per part → `supersede` original → 1 `spec_author` on part 1 | Never draft or implement an oversized spec as one feature |
 | Very complex        | Divide into subtasks and reapply this table                |              |
 
 ## What NOT to do

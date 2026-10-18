@@ -26,7 +26,14 @@ or PR descriptions; use conventional commits only.
 
 1. **Read** `AGENTS.md`, `docs/specs.md` (EARS reference + traceability convention), `docs/architecture.md`,
    `docs/conventions.md`.
-2. **Claim** a feature for drafting. Build `--agent` the same way `implementer.md` does:
+2. **Estimate scope before claiming.** From the feature's (the named target, or the lowest-numbered
+   pending `sdd=1` one) description/acceptance (`scripts/harness.sh status`) and a grep-level look at the code it touches, count its business rules (docs/specs.md
+   "Requirement format") and roughly estimate production-code lines. If it has more than
+   `.harness.json::spec_max_requirements` rules (default 15), or the code clearly exceeds
+   `review_budget_lines` (default 400), do **not** claim: write `progress/split_<name>.md` in the
+   format docs/specs.md "Scope limit" shows and reply `split-proposed` (see below). The leader asks
+   the user and creates the parts.
+3. **Claim** a feature for drafting. Build `--agent` the same way `implementer.md` does:
    `"leader -> spec_author (<your model name>)"`, replacing `<your model name>` with your own real model
    identity — never leave the placeholder literal.
    - Named target: `scripts/harness.sh claim-spec --agent "leader -> spec_author (<model>)" <feature_number-or-name>`.
@@ -34,13 +41,16 @@ or PR descriptions; use conventional commits only.
      lowest-numbered pending `sdd=1` feature). This fails cleanly if no such feature exists — report
      that instead of improvising. This atomically marks the feature `spec_drafting` and opens a
      session, exactly like `claim` does for implementation work.
-3. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
-4. **Create `specs/<name>/`** (the exact `name` you claimed above — this is how `claim`/`mark-spec-ready`/
+4. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
+5. **Create `specs/<name>/`** (the exact `name` you claimed above — this is how `claim`/`mark-spec-ready`/
    `init.sh`/the reviewer later locate it; do not invent a different slug) with exactly 3 files:
-   - **`requirements.md`** — every requirement in strict EARS (see `docs/specs.md`'s table), each with a
-     stable id `R1, R2, ...`. Every requirement must be phrased so it's verifiable by a concrete test;
-     never mix `SHALL` clauses in one requirement, never use soft/unverifiable verbs ("should probably",
-     "handle appropriately").
+   - **`requirements.md`** — one requirement per **business rule** in EARS (see `docs/specs.md`), headed
+     `## R<n> — <rule name>`, with its variants as rows of a case table instead of separate `R<n>`s;
+     existing behavior the feature must keep is a `## P<n>` preservation item (test only, no code).
+     Every case must be verifiable by a concrete test; never merge two rules the user would name
+     differently, never use soft/unverifiable verbs ("should probably", "handle appropriately").
+     `mark-spec-ready` refuses more than `spec_max_requirements` (default 15) — if you hit it, merge
+     clauses into their rule or go back to step 2's split proposal.
    - **`design.md`** — files to touch, new signatures, exceptions/error paths, at least one **discarded
      alternative with a stated reason it was rejected**. Reference `docs/architecture.md`/
      `docs/conventions.md` rather than re-deriving conventions from scratch.
@@ -51,14 +61,16 @@ or PR descriptions; use conventional commits only.
      without a design tool — it is the only design guidance the implementer is guaranteed to receive.
      Claude Code plugin skills (e.g. `frontend-design`) aren't available here; write the section by hand
      from `docs/architecture.md`'s design notes and the existing UI, and say so in it.
-   - **`tasks.md`** — ordered checkboxes `T1, T2, ...`, each tagged with the `R<n>` id(s) it covers (e.g.
-     `- [ ] T3 (R2, R4) Add validation to ...`). This is the map the `implementer` executes against later.
-5. As you draft, `scripts/harness.sh append-log "<what you just did>"`.
-6. When all 3 files are complete and internally consistent (every `R<n>` covered by at least one task),
+   - **`tasks.md`** — ordered checkboxes `T1, T2, ...`, each tagged with the `R<n>`/`P<n>` id(s) it covers
+     (e.g. `- [ ] T3 (R2) Add the table-driven test for cases a–d, then the validator`). This is the map
+     the `implementer` executes against later. Name the test file(s) each task touches, so the implementer
+     can run just those.
+6. As you draft, `scripts/harness.sh append-log "<what you just did>"`.
+7. When all 3 files are complete and internally consistent (every `R<n>` covered by at least one task),
    run `scripts/harness.sh mark-spec-ready`. This verifies the 3 files exist on disk, records
    requirement/task counts, and moves the feature to `spec_ready` — it does **not** trigger
    implementation and does **not** record approval; nothing downstream starts automatically.
-7. **Report readiness to the leader and stop.** You never claim for implementation, never run
+8. **Report readiness to the leader and stop.** You never claim for implementation, never run
    `approve-spec`, and never assume approval — a human must review `specs/<name>/*.md` and the leader
    must run `approve-spec` before anyone claims this feature for implementation.
 
@@ -77,6 +89,12 @@ Your final response is **a single line**:
 
 ```
 spec-ready -> feature <id> spec drafted, awaiting human approval (specs/<name>/)
+```
+
+or, from step 2 (nothing claimed):
+
+```
+split-proposed -> feature <id> exceeds scope, proposal in progress/split_<name>.md
 ```
 
 or

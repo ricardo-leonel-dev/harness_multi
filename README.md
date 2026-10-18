@@ -311,6 +311,21 @@ rescans) and time-bounded (`--max-seconds`, default 20; at the limit it keeps
 partial progress, warns and the next run continues).
 `scripts/harness.sh stats [feature]` prints the invocation tree with per-run and
 per-feature/project totals. Covered by `python3 tests/agent_usage_test.py`.
+Optional `.harness.json` keys `token_quota` (tokens in a full quota) and
+`token_warn_percent` (default 15) make `record-usage` warn once the active
+feature reaches that share of the quota.
+
+### Scope, test runs and review budget
+
+- `spec_max_requirements` (default 15, 0 disables): `mark-spec-ready`/`approve-spec`
+  refuse a bigger spec; the `spec_author` proposes a split instead (`docs/specs.md`).
+- `test_targeted_command` (optional, `{files}` placeholder): `scripts/harness.sh test
+  <file...>` runs only those tests; output goes to `progress/test_last.log`, as does
+  `./init.sh`'s full suite. The scaffolded Claude Code hooks no longer run the suite
+  after every edit.
+- `review_budget_lines` (default 400, 0 disables): `log-out` logs the changed
+  code/test lines and warns, never blocks, above it.
+Covered by `bash tests/scope_discipline_test.sh`.
 Development errors in an agent’s own code/generator/tests are corrected as normal
 iteration; genuine external/environment blockers still need proper recovery or
 reporting.

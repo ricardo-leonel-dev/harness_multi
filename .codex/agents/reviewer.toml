@@ -42,7 +42,9 @@ or PR descriptions; use conventional commits only.
      log is incomplete).
    - For each source file among them, confirm a test file exists that actually imports/exercises *that* file
      — not just any pre-existing, unrelated test elsewhere in the repo.
-   - Actually run that test (or the project's test command) yourself and confirm it passes. A log entry or
+   - Actually run that test yourself and confirm it passes — `scripts/harness.sh test <test-file...>`
+     runs just those files (output in `progress/test_last.log`; grep it rather than re-running to read it).
+     The full suite runs in your step-5 `./init.sh`; don't run it a second time separately. A log entry or
      doc merely claiming "tests passed" is not sufficient; if you cannot run it, that itself is a
      `CHANGES_REQUESTED` reason, not a pass.
    - "This repo has no test suite yet" is never a valid reason to mark C2/C4 `[x]`. `CHECKPOINTS.md`'s
@@ -61,7 +63,9 @@ or PR descriptions; use conventional commits only.
 4b. **For `sdd=1` features only** — verify requirement traceability directly, don't trust
    `progress/impl_<feature>.md`'s claimed `R<n> → test` map: for each `R<n>` in `requirements.md`,
    confirm the test file/name claimed for it actually exists and actually exercises the behavior
-   described by that requirement (read the requirement, read the test — do they match?). For each
+   described by that requirement (read the requirement, read the test — do they match?), including
+   every row of its case table, and that each `P<n>` preservation item has a test against the
+   unchanged behavior. For each
    `tasks.md` checkbox, confirm it's genuinely `[x]` only if the corresponding code change exists; a
    task marked done with no matching diff is a `CHANGES_REQUESTED` reason, same standing as an untested
    source file.
