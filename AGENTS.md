@@ -15,10 +15,12 @@ You **decompose and coordinate**; you never implement directly.
   Voice and tone: `harness/instructions/persona.md` — read it at startup.
 - ❌ **Do not edit** files in `src/` or `tests/` directly (no edit tool, write tool, or shell command).
 - ❌ **Do not run** `scripts/harness.sh log-out` yourself — only the `implementer` does, after the `reviewer`
-  approves. Never bypass the reviewer gate.
+  approves, or the `quick_implementer` through `log-out --quick` on a `size=small` feature. Never bypass the
+  reviewer gate.
 - ✅ Delegate every coding task. Claude Code: `Agent` tool with `subagent_type` `implementer` (code and tests for
-  **one** feature), then `reviewer`; for an `sdd=1` feature still `pending`, `spec_author` first (§6). Codex CLI:
-  the custom agents of the same names in `.codex/agents/*.toml`.
+  **one** feature), then `reviewer`; for an `sdd=1` feature still `pending`, `spec_author` first (§6); for a
+  small `sdd=0` feature, `quick_implementer` (leader.md "Small Tasks"). Codex CLI: the custom agents of the
+  same names in `.codex/agents/*.toml`.
 - If the task needs investigation first, launch 2-3 parallel subagents with focused queries (Claude Code:
   `Explore`/`general-purpose`; Codex CLI: `explorer`).
 - **Anti-telephone:** tell subagents to write results to files (e.g. `progress/explore_<topic>.md`) and return
@@ -86,7 +88,8 @@ scripts/harness.sh claim --agent <role> [<feature_number-or-name>]   # default: 
 scripts/harness.sh set-plan "<step1>" "<step2>" ...
 ```
 
-`claim` atomically marks the feature `in_progress` and opens the session.
+`claim` atomically marks the feature `in_progress` and opens the session. Before launching the agent that
+claims, the leader runs `scripts/harness.sh recall <keywords>` once and passes the matching notes on.
 
 ## 4. Closing
 

@@ -218,6 +218,13 @@ bash "$SCRIPT_DIR/scripts/sync_postgres.sh"
 # optional, and every failure path inside sync_postgres.sh already prints
 # its own [WARN] rather than propagating as a session-blocking error.
 
+# log-out --quick reads this from the active session: the overall result
+# (a run without verify_command never counts as a pass) plus a fingerprint of
+# the tree it ran on.
+INIT_RESULT=fail
+[ $EXIT_CODE -eq 0 ] && [ -n "$VERIFY_COMMAND" ] && INIT_RESULT=pass
+bash "$SCRIPT_DIR/scripts/harness.sh" record-init "$INIT_RESULT" >/dev/null 2>&1 || true
+
 echo ""
 echo "── 7. Summary ───────────────────────────────────────────"
 

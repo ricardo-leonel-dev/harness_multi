@@ -12,12 +12,16 @@
 #                                              optional "depends_on": [name...] gates claim on those LOCAL
 #                                              features — same project — being 'done' first)
 #   add-feature --name <slug> --title <t> [--description <d>] [--acceptance <item...>] [--sdd]
-#               [--depends-on <name...>]
+#               [--depends-on <name...>] [--size small|normal]
 #                                              create a single pending feature directly (no seed file) — for
 #                                              ad-hoc tasks the leader creates on the spot, no matching pending
 #                                              feature existed; --sdd requires an approved spec before claim;
 #                                              --depends-on names other LOCAL features (same project, must
-#                                              already exist) that must be 'done' before this one is claimable
+#                                              already exist) that must be 'done' before this one is claimable;
+#                                              --size small lets it close through log-out --quick (default normal)
+#   set-size <feature_number|name> <small|normal>
+#                                              change a not-yet-done feature's size (leader's classification,
+#                                              or back to normal when an escalation is approved)
 #   set-depends-on <feature_number|name> [dep_name...]
 #                                              replace a feature's local dependency list (each dep_name must
 #                                              already exist as a feature in this project; call with no
@@ -119,6 +123,21 @@
 #                                              git for the --changes paths (lockfiles/generated/prose
 #                                              excluded) and warns, never blocks, when code exceeds
 #                                              .harness.json::review_budget_lines (default 400, 0 disables)
+#   log-out --quick --changes <item...> --verification <text> --closure <text>
+#                                              small features only: close without a reviewer when the quick gate
+#                                              passes — diff <= quick_max_diff_lines (80) and <= quick_max_files (4)
+#                                              against the session base, no dependency file, every changed file
+#                                              declared under "Archivos:" in progress/quick_<name>.md, "Risk: none"
+#                                              there, and the last ./init.sh green on the current tree. Otherwise
+#                                              refuses with the reasons (logged): launch the reviewer. A reviewer's
+#                                              approval wins; requested changes are never bypassed
+#   hold <reason...>                          stop the active session (rejected escalation): it keeps the slot,
+#                                              so claim refuses other features and log-out refuses this one
+#   unhold [reason...]                        the user releases a held session (block also releases it)
+#   learn [--feature TARGET] <note...>        keep one lesson (<= 300 chars), linked to the active feature
+#   recall [term...]                          at most 5 learnings matching the terms (newest 5 without terms)
+#   forget <learning_id>                      soft-delete a learning that no longer applies
+#   record-init <pass|fail>                   (init.sh) log the verify result + tree fingerprint on the session
 #   delete-feature <TARGET>                   soft-delete a feature and its specs (sets deleted_at) — refuses
 #                                              while the feature has an open or paused session
 #   status                                     print current project/feature/session state
@@ -261,10 +280,11 @@ VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape 
 }
 
 cmd_add_feature() {
-  local name="" title="" desc="" accept_items=() sdd=0 depends_items=()
+  local name="" title="" desc="" accept_items=() sdd=0 depends_items=() size=normal
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
+      --size) size="$2"; shift 2 ;;
       --title) title="$2"; shift 2 ;;
       --description) desc="$2"; shift 2 ;;
       --sdd) sdd=1; shift ;;
@@ -284,9 +304,10 @@ cmd_add_feature() {
     esac
   done
   if [ -z "$name" ] || [ -z "$title" ]; then
-    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>]"
+    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>] [--size small|normal]"
     exit 1
   fi
+  case "$size" in small|normal) ;; *) fail "--size must be 'small' or 'normal', got: $size"; exit 1 ;; esac
 
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
@@ -319,11 +340,35 @@ cmd_add_feature() {
   local depends_on; depends_on="$(json_array "${depends_items[@]+"${depends_items[@]}"}")"
   local now; now="$(now_iso)"
 
-  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$now', '$now');"
+  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, size, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$size', '$now', '$now');"
   local sdd_note=""; [ "$sdd" = "1" ] && sdd_note=", sdd"
+  [ "$size" = "small" ] && sdd_note="$sdd_note, small"
   local deps_note=""; [ "$depends_on" != "[]" ] && deps_note=", depends on: $depends_on"
   ok "added feature $next_number: $name (pending$sdd_note$deps_note)"
+}
+
+# set-size <TARGET> <small|normal> — a small feature may close through
+# `log-out --quick` without a reviewer when the quick gate passes. The leader
+# sets it when it classifies a task; switching back to normal (an approved
+# escalation) restores the reviewer path. Done/superseded features are final.
+cmd_set_size() {
+  local target="${1:-}" size="${2:-}"
+  case "$size" in small|normal) ;; *) fail "usage: set-size <feature_number|name> <small|normal>"; exit 1 ;; esac
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local updated
+  updated=$(db "UPDATE features SET size='$size', updated_at='$(now_iso)'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status NOT IN ('done','superseded') AND $where
+RETURNING feature_number || ' ' || name;")
+  [ -n "$updated" ] || { fail "no matching feature that is not done/superseded: $target"; exit 1; }
+  ok "feature $updated is now $size"
 }
 
 cmd_link_notion() {
@@ -813,7 +858,11 @@ WHERE $target_where;")
   # only then fails on the session INSERT, leaving it in_progress sessionless.
   local active_sid; active_sid="$(current_session_id)"
   if [ -n "$active_sid" ]; then
-    fail "session $active_sid is already open — log it out or block its feature before claiming another"
+    if [ -n "$(db "SELECT held_at FROM session_log WHERE id=$active_sid;")" ]; then
+      fail "session $active_sid is on hold (see its HOLD entry) — the user decides: 'unhold' to resume it, or 'block' its feature to set it aside, before claiming another"
+    else
+      fail "session $active_sid is already open — log it out or block its feature before claiming another"
+    fi
     exit 1
   fi
 
@@ -1103,13 +1152,46 @@ is_test_path() {
 }
 
 # record_session_base <session_id> — logs the git HEAD a session starts from,
-# so record_diff_size still sees work the implementer commits before log-out.
-# No-op outside git or before the first commit.
+# so record_diff_size still sees work the implementer commits before log-out,
+# plus a DIRTY entry with the files already uncommitted at that point, so the
+# quick gate doesn't count them as this session's work. No-op outside git or
+# before the first commit.
 record_session_base() {
-  local sid="$1" sha
+  local sid="$1" sha dirty
   [ -n "$sid" ] || return 0
   sha=$(git rev-parse --verify --quiet HEAD 2>/dev/null) || return 0
   db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] BASE: $sha', '$(now_iso)');"
+  dirty=$(dirty_listing HEAD)
+  [ -z "$dirty" ] || db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] DIRTY:
+$dirty")', '$(now_iso)');"
+}
+
+# dirty_listing <base> — one "<blob hash> <path>" line per file under this
+# project that differs from <base> or is untracked ("deleted" for a removed
+# file), skipping progress/ and the snapshot, which the harness rewrites.
+dirty_listing() {
+  local file
+  { git diff --name-only --relative "$1" -- . 2>/dev/null; git ls-files --others --exclude-standard -- . 2>/dev/null; } \
+    | while IFS= read -r file; do
+        case "$file" in ""|progress/*|"$SNAPSHOT_PATH"/*) continue ;; esac
+        if [ -f "$file" ]; then printf '%s %s\n' "$(git hash-object -- "$file")" "$file"; else printf 'deleted %s\n' "$file"; fi
+      done
+}
+
+# session_diff_base <session_id> — prints "<base>\t<scope note>": the
+# session's BASE commit, or HEAD without one. A base outside HEAD's history
+# (branch switched or rebased mid-feature) would count unrelated differences
+# between branches, so HEAD is used and the note says only uncommitted changes
+# are measured.
+session_diff_base() {
+  local base scope=""
+  base=$(db "SELECT substr(entry, 17) FROM session_log_entries WHERE session_id=$1 AND entry LIKE '[harness] BASE: %' ORDER BY id LIMIT 1;")
+  if ! git cat-file -e "${base:-none}^{commit}" 2>/dev/null; then
+    base=HEAD
+  elif ! git merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
+    base=HEAD; scope=", uncommitted only: session base not in this branch's history"
+  fi
+  printf '%s\t%s\n' "$base" "$scope"
 }
 
 # record_diff_size <session_id> <path...> — advisory review budget: counts
@@ -1122,17 +1204,8 @@ record_diff_size() {
   local sid="$1"; shift
   [ $# -gt 0 ] || return 0
   git rev-parse --git-dir >/dev/null 2>&1 || return 0
-  local code=0 tests=0 files=0 path added deleted file n base
-  base=$(db "SELECT substr(entry, 17) FROM session_log_entries WHERE session_id=$sid AND entry LIKE '[harness] BASE: %' ORDER BY id LIMIT 1;")
-  # A base outside HEAD's history (branch switched or rebased mid-feature)
-  # would count unrelated differences between branches: measure only what is
-  # uncommitted instead, and say so.
-  local scope=""
-  if ! git cat-file -e "${base:-none}^{commit}" 2>/dev/null; then
-    base=HEAD
-  elif ! git merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
-    base=HEAD; scope=", uncommitted only: session base not in this branch's history"
-  fi
+  local code=0 tests=0 files=0 path added deleted file n base scope
+  IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
   for path in "$@"; do
     while IFS=$'\t' read -r added deleted file; do
       [ -n "$file" ] || continue
@@ -1160,13 +1233,113 @@ record_diff_size() {
   fi
 }
 
+# is_dependency_file <path> — manifests and lockfiles: a change there affects
+# the whole project, so it always needs a reviewer.
+is_dependency_file() {
+  case "${1##*/}" in
+    package.json|*.lock|*.lockb|*-lock.json|*-lock.yaml|requirements*.txt|pyproject.toml|Pipfile|setup.py|setup.cfg) return 0 ;;
+    go.mod|go.sum|Cargo.toml|Gemfile|*.gemspec|composer.json|pom.xml|build.gradle|build.gradle.kts|*.csproj|packages.config) return 0 ;;
+  esac
+  return 1
+}
+
+# tree_fingerprint — hash of HEAD plus every uncommitted change under this
+# project (progress/ and the snapshot excluded: init.sh itself rewrites them),
+# so log-out --quick can tell whether the last ./init.sh saw the code it closes.
+tree_fingerprint() {
+  git rev-parse --git-dir >/dev/null 2>&1 || return 1
+  local ex=(-- . ":(exclude)progress" ":(exclude)$SNAPSHOT_PATH") f
+  {
+    git rev-parse HEAD 2>/dev/null
+    git diff HEAD --binary "${ex[@]}" 2>/dev/null
+    git ls-files --others --exclude-standard -z "${ex[@]}" 2>/dev/null | while IFS= read -r -d '' f; do
+      printf '%s ' "$f"; shasum < "$f"
+    done
+  } | shasum | cut -d' ' -f1
+}
+
+# record-init <pass|fail> — init.sh calls this after its verify step: logs the
+# result with the tree fingerprint on the active session (no-op without one).
+cmd_record_init() {
+  case "${1:-}" in pass|fail) ;; *) fail "usage: record-init <pass|fail>"; exit 1 ;; esac
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || return 0
+  local fp; fp="$(tree_fingerprint)" || fp=none
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] INIT: $1 fp=$fp', '$(now_iso)');"
+}
+
+# quick_gate <session_id> <feature_name> — the signals log-out --quick checks
+# itself instead of trusting the agent. Fills QUICK_REASONS (empty = pass),
+# QUICK_LINES and QUICK_FILES. Size, files and dependencies come from git
+# against the session base; Risk and the declared files from the handoff
+# progress/quick_<name>.md; the init result from record-init's fingerprint.
+quick_gate() {
+  local sid="$1" handoff="progress/quick_$2.md"
+  QUICK_REASONS=(); QUICK_LINES=0; QUICK_FILES=0
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    QUICK_REASONS+=("not a git repository: the change can't be measured"); return
+  fi
+  local max_lines max_files
+  max_lines="$(config '.quick_max_diff_lines' '80')"; [[ "$max_lines" =~ ^[0-9]+$ ]] || max_lines=80
+  max_files="$(config '.quick_max_files' '4')"; [[ "$max_files" =~ ^[0-9]+$ ]] || max_files=4
+
+  # Files already uncommitted at claim and untouched since (same blob) are not
+  # this session's work. One touched further counts with its whole diff.
+  local base scope added deleted file changed=() before line
+  IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
+  [ -z "$scope" ] || QUICK_REASONS+=("the session base is not in this branch's history: the change can't be measured")
+  before=$(db "SELECT substr(entry, 18) FROM session_log_entries WHERE session_id=$sid AND entry LIKE '[harness] DIRTY:%' ORDER BY id LIMIT 1;")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    grep -qxF -- "$line" <<<"$before" || changed+=("${line#* }")
+  done < <(dirty_listing "$base")
+  for file in "${changed[@]+"${changed[@]}"}"; do
+    if git cat-file -e "$base:./$file" 2>/dev/null || git ls-files --error-unmatch -- "$file" >/dev/null 2>&1; then
+      while IFS=$'\t' read -r added deleted _; do
+        [[ "$added" =~ ^[0-9]+$ ]] && QUICK_LINES=$((QUICK_LINES + added + deleted))
+      done < <(git diff --numstat --relative "$base" -- "$file" 2>/dev/null)
+    elif [ -f "$file" ]; then
+      QUICK_LINES=$((QUICK_LINES + $(wc -l < "$file")))
+    fi
+  done
+  QUICK_FILES=${#changed[@]}
+
+  [ "$QUICK_LINES" -le "$max_lines" ] || QUICK_REASONS+=("$QUICK_LINES changed lines > quick_max_diff_lines=$max_lines")
+  [ "$QUICK_FILES" -le "$max_files" ] || QUICK_REASONS+=("$QUICK_FILES changed files > quick_max_files=$max_files")
+  for file in "${changed[@]+"${changed[@]}"}"; do
+    is_dependency_file "$file" && QUICK_REASONS+=("dependency file changed: $file")
+  done
+
+  if [ ! -f "$handoff" ]; then
+    QUICK_REASONS+=("handoff $handoff is missing")
+  else
+    local risk declared
+    risk=$(sed -n 's/^Risk:[[:space:]]*//p' "$handoff" | head -n 1 | tr -d '\r`' | sed 's/[[:space:]]*$//')
+    [ "$(tr '[:upper:]' '[:lower:]' <<<"$risk")" = none ] || QUICK_REASONS+=("Risk: ${risk:-missing} (only 'none' closes without a reviewer)")
+    declared=" $(grep -E '^(Archivos|Files):' "$handoff" | sed -E 's/^[^:]+:[[:space:]]*//' | tr ',`' '  ' | tr -s '[:space:]' ' ') "
+    for file in "${changed[@]+"${changed[@]}"}"; do
+      [[ "$declared" == *" $file "* ]] || QUICK_REASONS+=("changed but not declared in $handoff: $file")
+    done
+  fi
+
+  local last
+  last=$(db "SELECT entry FROM session_log_entries WHERE session_id=$sid AND entry LIKE '[harness] INIT: %' ORDER BY id DESC LIMIT 1;")
+  case "$last" in
+    "") QUICK_REASONS+=("./init.sh has not passed in this session") ;;
+    "[harness] INIT: pass fp=$(tree_fingerprint)") ;;
+    "[harness] INIT: pass"*) QUICK_REASONS+=("files changed after the last passing ./init.sh") ;;
+    *) QUICK_REASONS+=("the last ./init.sh failed") ;;
+  esac
+}
+
 cmd_log_out() {
-  local changes=() verification="" closure=""
+  local changes=() verification="" closure="" quick=0
   while [ $# -gt 0 ]; do
     case "$1" in
+      --quick) quick=1; shift ;;
       --changes)
         shift
-        while [ $# -gt 0 ] && [ "$1" != "--verification" ] && [ "$1" != "--closure" ]; do
+        while [ $# -gt 0 ] && [ "$1" != "--verification" ] && [ "$1" != "--closure" ] && [ "$1" != "--quick" ]; do
           changes+=("$1"); shift
         done
         ;;
@@ -1183,8 +1356,42 @@ cmd_log_out() {
   # is the WHERE clause on the UPDATE below (same "precheck for the message,
   # WHERE clause for the gate" split cmd_claim uses for the sdd approval
   # check), so a stale/missing precheck can't be used to bypass this.
+  if [ -n "$(db "SELECT held_at FROM session_log WHERE id=$sid;")" ]; then
+    fail "cannot log out session $sid: it is on hold (see its HOLD entry) — only the user can release it with 'unhold'"
+    exit 1
+  fi
   local review_status; review_status=$(db "SELECT review_status FROM session_log WHERE id=$sid;")
-  if [ "$review_status" != "approved" ]; then
+
+  # --quick: a small feature closes without a reviewer only when every signal
+  # in quick_gate is clean. A refusal is logged and means "launch the
+  # reviewer", never "work around it". A reviewer's approval, if one already
+  # exists, simply wins; their requested changes are never bypassed.
+  if [ "$quick" = 1 ] && [ "$review_status" != "approved" ]; then
+    local fname fsize
+    IFS='|' read -r fname fsize < <(db "SELECT f.name, f.size FROM features f JOIN session_log sl ON sl.feature_id=f.id WHERE sl.id=$sid;")
+    if [ "$fsize" != "small" ]; then
+      fail "log-out --quick is only for features marked small (feature $fname is ${fsize:-unknown}) — use the reviewer path"
+      exit 1
+    fi
+    if [ "$review_status" = "changes_requested" ]; then
+      fail "log-out --quick refused: a reviewer already requested changes on session $sid — it needs their approval"
+      exit 1
+    fi
+    quick_gate "$sid" "$fname"
+    if [ "${#QUICK_REASONS[@]}" -gt 0 ]; then
+      local joined; joined=$(printf '%s; ' "${QUICK_REASONS[@]}"); joined="${joined%; }"
+      db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] QUICK: refused — $joined")', '$(now_iso)');"
+      fail "log-out --quick refused — reviewer required:"
+      printf '  - %s\n' "${QUICK_REASONS[@]}" >&2
+      exit 1
+    fi
+    db_exec "UPDATE session_log SET review_status='quick', reviewed_by='harness (quick gate)', reviewed_at='$(now_iso)' WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] QUICK: passed (lines=$QUICK_LINES, files=$QUICK_FILES)', '$(now_iso)');"
+    ok "quick gate passed: $QUICK_LINES lines, $QUICK_FILES files, Risk: none, ./init.sh green"
+    review_status=quick
+  fi
+
+  if [ "$review_status" != "approved" ] && [ "$review_status" != "quick" ]; then
     fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved' first (do NOT pass --by; the harness auto-attributes from \$ANTHROPIC_MODEL); only the implementer runs log-out, and only after that approval is recorded"
     exit 1
   fi
@@ -1200,7 +1407,7 @@ cmd_log_out() {
 .bail on
 BEGIN;
 UPDATE session_log SET changes='$(sql_escape "$changes_json")', verification='$(sql_escape "$verification")',
-  closure='$(sql_escape "$closure")', closed_at='$now' WHERE id=$sid AND review_status='approved';
+  closure='$(sql_escape "$closure")', closed_at='$now' WHERE id=$sid AND review_status IN ('approved','quick') AND held_at IS NULL;
 UPDATE features SET status='done', updated_at='$now'
   WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid AND closed_at='$now');
 COMMIT;
@@ -1260,7 +1467,7 @@ RETURNING id, feature_number, name, title;" 2>&1)
   local sid
   sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL LIMIT 1;")
   if [ -n "$sid" ]; then
-    db_exec "UPDATE session_log SET paused_at='$now' WHERE id=$sid;
+    db_exec "UPDATE session_log SET paused_at='$now', held_at=NULL WHERE id=$sid;
 INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$reason")', '$now');"
     ok "blocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated") (session $sid paused)"
   else
@@ -1268,6 +1475,32 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$
     ok "blocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
     warn "feature had no open session — reason saved as a feature note; after unblocking, 'claim <feature>' opens a new session"
   fi
+}
+
+# hold <reason...> — stop the active session when the user rejects an
+# escalation. Unlike block it keeps the project's slot: claim refuses other
+# features and log-out refuses this one until the user decides (unhold).
+cmd_hold() {
+  local reason="$*"
+  [ -n "$reason" ] || { fail "usage: hold <reason...>"; exit 1; }
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || { fail "no active session to hold"; exit 1; }
+  local now; now="$(now_iso)"
+  db_exec "UPDATE session_log SET held_at='$now' WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "HOLD: $reason")', '$now');"
+  ok "session $sid on hold — no other feature is claimable until the user runs 'unhold' (resume) or blocks it"
+}
+
+# unhold [reason...] — the user resumes a held session.
+cmd_unhold() {
+  local reason="${*:-resumed}"
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] && [ -n "$(db "SELECT held_at FROM session_log WHERE id=$sid;")" ] \
+    || { fail "no held session to release"; exit 1; }
+  local now; now="$(now_iso)"
+  db_exec "UPDATE session_log SET held_at=NULL WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "UNHOLD: $reason")', '$now');"
+  ok "session $sid released from hold"
 }
 
 cmd_unblock() {
@@ -1647,17 +1880,74 @@ WHERE project_id='$(sql_escape "$pid")' AND status='blocked' AND deleted_at IS N
   done
 }
 
+# learn [--feature TARGET] <note...> — keep one short lesson for later
+# features (at most 300 characters). Linked to the active session's feature
+# unless --feature names another.
+cmd_learn() {
+  local target=""
+  if [ "${1:-}" = "--feature" ]; then target="${2:-}"; shift 2 || true; fi
+  local note="$*"
+  [ -n "$note" ] || { fail "usage: learn [--feature TARGET] <note...>"; exit 1; }
+  [ "${#note}" -le 300 ] || { fail "a learning is at most 300 characters (got ${#note}) — keep one lesson per note"; exit 1; }
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local fid=""
+  if [ -n "$target" ]; then
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+      fid=$(db "SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND feature_number=$target;")
+    else
+      fid=$(db "SELECT id FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND name='$(sql_escape "$target")';")
+    fi
+    [ -n "$fid" ] || { fail "unknown feature: $target"; exit 1; }
+  else
+    local sid; sid="$(current_session_id)"
+    [ -z "$sid" ] || fid=$(db "SELECT feature_id FROM session_log WHERE id=$sid;")
+  fi
+  local id
+  id=$(db "INSERT INTO learnings (project_id, feature_id, note, created_at) VALUES ('$(sql_escape "$pid")', ${fid:-NULL}, '$(sql_escape "$note")', '$(now_iso)') RETURNING id;")
+  ok "learned #$id"
+}
+
+# recall [term...] — at most 5 notes, ranked by how many terms they match
+# (note text or feature name, case-insensitive), newest first on ties; with
+# no terms, the 5 newest. Output stays around 500 tokens however many exist.
+cmd_recall() {
+  local pid; pid="$(project_id)"
+  local score="1" term
+  if [ $# -gt 0 ]; then
+    score="0"
+    for term in "$@"; do
+      score="$score + (instr(lower(l.note || ' ' || COALESCE(f.name, '')), lower('$(sql_escape "$term")')) > 0)"
+    done
+  fi
+  db -separator ' ' "SELECT '#' || l.id, CASE WHEN f.name IS NULL THEN '' ELSE '[' || f.name || ']' END, l.note
+FROM learnings l LEFT JOIN features f ON f.id = l.feature_id
+WHERE l.project_id='$(sql_escape "$pid")' AND l.deleted_at IS NULL AND ($score) > 0
+ORDER BY ($score) DESC, l.id DESC LIMIT 5;" | sed 's/  */ /'
+}
+
+# forget <id> — soft-delete a learning that no longer applies.
+cmd_forget() {
+  local id="${1:-}"
+  [[ "$id" =~ ^[0-9]+$ ]] || { fail "usage: forget <learning_id>"; exit 1; }
+  local pid; pid="$(project_id)"
+  local done_id
+  done_id=$(db "UPDATE learnings SET deleted_at='$(now_iso)' WHERE id=$id AND project_id='$(sql_escape "$pid")' AND deleted_at IS NULL RETURNING id;")
+  [ -n "$done_id" ] || { fail "no active learning #$id"; exit 1; }
+  ok "forgot #$id"
+}
+
 cmd_status() {
   local pid; pid="$(project_id)"
   echo "project: $PROJECT_SLUG ($pid)"
   echo "--- features ---"
   db -header -column "SELECT f.feature_number, f.name, f.status, f.sdd,
   s.status AS spec_status, s.requirements_count AS reqs, s.tasks_count AS tasks, s.approved_by,
-  f.superseded_by
+  f.size, f.superseded_by
 FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
 WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL ORDER BY f.feature_number;"
   echo "--- open session ---"
-  db -header -column "SELECT id, agent, started_at, review_status, reviewed_by FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;"
+  db -header -column "SELECT id, agent, started_at, review_status, reviewed_by, held_at FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;"
   local paused
   paused=$(db -header -column "SELECT sl.id, f.feature_number, f.name AS feature, sl.paused_at, sl.review_status FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id WHERE sl.project_id='$(sql_escape "$pid")' AND sl.closed_at IS NULL AND sl.deleted_at IS NULL AND sl.paused_at IS NOT NULL;")
   if [ -n "$paused" ]; then
@@ -1857,6 +2147,13 @@ main() {
     notion-create-feature) cmd_notion_create_feature "$@" ;;
     block) cmd_block "$@" ;;
     unblock) cmd_unblock "$@" ;;
+    hold) cmd_hold "$@" ;;
+    unhold) cmd_unhold "$@" ;;
+    set-size) cmd_set_size "$@" ;;
+    learn) cmd_learn "$@" ;;
+    recall) cmd_recall "$@" ;;
+    forget) cmd_forget "$@" ;;
+    record-init) cmd_record_init "$@" ;;
     cancel-session) cmd_cancel_session "$@" ;;
     reopen) cmd_reopen "$@" ;;
     supersede) cmd_supersede "$@" ;;

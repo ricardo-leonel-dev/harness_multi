@@ -28,8 +28,11 @@ or PR descriptions; use conventional commits only.
    has `sdd=1` (check `scripts/harness.sh status`), also read `specs/<name>/requirements.md`,
    `design.md`, `tasks.md`.
 2. Identify the files modified/created since the last session: run `scripts/harness.sh status` to find the currently
-   open session, then check its plan/log (`state/sessions/*.md`, or query `harness.db` directly) to see what the
-   implementer says they changed.
+   open session, then check its plan/log (`state/sessions/*.md`) to see what the implementer says they changed.
+   **Reading discipline:** start from `git diff <base> -- <file>` (`<base>` is the `[harness] BASE:` entry in
+   the session log; plain `git diff`/`git status` when it is missing) and judge the hunks. For surrounding context, `Grep` the symbol and `Read` only that line
+   range — never read a whole large file (specs, templates, components) or `scripts/harness.sh` just to orient
+   yourself; the commands you need are in this file.
 3. For each modified file:
    - Does it respect `docs/architecture.md`? (Layers, dependencies, structure)
    - Does it adhere to `docs/conventions.md`? (Style, names, errors)
@@ -94,7 +97,8 @@ or PR descriptions; use conventional commits only.
 6. Iterate through `CHECKPOINTS.md`. Mark `[x]` those that are met, `[ ]` those that are not — including
    the C6 group if present and the feature has `sdd=1`; omit C6 (or mark it N/A) for `sdd=0` features.
 7. Use the **Write tool** to create `progress/review.md` with the block below — this is a required
-   action, not something to only describe in your response. Do this before composing anything else.
+   action, not something to only describe in your response. Do this before composing anything else, and write
+   it once with the final verdict (don't draft it and rewrite it).
 8. **Record your verdict mechanically**, so it isn't just prose another agent could talk its way past:
    ```
    scripts/harness.sh record-review approved
@@ -107,7 +111,7 @@ or PR descriptions; use conventional commits only.
    from `$ANTHROPIC_MODEL`/$HARNESS_AGENT_MODEL. The `--by human:<name>` prefix is reserved for the rare
    case where a literal human (not a subagent) records a review; bare names like `--by "Ricardo Aguilar"`
    are rejected as a footgun, because that's the spec-approval gate's pattern (approve-spec), not the
-   review gate's. See `scripts/harness.sh` line ~75 for the full policy.
+   review gate's.
    This is what `log-out` actually checks before it will let the session close — writing `progress/review.md`
    documents the verdict for humans, but `record-review` is the DB-enforced gate. Run this yourself; never
    describe the verdict to the leader and expect it (or the implementer) to record it on your behalf.
@@ -136,6 +140,10 @@ Use the Write tool to create `progress/review.md` at that exact path, containing
 
 1. Remove `import requests` from `src/cli.py`.
 2. ...
+
+## Learnings candidate (optional)
+
+<one rule worth remembering for future features, <= 300 chars — only for a non-obvious trap this review caught>
 ```
 
 Your final response is **a single line**:

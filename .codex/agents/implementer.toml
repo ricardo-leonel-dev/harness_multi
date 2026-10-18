@@ -31,6 +31,8 @@ or PR descriptions; use conventional commits only.
    `<your model name>` with your own real model identity (e.g. "Claude Sonnet 5", "GPT-5.1-Codex") — never leave the
    placeholder literal. The `leader ->` prefix is always accurate here: per `AGENTS.md` §0 you are only ever invoked
    by the orchestrating leader, never run directly.
+   - If the leader says the session is already open (a feature escalated from the quick path), don't claim:
+     `status` shows it; read `progress/escalate_<feature>.md` first and continue from there.
    - If the leader named a specific feature: `scripts/harness.sh claim --agent "leader -> implementer (<your model name>)" <feature_number-or-name>`.
    - Otherwise: `scripts/harness.sh claim --agent "leader -> implementer (<your model name>)"` (claims the lowest-numbered
      pending one). This atomically marks the feature `in_progress` and opens a session — there is no separate "save"
