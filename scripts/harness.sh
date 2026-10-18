@@ -856,6 +856,7 @@ WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")
 
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
 VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")', '$now');"
+  record_session_base "$(current_session_id)"
   ok "claimed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 
   local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$updated")
@@ -940,6 +941,7 @@ SQL
     exit 1
   fi
 
+  record_session_base "$new_sid"
   local row
   row=$(sqlite3 -json "$DB_PATH" "SELECT feature_number, name, title, source_id FROM features WHERE id=$fid;")
   ok "resumed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$row") (new session $new_sid; ${resumed#RESUMED: })"
@@ -1100,9 +1102,19 @@ is_test_path() {
   return 1
 }
 
+# record_session_base <session_id> — logs the git HEAD a session starts from,
+# so record_diff_size still sees work the implementer commits before log-out.
+# No-op outside git or before the first commit.
+record_session_base() {
+  local sid="$1" sha
+  [ -n "$sid" ] || return 0
+  sha=$(git rev-parse --verify --quiet HEAD 2>/dev/null) || return 0
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] BASE: $sha', '$(now_iso)');"
+}
+
 # record_diff_size <session_id> <path...> — advisory review budget: counts
-# changed lines (git diff against HEAD for tracked paths, whole file for new
-# ones) in the paths log-out was given, split into production code and tests,
+# changed lines (git diff against the session's BASE commit, falling back to
+# HEAD, for tracked paths; whole file for untracked ones) in the paths log-out was given, split into production code and tests,
 # logs a DIFF entry on the session (data for calibrating future splits) and
 # warns when code exceeds .harness.json::review_budget_lines (default 400; 0
 # disables the warning). Never blocks: outside git or with no paths it's a no-op.
@@ -1110,7 +1122,17 @@ record_diff_size() {
   local sid="$1"; shift
   [ $# -gt 0 ] || return 0
   git rev-parse --git-dir >/dev/null 2>&1 || return 0
-  local code=0 tests=0 files=0 path added deleted file n
+  local code=0 tests=0 files=0 path added deleted file n base
+  base=$(db "SELECT substr(entry, 17) FROM session_log_entries WHERE session_id=$sid AND entry LIKE '[harness] BASE: %' ORDER BY id LIMIT 1;")
+  # A base outside HEAD's history (branch switched or rebased mid-feature)
+  # would count unrelated differences between branches: measure only what is
+  # uncommitted instead, and say so.
+  local scope=""
+  if ! git cat-file -e "${base:-none}^{commit}" 2>/dev/null; then
+    base=HEAD
+  elif ! git merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
+    base=HEAD; scope=", uncommitted only: session base not in this branch's history"
+  fi
   for path in "$@"; do
     while IFS=$'\t' read -r added deleted file; do
       [ -n "$file" ] || continue
@@ -1118,7 +1140,7 @@ record_diff_size() {
       [[ "$added" =~ ^[0-9]+$ ]] || continue  # binary
       n=$((added + deleted)); files=$((files + 1))
       if is_test_path "$file"; then tests=$((tests + n)); else code=$((code + n)); fi
-    done < <(git diff --numstat --relative HEAD -- "$path" 2>/dev/null)
+    done < <(git diff --numstat --relative "$base" -- "$path" 2>/dev/null)
     while IFS= read -r file; do
       [ -n "$file" ] && [ -f "$file" ] || continue
       is_review_excluded "$file" && continue
@@ -1130,7 +1152,7 @@ record_diff_size() {
 
   local budget; budget="$(config '.review_budget_lines' '400')"
   [[ "$budget" =~ ^[0-9]+$ ]] || budget=400
-  local entry="DIFF: code=$code lines, tests=$tests lines, files=$files (review_budget_lines=$budget)"
+  local entry="DIFF: code=$code lines, tests=$tests lines, files=$files (review_budget_lines=$budget$scope)"
   db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] $entry")', '$(now_iso)');"
   ok "$entry"
   if [ "$budget" -gt 0 ] && [ "$code" -gt "$budget" ]; then

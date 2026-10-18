@@ -7,7 +7,9 @@
 #   2. test runs test_targeted_command with {files}, keeps output in
 #      progress/test_last.log, propagates the exit status, falls back to
 #      verify_command.
-#   3. log-out logs DIFF code/test line counts (lockfiles and prose excluded)
+#   3. log-out logs DIFF code/test line counts since the claim (lockfiles and
+#      prose excluded, commits made during the session included; only the
+#      uncommitted changes when the branch was switched away from that base)
 #      and warns, without blocking, above review_budget_lines.
 #   4. record-usage warns once the active feature reaches token_warn_percent
 #      of token_quota, and stays quiet below it or without a quota.
@@ -122,6 +124,23 @@ H claim beta >/dev/null && H record-review approved --by human:tester >/dev/null
 out=$(H log-out --changes src/app.ts --verification v --closure c) || die "log-out over budget must not block: $out"
 grep -q 'exceeds review_budget_lines=5' <<<"$out" || die "over-budget warning missing: $out"
 pass "over budget warns and still closes"
+q "UPDATE features SET status='pending' WHERE name='beta';"
+(cd "$P" && git add src && git -c user.email=t@t -c user.name=t commit -qm wip) || die "git commit"
+H claim beta >/dev/null || die "re-claim beta for committed work"
+printf 'y\ny\n' >> "$P/src/app.ts"
+(cd "$P" && git add src && git -c user.email=t@t -c user.name=t commit -qm work) || die "git commit work"
+H record-review approved --by human:tester >/dev/null || die "record-review"
+out=$(H log-out --changes src/app.ts --verification v --closure c) || die "log-out committed work: $out"
+grep -q 'DIFF: code=2 lines' <<<"$out" || die "work committed before log-out must count from the session base: $out"
+pass "DIFF counts work committed during the session"
+q "UPDATE features SET status='pending' WHERE name='beta';"
+H claim beta >/dev/null || die "re-claim beta for a branch switch"
+(cd "$P" && git checkout -q -b right HEAD~2) || die "git checkout"   # base no longer in history
+printf 'z\n' >> "$P/src/app.ts"
+H record-review approved --by human:tester >/dev/null || die "record-review"
+out=$(H log-out --changes src/app.ts --verification v --closure c) || die "log-out after branch switch: $out"
+grep -q 'DIFF: code=1 lines.*uncommitted only' <<<"$out" || die "a base outside HEAD's history must fall back to HEAD and say so: $out"
+pass "branch switched mid-feature: DIFF counts uncommitted changes and says so"
 
 echo "4. token budget warning"
 P="$WORK/p4"; new_project "$P" '{}'

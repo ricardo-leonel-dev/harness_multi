@@ -415,7 +415,8 @@ user and creates the parts (`add-feature --sdd --depends-on`, then `supersede` t
   often passes with one), falling back to `verify_command`. Output goes to `progress/test_last.log`; only the result
   and the failure tail are printed. `./init.sh` runs the full suite once the same way. Grep the log — never
   re-run a suite just to read its output.
-- **Review budget (advisory):** `log-out` logs `DIFF: code=N, tests=M` for its `--changes` and warns when
-  production code exceeds `review_budget_lines` (default 400; 0 disables). It never blocks.
+- **Review budget (advisory):** `log-out` logs `DIFF: code=N, tests=M` for its `--changes` since the claim
+  (commits included) and warns when production code exceeds `review_budget_lines` (default 400; 0
+  disables). It never blocks.
 - **Token budget (optional):** with `token_quota` set, `record-usage` (and so `./init.sh`) warns once the active
   feature's tokens reach `token_warn_percent` (default 15) of it; the leader tells the user before going on.
