@@ -48,7 +48,10 @@
 #   mark-spec-ready                           close the current spec-drafting session: verifies
 #                                              specs/<name>/{requirements,design,tasks}.md exist, records
 #                                              requirement/task counts, moves the feature to spec_ready
-#                                              (best-effort: pushes notion_status_spec_ready if source_id is set)
+#                                              (best-effort: pushes notion_status_spec_ready if source_id is set).
+#                                              Refuses a spec with more than .harness.json::spec_max_requirements
+#                                              (default 15, 0 disables) requirements — split it (docs/specs.md);
+#                                              approve-spec applies the same limit to its recount
 #   approve-spec <TARGET> [--by NAME]         record human approval of a spec_ready feature's spec (leader-only,
 #                                              run immediately after the user approves in conversation) — this is
 #                                              the actual DB-enforced precondition claim checks for sdd=1 features.
@@ -111,7 +114,11 @@
 #                                              close the open session and mark its feature done — refuses
 #                                              unless record-review has recorded 'approved' on this session
 #                                              (best-effort: also pushes notion_status_done to the
-#                                              feature's source Notion page, if it has a source_id)
+#                                              feature's source Notion page, if it has a source_id).
+#                                              Also logs a "DIFF: code=N, tests=M" entry measured from
+#                                              git for the --changes paths (lockfiles/generated/prose
+#                                              excluded) and warns, never blocks, when code exceeds
+#                                              .harness.json::review_budget_lines (default 400, 0 disables)
 #   delete-feature <TARGET>                   soft-delete a feature and its specs (sets deleted_at) — refuses
 #                                              while the feature has an open or paused session
 #   status                                     print current project/feature/session state
@@ -165,10 +172,17 @@
 #                                              since last parsed are skipped; --full rescans them. --max-seconds
 #                                              (default 20) bounds the run: at the limit it keeps partial
 #                                              progress and warns. Any parse/IO problem is a [WARN]; exits 0.
+#                                              When .harness.json sets token_quota, also warns once the active
+#                                              feature's tokens reach token_warn_percent (default 15) of it.
 #   stats [TARGET]                            agent invocation tree (parent -> children) per feature with per-run
 #                                              duration/tokens, totals per feature and per project, plus agent effort
 #                                              vs. union of agent intervals vs. session elapsed (see
 #                                              harness/instructions/timing.md); TARGET limits it to one feature
+#   test [file...]                            run tests with output to progress/test_last.log, printing only
+#                                              the result (and the log's tail on failure): with files and
+#                                              .harness.json::test_targeted_command (its {files} placeholder
+#                                              becomes the quoted paths) only those; else verify_command.
+#                                              Exits with the tests' status
 
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -204,6 +218,23 @@ spec_counts() {
   req=$(grep -cE '^## R[0-9]+' "$dir/requirements.md" 2>/dev/null)
   task=$(grep -cE '^- \[[ xX]\] T[0-9]+' "$dir/tasks.md" 2>/dev/null)
   printf '%s %s' "${req:-0}" "${task:-0}"
+}
+
+# check_spec_scope <spec_dir> <requirements_count> <name> <failure_prefix> —
+# exits unless the count is within .harness.json::spec_max_requirements
+# (default 15; 0 disables). Cost grows superlinearly with requirement count
+# (every extra rule means more reads, edits and test runs in one context), so
+# an oversized spec must be split before it can be marked ready or approved —
+# see docs/specs.md "Scope limit". Shared by mark-spec-ready and approve-spec
+# so a spec edited by hand after mark-spec-ready can't slip past the limit.
+check_spec_scope() {
+  local dir="$1" req="$2" name="$3" prefix="$4" max_req
+  max_req="$(config '.spec_max_requirements' '15')"
+  [[ "$max_req" =~ ^[0-9]+$ ]] || max_req=15
+  if [ "$max_req" -gt 0 ] && [ "$req" -gt "$max_req" ]; then
+    fail "$prefix: $dir has $req requirements (limit spec_max_requirements=$max_req) — merge clauses into one requirement per business rule, or write progress/split_$name.md and report split-proposed (docs/specs.md \"Scope limit\")"
+    exit 1
+  fi
 }
 
 cmd_import_features() {
@@ -552,6 +583,8 @@ cmd_mark_spec_ready() {
   read -r req_count task_count <<<"$(spec_counts "$spec_dir")"
   agent_str=$(db "SELECT agent FROM session_log WHERE id=$sid;")
 
+  check_spec_scope "$spec_dir" "$req_count" "$name" "cannot mark spec ready"
+
   local now; now="$(now_iso)"
   local existing_spec_id
   existing_spec_id=$(db "SELECT id FROM specs WHERE feature_id=$fid AND deleted_at IS NULL;")
@@ -643,6 +676,7 @@ WHERE feature_id=$fid AND status='ready' AND deleted_at IS NULL;")
       [ -f "$spec_dir/$f" ] || { fail "not approvable: $spec_dir/$f is missing on disk"; exit 1; }
     done
     read -r req_count task_count <<<"$(spec_counts "$spec_dir")"
+    check_spec_scope "$spec_dir" "$req_count" "$(basename "$spec_dir")" "not approvable"
     count_sql=", requirements_count=$req_count, tasks_count=$task_count"
     counts_note="R=$req_count, T=$task_count"
     if [ "$prev_req" != "$req_count" ] || [ "$prev_task" != "$task_count" ]; then
@@ -1045,6 +1079,64 @@ cmd_record_review() {
   ok "recorded review verdict '$verdict_raw' on session $sid (by: $by)"
 }
 
+# is_review_excluded <path> — lockfiles, generated/build output and prose are
+# not code a person reviews line by line, so they don't count toward the
+# review budget.
+is_review_excluded() {
+  case "$1" in
+    *.lock|*.lockb|*-lock.json|*-lock.yaml|*.lock.json|go.sum|*.min.js|*.min.css|*.map|*.snap) return 0 ;;
+    dist/*|*/dist/*|build/*|*/build/*|*.generated.*|*/generated/*) return 0 ;;
+    *.md|progress/*|specs/*|state/*) return 0 ;;
+  esac
+  return 1
+}
+
+# is_test_path <path> — test files are reported separately from production code.
+is_test_path() {
+  case "$1" in
+    tests/*|*/tests/*|test/*|*/test/*|*/__tests__/*|*.spec.*|*.test.*|*_test.*|test_*|*/test_*) return 0 ;;
+  esac
+  return 1
+}
+
+# record_diff_size <session_id> <path...> — advisory review budget: counts
+# changed lines (git diff against HEAD for tracked paths, whole file for new
+# ones) in the paths log-out was given, split into production code and tests,
+# logs a DIFF entry on the session (data for calibrating future splits) and
+# warns when code exceeds .harness.json::review_budget_lines (default 400; 0
+# disables the warning). Never blocks: outside git or with no paths it's a no-op.
+record_diff_size() {
+  local sid="$1"; shift
+  [ $# -gt 0 ] || return 0
+  git rev-parse --git-dir >/dev/null 2>&1 || return 0
+  local code=0 tests=0 files=0 path added deleted file n
+  for path in "$@"; do
+    while IFS=$'\t' read -r added deleted file; do
+      [ -n "$file" ] || continue
+      is_review_excluded "$file" && continue
+      [[ "$added" =~ ^[0-9]+$ ]] || continue  # binary
+      n=$((added + deleted)); files=$((files + 1))
+      if is_test_path "$file"; then tests=$((tests + n)); else code=$((code + n)); fi
+    done < <(git diff --numstat --relative HEAD -- "$path" 2>/dev/null)
+    while IFS= read -r file; do
+      [ -n "$file" ] && [ -f "$file" ] || continue
+      is_review_excluded "$file" && continue
+      n=$(wc -l < "$file" | tr -d ' '); files=$((files + 1))
+      if is_test_path "$file"; then tests=$((tests + n)); else code=$((code + n)); fi
+    done < <(git ls-files --others --exclude-standard -- "$path" 2>/dev/null)
+  done
+  [ "$files" -gt 0 ] || return 0
+
+  local budget; budget="$(config '.review_budget_lines' '400')"
+  [[ "$budget" =~ ^[0-9]+$ ]] || budget=400
+  local entry="DIFF: code=$code lines, tests=$tests lines, files=$files (review_budget_lines=$budget)"
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] $entry")', '$(now_iso)');"
+  ok "$entry"
+  if [ "$budget" -gt 0 ] && [ "$code" -gt "$budget" ]; then
+    warn "production diff ($code lines) exceeds review_budget_lines=$budget — hard to review in one pass; split similar features smaller next time (advisory, not blocking)"
+  fi
+}
+
 cmd_log_out() {
   local changes=() verification="" closure=""
   while [ $# -gt 0 ]; do
@@ -1078,6 +1170,7 @@ cmd_log_out() {
   # cmd_add_feature — ':-' turns an empty array into [""], bare "${arr[@]}"
   # trips `set -u` on bash 3.2.
   local changes_json; changes_json=$(json_array "${changes[@]+"${changes[@]}"}")
+  record_diff_size "$sid" "${changes[@]+"${changes[@]}"}"
   local now; now="$(now_iso)"
 
   sqlite3 "$DB_PATH" <<SQL
@@ -1594,6 +1687,73 @@ cmd_record_usage() {
   fi
   python3 "$SCRIPT_DIR/agent_usage.py" --db "$DB_PATH" --project-slug "$PROJECT_SLUG" \
     collect --project-root "$(pwd)" "$@" || true
+  warn_token_budget
+}
+
+# warn_token_budget — best-effort: when .harness.json sets token_quota (the
+# tokens a full quota allows), warns if the active feature (open session's,
+# else the most recent session's) has used at least token_warn_percent
+# (default 15) of it, so the leader can tell the user before the quota runs out.
+warn_token_budget() {
+  local quota pct
+  quota="$(config '.token_quota' '')"
+  [[ "$quota" =~ ^[0-9]+$ ]] && [ "$quota" -gt 0 ] || return 0
+  pct="$(config '.token_warn_percent' '15')"
+  [[ "$pct" =~ ^[0-9]+$ ]] || pct=15
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || return 0
+  local row
+  row=$(db "SELECT f.feature_number, f.name, IFNULL((SELECT SUM(total_tokens) FROM agent_runs r
+  WHERE r.feature_id = f.id AND r.deleted_at IS NULL), 0)
+FROM features f WHERE f.id = (SELECT feature_id FROM session_log
+  WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND feature_id IS NOT NULL
+  ORDER BY (closed_at IS NULL) DESC, id DESC LIMIT 1);" 2>/dev/null) || return 0
+  [ -n "$row" ] || return 0
+  local fnum fname used
+  IFS='|' read -r fnum fname used <<<"$row"
+  [[ "$used" =~ ^[0-9]+$ ]] || return 0
+  if [ $((used * 100)) -ge $((quota * pct)) ]; then
+    warn "token budget: feature $fnum $fname has used $used tokens = $((used * 100 / quota))% of token_quota=$quota (warn at ${pct}%) — tell the user before launching more agents on it"
+  fi
+}
+
+# cmd_test [file...] — run tests with the output kept out of the agent's
+# context: everything goes to progress/test_last.log and only a one-line
+# result (plus the log's tail on failure) is printed; grep the log instead of
+# re-running. With files and .harness.json::test_targeted_command set, runs
+# only those (its {files} placeholder is replaced with the shell-quoted paths,
+# or they're appended if it has none); otherwise runs verify_command.
+cmd_test() {
+  local targeted verify cmd quoted="" f
+  targeted="$(config '.test_targeted_command' '')"
+  verify="$(config '.verify_command' '')"
+  if [ $# -gt 0 ] && [ -n "$targeted" ]; then
+    for f in "$@"; do quoted="$quoted $(printf '%q' "$f")"; done
+    quoted="${quoted# }"
+    if [[ "$targeted" == *"{files}"* ]]; then
+      cmd="${targeted//\{files\}/$quoted}"
+    else
+      cmd="$targeted $quoted"
+    fi
+  elif [ -n "$verify" ]; then
+    [ $# -gt 0 ] && warn "no test_targeted_command in .harness.json — running the full verify_command"
+    cmd="$verify"
+  else
+    fail "no verify_command or test_targeted_command configured in .harness.json"
+    exit 1
+  fi
+
+  local log="progress/test_last.log" rc
+  mkdir -p progress
+  { printf '$ %s\n' "$cmd"; bash -c "$cmd"; } > "$log" 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    ok "tests passed: $cmd (log: $log)"
+  else
+    tail -n 30 "$log"
+    fail "tests failed (exit $rc): $cmd — full output in $log (grep it, don't re-run to read it)"
+  fi
+  return "$rc"
 }
 
 cmd_stats() {
@@ -1674,6 +1834,7 @@ main() {
     check-blockers) cmd_check_blockers ;;
     record-usage) cmd_record_usage "$@" ;;
     stats) cmd_stats "$@" ;;
+    test) cmd_test "$@" ;;
     *)
       fail "unknown subcommand: $sub"
       print_usage >&2

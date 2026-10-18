@@ -216,9 +216,13 @@ if [ -f "$TARGET_DIR/.claude/settings.json" ]; then
   if ! jq -e '.hooks.SubagentStop' "$TARGET_DIR/.claude/settings.json" >/dev/null 2>&1; then
     warn "  it has no SubagentStop hook: copy the record-usage hook from templates/settings.json.tmpl to log agent usage automatically"
   fi
+  if jq -e '[.hooks.PostToolUse[]?.hooks[]?.command // empty | select(test("verify_command"))] | length > 0' \
+      "$TARGET_DIR/.claude/settings.json" >/dev/null 2>&1; then
+    warn "  its PostToolUse hook runs verify_command (the full suite) after every Edit/Write — remove it; agents run targeted tests with scripts/harness.sh test and init.sh runs the suite once"
+  fi
 else
   cp "$TOOLKIT_DIR/templates/settings.json.tmpl" "$TARGET_DIR/.claude/settings.json"
-  ok "scaffolded .claude/settings.json (Claude Code hooks: verify_command after edits, init.sh on session stop — Codex CLI has no equivalent hook mechanism, see docs/specs.md)"
+  ok "scaffolded .claude/settings.json (Claude Code hooks: init.sh on session stop, record-usage on subagent stop — Codex CLI has no equivalent hook mechanism, see docs/specs.md)"
 fi
 
 # specs/ holds git-tracked spec content for sdd=1 features (see docs/specs.md) —

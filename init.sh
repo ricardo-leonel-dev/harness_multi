@@ -113,10 +113,15 @@ VERIFY_COMMAND="$(jq -r '.verify_command // empty' .harness.json)"
 if [ -z "$VERIFY_COMMAND" ]; then
   warn "No verify_command configured in .harness.json — skipping"
 else
-  if bash -c "$VERIFY_COMMAND"; then
-    ok "Verification command passed"
+  # Output goes to progress/test_last.log, not the terminal: a full suite's
+  # output read on every run is one of the biggest token costs of a feature.
+  # Agents grep the log instead of re-running the suite to read it.
+  mkdir -p progress
+  if { printf '$ %s\n' "$VERIFY_COMMAND"; bash -c "$VERIFY_COMMAND"; } > progress/test_last.log 2>&1; then
+    ok "Verification command passed (output: progress/test_last.log)"
   else
-    fail "Verification command failed"
+    tail -n 30 progress/test_last.log
+    fail "Verification command failed — full output in progress/test_last.log"
     EXIT_CODE=1
   fi
 fi
@@ -183,7 +188,8 @@ else
   USAGE_OUT="$(${USAGE_GUARD[@]+"${USAGE_GUARD[@]}"} bash "$SCRIPT_DIR/scripts/harness.sh" record-usage \
     --max-seconds 15 2>&1 | sed $'s/\033\\[[0-9;]*m//g')" || true
   USAGE_RECORDED="$(printf '%s\n' "$USAGE_OUT" | grep -o 'recorded [0-9]* agent run(s).*' | tail -n 1)"
-  USAGE_WARNS="$(printf '%s\n' "$USAGE_OUT" | grep -c '\[WARN\]')"
+  USAGE_BUDGET="$(printf '%s\n' "$USAGE_OUT" | grep 'token budget:' | sed 's/^\[WARN\][[:space:]]*//')"
+  USAGE_WARNS="$(printf '%s\n' "$USAGE_OUT" | grep '\[WARN\]' | grep -vc 'token budget:')"
   if [ -n "$USAGE_RECORDED" ] && [ "${USAGE_WARNS:-0}" -eq 0 ]; then
     ok "agent usage: $USAGE_RECORDED"
   elif [ -n "$USAGE_RECORDED" ]; then
@@ -191,6 +197,7 @@ else
   else
     warn "agent usage not recorded — run scripts/harness.sh record-usage for details (continuing)"
   fi
+  [ -z "$USAGE_BUDGET" ] || warn "$USAGE_BUDGET"
 fi
 
 echo ""
