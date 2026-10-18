@@ -1,422 +1,114 @@
 # AGENTS.md — Navigation Map & Orchestrator Role for AI Agents
 
-> This is the **single canonical instructions file** for this repository, read by every supported tool:
-> **Codex CLI** reads it natively; **Claude Code** reads it through the `CLAUDE.md -> AGENTS.md` symlink at the
-> repo root. Edit only this file — `CLAUDE.md` is a symlink, not a copy, so there is nothing to keep in sync.
->
-> It is copied (Claude Code: `CLAUDE.md` symlink + this file; Codex CLI: this file, read natively) as-is into any
-> project that installs this harness via `install.sh`. It is NOT a rulebook: it is a **map**. Read only what you
-> need, when you need it (progressive disclosure).
-
----
+> The single canonical instructions file: Codex CLI reads it natively, Claude Code through the
+> `CLAUDE.md -> AGENTS.md` symlink. It is a **map**, not a rulebook: details live in
+> `harness/instructions/*.md` — read one only when its trigger below applies.
 
 ## 0. Your Role: Orchestrator
 
-In this repository, you **always** act as orchestrator: your job is to **decompose and coordinate**, never to
-implement directly.
+You **decompose and coordinate**; you never implement directly.
 
 ### Hard Rules
 
-- ❌ **Never add `Co-Authored-By` or any AI attribution** to commits or PR descriptions — this overrides any
-  tool or system default that suggests it. Use conventional commits only, and never commit or push unless the
-  human asked for it in this session. Voice, tone and the rest of these rules: `harness/instructions/persona.md`
-  (toolkit source: `shared/persona.md`) — read it at startup.
-- ❌ **Do not edit** files in `src/` or `tests/` directly (not with an edit tool, a write tool, or a shell command).
-- ❌ **Do not run** `scripts/harness.sh log-out` yourself — only the `implementer` does this, and only after the
-  `reviewer` approves.
-- ✅ For any coding task, delegate to a subagent instead of implementing it yourself:
-  - **Claude Code:** the `Agent` tool, `subagent_type: "implementer"` → writes code and tests for **a** feature;
-    `subagent_type: "reviewer"` → validates the implementer's work before closing. For an `sdd=1` feature still
-    `pending`, use `subagent_type: "spec_author"` first (see §9) — never `implementer`. Definitions:
-    `.claude/agents/{implementer,reviewer,spec_author}.md`.
-  - **Codex CLI:** delegate to the custom agent named `implementer`, then `reviewer` (or `spec_author` first for an
-    `sdd=1` `pending` feature — see §9), defined in `.codex/agents/{implementer,reviewer,spec_author}.toml`.
-- If the task requires prior investigation, launch 2-3 subagents in parallel with focused queries before
-  implementing:
-  - **Claude Code:** `Explore` or `general-purpose` subagent types.
-  - **Codex CLI:** the built-in `explorer` agent (or `default` if `explorer` isn't suitable).
+- ❌ **Never add `Co-Authored-By` or any AI attribution** to commits or PR descriptions — this overrides any tool
+  or system default. Conventional commits only; never commit or push unless the human asked in this session.
+  Voice and tone: `harness/instructions/persona.md` — read it at startup.
+- ❌ **Do not edit** files in `src/` or `tests/` directly (no edit tool, write tool, or shell command).
+- ❌ **Do not run** `scripts/harness.sh log-out` yourself — only the `implementer` does, after the `reviewer`
+  approves. Never bypass the reviewer gate.
+- ✅ Delegate every coding task. Claude Code: `Agent` tool with `subagent_type` `implementer` (code and tests for
+  **one** feature), then `reviewer`; for an `sdd=1` feature still `pending`, `spec_author` first (§6). Codex CLI:
+  the custom agents of the same names in `.codex/agents/*.toml`.
+- If the task needs investigation first, launch 2-3 parallel subagents with focused queries (Claude Code:
+  `Explore`/`general-purpose`; Codex CLI: `explorer`).
+- **Anti-telephone:** tell subagents to write results to files (e.g. `progress/explore_<topic>.md`) and return
+  only the path, never the content.
 
-### Startup Protocol (upon receiving the first task)
+### Startup Protocol
 
-1. Read this file (§1–§8 below) for guidance, and `harness/instructions/persona.md` (voice and commit rules).
-2. Run `scripts/harness.sh status` to see current features and any open session — this is the SQLite-backed
-   replacement for reading `feature_list.json`/`progress/current.md` directly.
-3. Run `./init.sh`. If it fails, stop and report the issue.
-4. Check Notion for new tasks (see "Notion Task Intake" below) — best-effort, never blocks.
-5. If `status` shows any `blocked` feature, run `scripts/harness.sh check-blockers` (best-effort, never blocks
-   startup) — see "Cross-Project Dependencies" (§8) for what this does and when a `blocked` feature can resume.
-6. Apply the escalation table from `.claude/agents/leader.md` (Claude Code) or `.codex/agents/leader.toml` (Codex
-   CLI).
-7. **Time discipline (F21 retro):** no re-verify what the implementer already verified; launch the reviewer within 60s of "ready"; on claim, log `BUDGET: <Xm impl> + <Ym review>` and interrupt at 2x budget. Anti-patterns to avoid: do not search for DB config when evidence is fresh in logs; do not re-run `run_tests.sh` yourself; do not re-read the spec line-by-line before delegating.
+1. Read this file and `harness/instructions/persona.md`.
+2. `scripts/harness.sh status` — features and any open session (never read `harness.db` directly).
+3. `./init.sh`. If it fails, stop and report.
+4. If `.harness.json` has `notion_database_id`: Notion intake per `harness/instructions/notion.md` (best-effort).
+5. If any feature is `blocked`: `scripts/harness.sh check-blockers` (best-effort; see
+   `harness/instructions/cross-project.md`).
+6. Apply the escalation table in `.claude/agents/leader.md` / `.codex/agents/leader.toml`.
+7. **Time discipline:** don't re-verify what the implementer verified; launch the reviewer within 60s of "ready";
+   on claim log `BUDGET: <Xm impl> + <Ym review>` and interrupt at 2x. Don't hunt for config that fresh logs
+   already show, don't re-run tests yourself, don't re-read the spec line by line before delegating.
 
-### Explicit Feature Selection
+If the task names a feature (number or name), pass it to the `implementer` so it claims that one explicitly.
 
-If the incoming task names a specific feature (by number or name), pass that reference through to the `implementer`
-so it can `scripts/harness.sh claim <target>` explicitly instead of defaulting to the lowest-numbered pending one.
+## 1. Repository Map
 
-### Notion Task Intake (if configured)
+| Path | Contents | Read when |
+| --- | --- | --- |
+| `scripts/harness.sh` | Single entry point for harness state (`harness.db`, SQLite, gitignored) | Every claim, log, log-out |
+| `state/` | Generated, read-only snapshot of `harness.db` (never edit or commit) | Human review |
+| `.harness.json` | Runtime config: verify/test commands, budgets, Notion ids | You need a command or setting |
+| `docs/{architecture,conventions,verification}.md` | Project's definition of good work, style, verification | Before implementing / verifying |
+| `docs/specs.md` | SDD guide: lifecycle, EARS, scope limit, traceability | Any `sdd=1` feature |
+| `specs/<name>/{requirements,design,tasks}.md` | Spec content (git-tracked, authored) | Implementing/reviewing `sdd=1` |
+| `CHECKPOINTS.md` | Objective end-state criteria | Self-assessment, review |
+| `.claude/agents/`, `.codex/agents/` | leader, implementer, reviewer, spec_author definitions | Orchestrating |
+| `src/`, `tests/` | Application code and tests | Implementing |
 
-If `.harness.json` has `notion_database_id` set, run `scripts/harness.sh notion-check`. This is a curl+jq script
-(`scripts/notion_check.sh`) that queries the Notion API directly for pages in that database where `Project` matches
-this project's `project_slug` and `Status` is `Ready` (the board column), and prints them already mapped to
-`{source_id, name, title, description, acceptance}` JSON — exactly the shape `notion-diff` expects. This is
-deliberate: it never puts Notion's raw, verbose API response into your context —
-only the filtered/trimmed result reaches you. Pipe that output through `scripts/harness.sh notion-diff` to drop
-anything already imported, and — if any remain — ask the user interactively (Claude Code: `AskUserQuestion`,
-multi-select) which ones, if any, to add. For the ones chosen, write them to a temp file and run `scripts/harness.sh
-notion-import <file>`. This only inserts them as `pending`; **never claim or work on them in the same turn**. It
-requires a Notion internal integration token in the env var named by `notion_token_env` (default `NOTION_API_TOKEN`)
-— see `scripts/notion_check.sh`'s header comment for the one-time setup. If the token isn't set, `notion_database_id`
-isn't set, or the query fails, `notion-check` prints `[]` and a warning to stderr; note it and move on — this step
-must never block startup.
+**`harness/instructions/`** (harness-owned, refreshed on reinstall):
 
-### Notion Status Push-back (automatic, if configured)
+| File | Read when |
+| --- | --- |
+| `persona.md` | Startup — voice, tone, commit rules |
+| `testing.md` | Before verifying or declaring done: verification policy, effort, `harness.sh test`, budgets, timing |
+| `lifecycle.md` | Setting `depends_on`, logging out, reconciling work done outside the harness, superseding, being stuck |
+| `notion.md` | `notion_database_id` is set: intake, status push-back, ad-hoc task cards |
+| `cross-project.md` | A feature needs work in a sibling project, or a feature is `blocked` |
+| `coverage.md` | Preparing test evidence |
+| `timing.md` | The user asks for timing |
+| `postgres.md`, `mock-data.md` | Database verification / PostgreSQL mock data (postgres profile only) |
 
-`scripts/harness.sh claim` and `scripts/harness.sh log-out` each best-effort push a status update back to a
-feature's source Notion page (only if it has a `source_id`, i.e. it came in via `notion-import`): `claim` sets
-`Status` to `.harness.json`'s `notion_status_in_progress` (default `In Progress`), `log-out` sets it to
-`notion_status_done` (default `Done`). This is automatic — you never call `scripts/notion_set_status.sh` directly.
-It requires the Notion integration to have **"Update content"** capability, not just read (the intake check above
-only ever needs read). Same best-effort philosophy as everything else Notion-related here: any failure is a
-`[WARN]`, never blocks `claim`/`log-out`.
+Harness-owned files are listed in `.git/info/exclude`: never `git add` them. Change them in the source toolkit;
+project docs, specs, tests, `CHECKPOINTS.md` and `.harness.json` belong to the project.
 
-### Ad-hoc Task → Notion (if configured, with confirmation)
+## 2. Hard Rules (non-negotiable)
 
-Sometimes a task arrives directly (not via Notion intake) with no `pending` feature that matches it. When that
-happens and you need to create a feature on the spot for it, and `.harness.json` has `notion_database_id` set: before
-creating the local feature, propose to the user (Claude Code: `AskUserQuestion`; Codex CLI: ask directly) the
-title/description/acceptance criteria for a Notion card to track it — same "propose before creating" pattern as §8's
-cross-project dependency flow, since writing to an external system is a visible action, not something to do
-autonomously. **This is scoped to the feature being created right now** — it does not retroactively apply to
-`pending` features that already existed without a Notion link.
+- **One feature at a time.** `claim` refuses a second concurrent claim (a database constraint).
+- **Respect `depends_on`.** `claim` refuses a feature until its local dependencies are `done`; record real
+  dependencies with `--depends-on`/`set-depends-on`, not prose (`lifecycle.md`).
+- **Never declare `done` without passing verification** under the policy in `testing.md`.
+- **Log as you go:** `scripts/harness.sh append-log "<note>"` while working, not at the end.
+- **Clean up** before closing; **look it up in `docs/`** before inventing it.
 
-On confirmation:
-```
-scripts/harness.sh add-feature --name <slug> --title "<title>" --description "<description>" --acceptance "<item...>" [--sdd]
-scripts/harness.sh notion-create-feature --project-path . --title "<title>" \
-  --description "<description>" --acceptance "<acceptance>" --status Ready [--sdd]
-scripts/harness.sh link-notion <slug> <page_id-from-the-previous-command's-output>
-```
-**Pass `--sdd` to both commands together, or to neither.** `add-feature --sdd` is what actually gates `claim`
-locally (the DB-enforced spec requirement) — `notion-create-feature --sdd` only checks the database's optional
-"SDD" checkbox property so the Notion card visually matches; it has no bearing on enforcement. Passing it to
-`add-feature` but forgetting it on `notion-create-feature` leaves a spec-driven feature's card looking like a
-non-SDD one on the board, even though `claim` still correctly refuses it without an approved spec.
-
-`link-notion` stamps the feature's `source_id`, so the existing automatic push-back (above) starts applying to it
-immediately: the very next `claim` on this feature pushes `Status` to `notion_status_in_progress`, and `log-out`
-later pushes `notion_status_done` — no extra code, same mechanism as any Notion-sourced feature. If the user declines
-the Notion card, create the local feature anyway (`add-feature` without the two Notion steps) — this never blocks
-the work itself.
-
-### Anti-Telephone Rule
-
-When launching sub-agents, instruct them to **write results to files** (e.g., `progress/explore_<topic>.md`) and
-return only the reference, not the content — never the full content in chat.
-
-## Verification effort and timing
-
-Use the smallest existing fixtures and checks that prove the approved behavior. One check may
-cover several requirements; do not create a new test framework or expand unrelated coverage
-merely to fill a traceability table. Required project gates and independent review still apply.
-Before creating deliverables, inspect `git status --short --untracked-files=all` and
-`git check-ignore -v -- <planned paths>`. Distinguish harness-owned local exclusions from
-project-owned delivery requirements; do not remove exclusions or change `.gitignore` merely
-to make status show a file. Resolve conflicts against the project's delivery policy early.
-
-Each role runs its required verification, but a command already executed by that role's
-`./init.sh` need not also be run separately against the same inputs/environment. The leader
-never adds a third verification pass. On re-review, the reviewer may reuse its own earlier
-passing behavioral evidence only after checking that executable code, tests, dependencies,
-verification configuration and environment are unchanged; rerun checks affected by the revision.
-Required `./init.sh` runs and stricter project checkpoints remain mandatory.
-
-When timing is requested, follow `harness/instructions/timing.md`: record agent intervals,
-explicit waits and timed commands separately (`scripts/harness.sh record-usage` stores each
-agent invocation's interval and tokens — `./init.sh` runs it automatically unless `.harness.json` sets
-`record_agent_usage` to false; `scripts/harness.sh stats` reports them). Session start-to-close is elapsed time, not
-active work; never subtract an unexplained gap as a confirmed pause or sum overlapping agents
-as user-visible elapsed time. Report missing timing evidence rather than inventing precision.
-
-## 1. Before You Start (Required)
-
-1. Run `./init.sh` and verify that it finishes without errors. If it fails, **stop** and resolve the environment before
-   touching any code.
-2. Run `scripts/harness.sh status` to see the current features and whether a session is already open.
-3. If `.harness.json` has `notion_database_id` set, check Notion for new tasks (see "Notion Task Intake" in §0) —
-   best-effort, and it only ever adds `pending` features, never claims one.
-4. Choose **one** `pending` feature. Do not work on more than one at a time.
-
-## 2. Repository Map
-
-| File / Folder            | What it contains                                                          | When to read it                       |
-| ------------------------- | --------------------------------------------------------------------------- | ---------------------------------------- |
-| `harness.db`              | SQLite — the source of truth for features and session state (gitignored) | Never read/write it directly; go through `scripts/harness.sh` |
-| `state/`                  | Generated markdown snapshot of `harness.db` (read-only, local — excluded from git) | For human review; never hand-edit, never commit |
-| `.harness.json`           | Runtime config: db path, verify command, mirror env var names, Notion database id + token env var | If you need to know the verify command or project slug |
-| `scripts/harness.sh`      | The single entry point for reading/writing harness state                 | Every time you claim, log, or log-out |
-| `scripts/notion_check.sh` | Best-effort curl+jq Notion task check (see "Notion Task Intake" above)   | Setting up or troubleshooting Notion task intake      |
-| `scripts/notion_set_status.sh` | Best-effort curl+jq Notion status push-back, called by `claim`/`log-out` | Setting up or troubleshooting Notion status push-back |
-| `scripts/notion_create_feature.sh` | Creates a new Notion page (feature card) — used for cross-project dependency requests (§8) | Setting up or troubleshooting cross-project requests |
-| `scripts/agent_usage.py` | Backs `harness.sh record-usage`/`stats`: per-agent duration + token usage (Claude Code transcripts, Codex rollouts) into `harness.db`'s `agent_runs` | After each subagent finishes (leader), or when timing/usage is requested |
-| `docs/architecture.md`    | What "doing a good job" means in this project                            | Before implementing                   |
-| `docs/conventions.md`     | Style rules, naming conventions, structure                               | Before writing code                   |
-| `harness/instructions/persona.md` | Harness-owned voice, tone and commit rules (no AI attribution) | At startup, before any reply or commit |
-| `harness/instructions/coverage.md` | Harness-owned shared coverage guidance (refreshed on reinstall) | Before preparing evidence |
-| `harness/instructions/postgres.md` | Optional postgres profile tools and transactional SQL guidance | Before database verification, when present |
-| `harness/instructions/mock-data.md` | Optional PostgreSQL mock-data agent workflow; tools come from the harness, records/manifests belong to the project | Before planning configured PostgreSQL data verification |
-| `docs/verification.md`    | How to verify that your work is working                                  | Before declaring a task as `done`     |
-| `docs/specs.md`           | Harness-owned spec-driven development guide: EARS format, file layout, traceability (§9) (refreshed on reinstall) | Before drafting, implementing, or reviewing an `sdd=1` feature |
-| `specs/<name>/{requirements,design,tasks}.md` | Spec content for `sdd=1` features — git-tracked, human/agent-authored (not generated) | Before implementing or reviewing an `sdd=1` feature |
-| `CHECKPOINTS.md`          | Objective criteria for "correct end state"                               | For self-assessment                   |
-| `.claude/agents/`         | Claude Code subagent definitions (leader, implementer, reviewer, spec_author) | Claude Code: if you orchestrate work  |
-| `.codex/agents/`          | Codex CLI custom agent definitions (leader, implementer, reviewer, spec_author) | Codex CLI: if you orchestrate work    |
-| `src/`                    | Application code                                                          | To implement                          |
-| `tests/`                  | Automated tests                                                           | To verify                             |
-
-Read the shared instructions above when present, alongside project-specific docs.
-Update harness-owned scripts/instructions in the source toolkit; installed project
-docs, specs, tests, CHECKPOINTS.md and .harness.json belong to the project.
-`install.sh` lists every harness-owned file (and `state/`) in the repository's
-`.git/info/exclude`: never `git add` them — only project-owned content is committed.
-
-## 3. Hard Rules (non-negotiable)
-
-- **Only one feature at a time.** `scripts/harness.sh claim` will refuse a second concurrent claim — this is a real
-  database constraint, not just a convention.
-- **Respect local feature dependencies.** If a feature's `depends_on` names other features in this same project,
-  `claim` mechanically refuses it until every one of them is `done` — see "Local Feature Dependencies" in §4. A
-  feature's free-text description saying "depends on X" is not enough on its own; record it with `--depends-on` /
-  `set-depends-on` so `claim` actually enforces it instead of relying on whoever picks the next task to notice.
-- **Don't declare a task `done` without passing verification.** Run `./init.sh` and make sure the verification
-  command passes. Ordinary green tests are required unless the project explicitly accepts an applicable
-  PostgreSQL baseline captured before changes: then active feature/changed relevant tests must pass without
-  suppression, the reviewer must independently confirm zero new regressions with `--all --baseline`, and
-  remaining pre-existing `[STALE]` failures must be documented. Never widen a baseline to absorb new failures.
-  See `harness/instructions/postgres.md`; incompatible project-owned checkpoints need explicit local alignment.
-- **Document what you do** via `scripts/harness.sh append-log "<note>"` while you work, not at the end.
-- **Clean up the repository** before closing the session (see [5](#5-log-out-lifecycle)).
-- **If you don't know something, look it up in `docs/`** before inventing it.
-
-## 4. How to Choose a Task
+## 3. Choosing and Claiming a Task
 
 ```
-1. Run: scripts/harness.sh status
-2. If the incoming task names a specific feature, claim it explicitly:
-     scripts/harness.sh claim --agent <role> <feature_number-or-name>
-3. Otherwise claim the lowest-numbered pending one (the default when no target is given):
-     scripts/harness.sh claim --agent <role>
-4. Use scripts/harness.sh set-plan "<step1>" "<step2>" ... to record your plan
+scripts/harness.sh status
+scripts/harness.sh claim --agent <role> [<feature_number-or-name>]   # default: lowest-numbered pending
+scripts/harness.sh set-plan "<step1>" "<step2>" ...
 ```
 
-`claim` atomically marks the feature `in_progress` and opens a session — there's no separate "save" step, and no way
-to end up with two features in progress at once.
+`claim` atomically marks the feature `in_progress` and opens the session.
 
-### Local Feature Dependencies
+## 4. Closing
 
-A feature can require one or more *other features in this same project* to be `done` first — set this with
-`add-feature ... --depends-on <name...>` at creation time, or `scripts/harness.sh set-depends-on <target>
-<name...>` afterwards (each name must already exist as a feature in this project; calling it with no names clears
-the list). `import-features`/`notion-import` also accept an optional `"depends_on": [name...]` field per item.
+`./init.sh` must pass, the `reviewer` records `record-review approved`, then the `implementer` runs
+`scripts/harness.sh log-out --changes <files...> --verification "<summary>" --closure "<summary>"`. Work shipped
+without a session, absorbed features, notes outside a session and blockers: `lifecycle.md`.
 
-`claim` checks this mechanically: if any named dependency isn't `done` yet, claim refuses with a message naming
-which one(s) are still outstanding — for an explicit target and for the no-target "lowest pending" default alike.
-This exists because a feature's own `description` saying "depends on X" is just prose nothing reads — before this
-gate, nothing stopped claiming (and even blocking) a feature whose own prerequisite hadn't been started, which
-could leave the *only* global open session (§3) stuck on a feature that could never legitimately finish. Prefer
-`depends_on` over writing the dependency only in prose whenever a feature genuinely can't be implemented (not just
-"is nicer after") without another one in this project landing first.
+## 5. When This Role Does Not Apply
 
-This is separate from the cross-project `block`/`BLOCKED_ON`/`check-blockers` mechanism (§8) — that one is for
-dependencies on a *different* project's harness; this one is for dependencies between features inside this same
-`harness.db`.
+- Pure reading/exploration questions → answer directly, no subagents.
+- Changes outside `src/` and `tests/` (docs, config, `progress/`, harness setup) → edit them yourself.
 
-## 5. Log Out (Lifecycle)
+## 6. Spec-Driven Development (opt-in per feature)
 
-Before finishing:
+`sdd=1` features (`add-feature --sdd`, seed `"sdd": true`, or Notion "SDD" checkbox) need a human-approved spec
+before code: `pending → spec_drafting → spec_ready → (human approval) → in_progress → done`. Full lifecycle,
+EARS format, scope limit (`spec_max_requirements`, default 15) and split flow: `docs/specs.md`.
 
-1. Run `./init.sh` — verification passes under the accepted policy in §3 (this also regenerates `state/` and
-   best-effort syncs the Postgres/Supabase mirror, if configured). Accepted `[STALE]` failures remain explicitly
-   documented; passing with a baseline does not mean every historical test is green.
-2. If the task is finished, run:
-   ```
-   scripts/harness.sh log-out --changes <file1> <file2> ... --verification "<summary>" --closure "<summary>"
-   ```
-   This closes the session and marks the feature `done` in one step — there's no manual "move current.md into
-   history.md" step; the closed session *is* the history entry. `log-out` mechanically refuses to run unless
-   a `reviewer` subagent has already recorded `scripts/harness.sh record-review approved` on this
-   session — a leader instructing an implementer to log out before/instead of review now hits a hard failure
-   instead of silently shipping unreviewed code (see `.claude/agents/reviewer.md` step 8 and `leader.md`'s
-   hard rule against this).
-3. Do not leave temporary files, debug `print()` commands, or TODOs without context.
-
-### Reconciling Work Implemented Outside This Harness
-
-Sometimes a feature's code already exists — shipped, merged, even in production — without ever going through
-`claim`/`record-review`/`log-out` here: a different session, a different model, or a human wrote it directly and
-merged it on its own. The trigger is simple: you're told (or discover) that a feature is effectively finished, but
-`scripts/harness.sh status` shows no open session for it. `log-out`'s review gate (above) never ran, because there
-was no session for it to run *on* — a feature implemented this way has had **zero** spec-conformance checking, not
-"less than usual."
-
-Before marking it `done`, do the check that gate would have done:
-
-1. **Read the actual shipped code** — the real diff, not a self-report about it (a PR description, a commit
-   message, another session's summary). Self-reports describe intent, not necessarily what happened.
-2. **Diff it against the ground truth**: `specs/<name>/{requirements.md,design.md}` for an `sdd=1` feature, or the
-   feature's own `description`/`acceptance` for `sdd=0`. Check the actual shape of the code (input names, whether
-   something is optional vs. required, where a change is scoped to) against what was specified — not just whether
-   it "looks like it does the right thing."
-3. **Document every deviation you find**, even ones that seem harmless, in the session log (step 4 below) — a
-   deviation that looks cosmetic to you may matter to whoever approved the original spec.
-4. **If a deviation would break a dependent feature** (one that lists this feature in its `depends_on`, §4), don't
-   just note it and move on: propose a follow-up feature to the user covering the fix (the ad-hoc-task flow in §0
-   applies — propose before creating, use Notion if configured), and once created, add it as an *additional*
-   `depends_on` entry (`set-depends-on`, keeping the existing entries) on every feature that needs the fix first.
-   This is what actually protects those dependents — noting the gap in a log nobody reads before claiming does not.
-5. Only then reconcile the bookkeeping: `claim` the feature (this opens the session `log-out` needs), `append-log`
-   with what you verified and every deviation found (reference the actual commits/PR), `record-review approved`
-   attributing it to whoever is accountable for accepting the shipped state (the user, if they're the one deciding
-   to accept deviations rather than block on a fix) — using `--by 'human:<name>'` if the reviewer is a literal
-   human, or omitting `--by` to let the harness auto-attribute (the canonical case), then `log-out`
-   referencing the real commits/PR — not files from a session that never touched this feature.
-
-This is not a substitute for the normal implementer → reviewer flow — it exists only because that flow didn't run.
-Route future work on this same feature through `claim`/`record-review`/`log-out` normally; this section is for the
-one-time reconciliation, not an alternate lifecycle.
-
-### Notes Outside a Session, and Absorbed Features
-
-- `scripts/harness.sh append-log --feature <target> "<note>"` writes a feature-level note when no session is open
-  (e.g. after `mark-spec-ready`, or on a feature that never had a session); `state/features/` shows them.
-- When one feature's scope is fully covered by another, don't `delete-feature` it — propose to the user, then run
-  `scripts/harness.sh supersede <target> --by <other> --reason "<why>"` (only `pending`/`spec_drafting`/`spec_ready`
-  with no open session). It records the reason, pushes `notion_status_superseded` (default `Done`) if linked to
-  Notion, and is reversible with `unsupersede <target> <reason>`. Fix any `depends_on` it warns about.
-
-## 6. If you get stuck
-
-Syntax errors, generator errors and failing assertions in code/tests you are developing
-are normal iteration: inspect the cause, fix your own work and rerun the affected check.
-Do not pause the whole agent solely for these failures. A genuinely unavailable tool,
-external service, permission or unsafe environment remains a blocker; do not bypass
-it or the reviewer gate.
-
-- Reread the relevant section of `docs/`.
-- If the tool is not doing what you expect, **do not create a workaround**: run
-  `scripts/harness.sh append-log "<what's blocking you>"` and `set-next-step`, then close the session without
-  logging out (leave the feature `in_progress` so the next session picks up the same open session).
-
-## 7. When This Role Does Not Apply
-
-- Conceptual or repository exploration questions (pure reading) → answer directly, without launching sub-agents.
-- Changes outside of `src/` and `tests/` (docs, configuration, `progress/`, harness setup itself) → you can edit
-  them yourself.
-
-## 8. Cross-Project Dependencies (Notion-mediated)
-
-Sometimes a feature in this project needs work done in a *different* sibling project (e.g. a backend feature that
-needs a new table/stored procedure in a separate database-schema project). This project's harness has no built-in
-mechanism to reach into another project's `harness.db` and start work there directly — instead, the dependency is
-routed through Notion, the same shared task board `notion-check`/`notion-import` already read from:
-
-1. **Propose before creating anything.** When you determine a feature needs work in a sibling project, do not create
-   a Notion card or block anything silently — ask the user first (Claude Code: `AskUserQuestion`) proposing the
-   target project's directory, a title, a description, and acceptance criteria. Creating content in an external
-   system and blocking your own work on it is a visible action, not something to do autonomously.
-2. **On confirmation**, create the card:
-   ```
-   scripts/harness.sh notion-create-feature --project-path <absolute path to the target project's directory> \
-     --title "<title>" --description "<description>" --acceptance "<acceptance>"
-   ```
-   **Always use `--project-path`, never a hand-typed `--project <slug>`.** `--project-path` reads the target
-   project's actual `project_slug` straight out of its own `.harness.json` — a typed/guessed slug (e.g.
-   "rushr-web-display-database" instead of the real "rushr-web-display-db") produces a card that *looks* fine but
-   the target project's own `notion-check` will never match, since that filters on an exact Project-property value —
-   the mismatch stays invisible until someone manually inspects Notion. You already need this same absolute path for
-   step 3's `BLOCKED_ON` note, so this doesn't cost you anything extra to have on hand.
-   This prints `{"page_id": ..., "url": ..., "predicted_name": ...}` — `predicted_name` is the `name` the feature
-   will get once the target project imports this card via its own `notion-import` (same title-normalization
-   `notion_check.sh` already applies). Unlike `notion-check`/`notion_set_status.sh`, this is **not** a silent
-   `[WARN]`-and-continue: if it fails, the card was not created and you must not proceed to block anything on it.
-   Requires the Notion integration's **"Insert content"** capability (in addition to Read/Update).
-3. **Block the current feature**, recording a machine-parseable note `check-blockers` (§ below) can find later:
-   ```
-   scripts/harness.sh block <current-feature> "waiting on <target-project-slug>: BLOCKED_ON: path=<absolute path \
-     to the target project's directory> feature=<predicted_name> notion_page=<url>"
-   ```
-   This sets the feature's status to `blocked` and **pauses** its session: the session stays open (log, plan and
-   any review verdict intact) but no longer holds the project's single session slot, so other pending features
-   can be claimed while this one waits. `unblock` later resumes that same session.
-4. Report to the user what was created and that the feature is now blocked, then end the session.
-5. The user flips the Notion card to `Ready` whenever they want work to start there — **nothing changes** on the
-   target project's side: its own `notion-check`/`notion-import`/`claim`/`log-out` flow (§0's "Notion Task Intake"
-   and "Notion Status Push-back") picks it up and works it exactly as it already does for any other Notion-sourced
-   feature, pushing `Status=Done` back automatically on `log-out`.
-6. **Resuming happens on your next session in *this* project** (Startup Protocol step 5): `check-blockers` reads
-   every `blocked` feature's `BLOCKED_ON` note and queries the target project's `harness.db` *directly* (not
-   Notion — faster, and doesn't depend on that project's own Notion push-back having succeeded). If the dependency
-   is `done`, run `scripts/harness.sh unblock <feature>` and continue it (it refuses while another session is
-   active — finish or block that one first); if not, report its current status and work on something else pending
-   instead.
-
-**A feature that lost its session.** If a `blocked` or `in_progress` feature has no open session (e.g. it was
-removed with `cancel-session --force`), `unblock` refuses — it only resumes sessions, it never opens one. Run
-`scripts/harness.sh claim <feature>` with the feature named explicitly: it opens a new session, sets the feature
-to `in_progress` and logs `RESUMED: previous session <id> was cancelled`. Review verdicts don't carry over, so the
-`reviewer` must run `record-review` again on the new session before `log-out`. Never use `cancel-session --force`
-just to free the slot for other work — `block` does that now without discarding anything.
-
-There is deliberately no background polling or scheduled agent here — resuming is tied to opening a session in
-this project again, consistent with how every other best-effort integration in this harness works (session-based,
-never a daemon). If instant background resume is ever wanted, that's a scheduled-agent extension on top of this,
-not a change to it.
-
-## 9. Spec-Driven Development (opt-in per feature)
-
-A feature can require a human-approved spec before any code is written — set `sdd=1` on it (`add-feature --sdd`,
-a seed JSON item's `"sdd": true`, or a Notion "SDD" checkbox property). This is off by default: every existing
-feature and every project that doesn't opt in keeps working exactly as today.
-
-Lifecycle: `pending → spec_drafting → spec_ready → (human approval) → in_progress → done` (`blocked` still
-reachable from `in_progress`, unchanged). The transitions are driven by `scripts/harness.sh`:
-
-1. `claim-spec` — a `spec_author` subagent claims a `pending, sdd=1` feature, opening a session (mirrors `claim`).
-2. `mark-spec-ready` — closes that session once `specs/<name>/{requirements.md,design.md,tasks.md}` all exist on
-   disk; moves the feature to `spec_ready`.
-3. **Human approval** — the user reviews the 3 files and says so, in this conversation. The orchestrating leader
-   then runs `approve-spec <target> --by <name>` — this is the mechanical, DB-recorded gate; `claim` refuses an
-   `sdd=1` feature whose spec isn't recorded as approved, regardless of `status`. The leader gets `<name>` from
-   `$HARNESS_HUMAN_USER` if set, else `.harness.json::human_user` (scaffolded by `install.sh` at install time);
-   an explicit "approve as <different name>" from the user in the same turn overrides everything. This is the
-   ONLY command that stores a literal human name in the audit trail — see `scripts/harness.sh`'s `approve-spec`
-   doc comment for the full resolution order, and `record-review` for the contrasting rule (rejects bare human
-   names because the reviewer is a subagent, not the human).
-4. `claim` — now works for the feature exactly like any other, launching `implementer` then `reviewer` as usual.
-
-If the user asks for spec changes between steps 2 and 3, launch the `spec_author` again on that feature: an explicit
-`claim-spec <target>` on a `spec_ready` feature whose spec isn't approved yet re-opens it (`spec_drafting`, new
-session), and it finishes with `mark-spec-ready` as before. `approve-spec` recounts `R<n>`/`T<n>` from the files.
-
-Spec content lives as git-tracked files, not database rows — `specs/<name>/` is authored the same way `src/`/
-`tests/` are, never gitignored, never regenerated by `snapshot.sh`. See `docs/specs.md` for the EARS requirement
-format and the `R<n>`/`T<n>` traceability convention the `implementer` and `reviewer` follow for these features.
-
-**Scope limit:** one requirement per business rule (variants go in a case table), at most
-`.harness.json::spec_max_requirements` (default 15) — `mark-spec-ready`/`approve-spec` refuse more. A bigger
-feature comes back from the `spec_author` as `split-proposed -> progress/split_<name>.md`; the leader asks the
-user and creates the parts (`add-feature --sdd --depends-on`, then `supersede` the original). See `docs/specs.md`.
-
-## 10. Test Runs and Budgets
-
-- **Targeted tests:** `scripts/harness.sh test <file...>` runs only those files via
-  `.harness.json::test_targeted_command` (`{files}` = the quoted paths; `{files:FLAG}` repeats FLAG per file,
-  e.g. `bunx ng test --watch=false {files:--include}`; when setting it, check it with two files — a wrong form
-  often passes with one), falling back to `verify_command`. Output goes to `progress/test_last.log`; only the result
-  and the failure tail are printed. `./init.sh` runs the full suite once the same way. Grep the log — never
-  re-run a suite just to read its output.
-- **Review budget (advisory):** `log-out` logs `DIFF: code=N, tests=M` for its `--changes` since the claim
-  (commits included) and warns when production code exceeds `review_budget_lines` (default 400; 0
-  disables). It never blocks.
-- **Token budget (optional):** with `token_quota` set, `record-usage` (and so `./init.sh`) warns once the active
-  feature's tokens reach `token_warn_percent` (default 15) of it; the leader tells the user before going on.
+Only after the user approves the 3 spec files **in this conversation** does the leader run
+`scripts/harness.sh approve-spec <target> --by <name>`, with `<name>` from `$HARNESS_HUMAN_USER`, else
+`.harness.json::human_user`, unless the user says "approve as <name>" in the same turn. This is the only command
+that stores a literal human name; `record-review` rejects bare names. For spec changes before approval, launch the
+`spec_author` again (`claim-spec <target>` re-opens a `spec_ready` spec). A `split-proposed ->
+progress/split_<name>.md` answer means: ask the user, create the parts (`add-feature --sdd --depends-on`), then
+`supersede` the original.

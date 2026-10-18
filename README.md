@@ -197,8 +197,8 @@ From then on, at the start of every session the `leader` runs
 `scripts/harness.sh notion-check` for pages tagged with this project's slug
 and sitting in the `Ready` column that aren't imported yet (tracked via
 `features.source_id`, so it's idempotent), and asks you which ones, if any,
-to add via `scripts/harness.sh notion-import`. See `AGENTS.md`'s "Notion
-Task Intake" section for the exact flow.
+to add via `scripts/harness.sh notion-import`. See `shared/notion.md`
+(installed as `harness/instructions/notion.md`) for the exact flow.
 
 ### Status push-back (optional, automatic once the token can write)
 
@@ -217,8 +217,8 @@ If one project's feature needs work done in a *sibling* project that also has th
 installed, `scripts/harness.sh notion-create-feature` creates a new card directly (Project=the
 target project's slug, Status defaults to `Backlog`) instead of a human copy-pasting it by hand,
 and `block`/`unblock`/`check-blockers` track the requesting feature as blocked until the target
-project's own existing intake/push-back flow (above, unchanged) marks it `done`. See `AGENTS.md`'s
-"Cross-Project Dependencies" section for the full flow.
+project's own existing intake/push-back flow (above, unchanged) marks it `done`. See
+`shared/cross-project.md` for the full flow.
 
 This needs the integration's **Insert content** capability (`notion.so/my-integrations` → your
 integration → Capabilities), in addition to Read/Update content above — it's the one capability

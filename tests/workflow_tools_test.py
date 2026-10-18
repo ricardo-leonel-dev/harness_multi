@@ -137,6 +137,10 @@ class WorkflowTools(unittest.TestCase):
         self.assertEqual(reinstall.returncode, 0, reinstall.stdout + reinstall.stderr)
         mapping = {'scripts/time_phase.py': TIMER, 'scripts/assemble_migration.py': ASSEMBLER,
                    'harness/instructions/timing.md': ROOT / 'shared/timing.md',
+                   'harness/instructions/testing.md': ROOT / 'shared/testing.md',
+                   'harness/instructions/lifecycle.md': ROOT / 'shared/lifecycle.md',
+                   'harness/instructions/notion.md': ROOT / 'shared/notion.md',
+                   'harness/instructions/cross-project.md': ROOT / 'shared/cross-project.md',
                    'harness/instructions/postgres.md': ROOT / 'profiles/postgres/verification.md'}
         for path, source in mapping.items():
             self.assertEqual((project / path).read_bytes(), source.read_bytes())
