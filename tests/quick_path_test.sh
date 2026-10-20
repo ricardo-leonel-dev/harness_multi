@@ -6,7 +6,8 @@
 #      learnings table; add-feature --size / set-size record the size.
 #   2. log-out --quick closes a small feature without a reviewer only when every
 #      quick-gate signal is clean (files already uncommitted at claim excluded), refuses (and logs why) otherwise, never
-#      applies to normal features and never bypasses requested changes.
+#      applies to normal features and never bypasses requested changes. A
+#      normal close needs ./init.sh green on the exact tree it closes.
 #   3. hold keeps the slot: claim and log-out refuse until unhold.
 #   4. learn caps notes at 300 characters; recall returns at most 5 ranked
 #      matches; forget hides a note.
@@ -57,8 +58,20 @@ H claim big >/dev/null || die "claim big"
 out=$(H log-out --quick --changes src/app.ts --verification v --closure c) && die "--quick must refuse a normal feature"
 grep -q 'only for features marked small' <<<"$out" || die "wrong refusal for a normal feature: $out"
 pass "--quick refuses a normal-size feature"
-H record-review approved --by human:tester >/dev/null && H log-out --changes src/app.ts --verification v --closure c >/dev/null \
-  || die "normal close"
+H record-review approved --by human:tester >/dev/null || die "record-review big"
+printf 'a\nb\nc\n' > "$P/src/app.ts"
+out=$(H log-out --changes src/app.ts --verification v --closure c) && die "an approval without ./init.sh must not close"
+grep -q 'init.sh has not run in this session' <<<"$out" || die "missing-init reason: $out"
+H record-init fail >/dev/null
+out=$(H log-out --changes src/app.ts --verification v --closure c) && die "an approval over a failed ./init.sh must not close"
+grep -q 'the last ./init.sh failed' <<<"$out" || die "failed-init reason: $out"
+H record-init pass >/dev/null && printf 'a\nb\n' > "$P/src/app.ts"
+out=$(H log-out --changes src/app.ts --verification v --closure c) && die "changes after the passing ./init.sh must not close"
+grep -q 'files changed after the last passing ./init.sh' <<<"$out" || die "stale-init reason: $out"
+H record-init none >/dev/null
+out=$(H log-out --changes src/app.ts --verification v --closure c) || die "no verify_command should close with a warning: $out"
+grep -q 'no verify_command' <<<"$out" || die "no-verify warning missing: $out"
+pass "a normal close needs ./init.sh green on the exact tree it closes"
 
 printf 'pre\n' > "$P/src/pre.ts"; printf 'x\nlocal\n' > "$P/src/other.ts"   # uncommitted before the claim
 H claim tiny >/dev/null || die "claim tiny"
@@ -122,6 +135,7 @@ out=$(H log-out --quick --changes src/other.ts --verification v --closure c) && 
 grep -q 'already requested changes' <<<"$out" || die "wrong refusal: $out"
 H record-review approved --by human:tester >/dev/null
 printf 'l\n%.0s' $(seq 1 90) >> "$P/src/other.ts"
+H record-init pass >/dev/null
 H log-out --quick --changes src/other.ts --verification v --closure c >/dev/null || die "a reviewer approval should win over the gate"
 pass "requested changes block --quick; an existing approval closes it"
 
@@ -131,7 +145,7 @@ H claim held >/dev/null || die "claim held"
 H hold "user rejected the escalation" >/dev/null || die "hold"
 out=$(H claim next) && die "claim must refuse while a session is held"
 grep -q 'on hold' <<<"$out" || die "claim refusal should mention hold: $out"
-H record-review approved --by human:tester >/dev/null
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
 out=$(H log-out --changes src/app.ts --verification v --closure c) && die "log-out must refuse a held session"
 grep -q 'on hold' <<<"$out" || die "log-out refusal should mention hold: $out"
 H status | grep -q 'held_at' || die "status should show held_at"

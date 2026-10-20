@@ -23,7 +23,9 @@ open session can get stuck on a feature that can never finish. This is separate 
    scripts/harness.sh log-out --changes <file1> <file2> ... --verification "<summary>" --closure "<summary>"
    ```
    This closes the session and marks the feature `done`; the closed session *is* the history entry. `log-out`
-   refuses unless a `reviewer` already ran `scripts/harness.sh record-review approved` on this session.
+   refuses unless a `reviewer` already ran `scripts/harness.sh record-review approved` on this session, and
+   unless the last `./init.sh` of the session passed on exactly the tree being closed (any change after it
+   needs another run).
 3. Leave no temporary files, debug prints, or TODOs without context.
 
 ## Reconciling work implemented outside the harness
@@ -43,7 +45,8 @@ it `done`:
    `depends_on` (`set-depends-on`, keeping existing entries) on every feature that needs the fix first.
 5. Then reconcile: `claim` the feature, `append-log` what you verified and every deviation (reference the real
    commits/PR), `record-review approved` attributed to whoever accepts the shipped state (`--by 'human:<name>'`
-   for a literal human, or omit `--by` to auto-attribute), then `log-out` referencing the real commits/PR.
+   for a literal human, or omit `--by` to auto-attribute), run `./init.sh`, then `log-out` referencing the real
+   commits/PR.
 
 This is a one-time reconciliation, not an alternate lifecycle: future work on the feature goes through
 `claim`/`record-review`/`log-out` normally.
