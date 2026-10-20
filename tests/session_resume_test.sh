@@ -38,7 +38,7 @@ H() { (cd "$P" && HARNESS_AGENT=implementer ANTHROPIC_MODEL= bash scripts/harnes
 q() { sqlite3 "$P/harness.db" "$1"; }
 fstatus() { q "SELECT status FROM features WHERE name='$1';"; }
 approve_and_log_out() {
-  H record-review approved --by human:tester >/dev/null || die "record-review on $1"
+  H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "record-review on $1"
   H log-out --changes x --verification v --closure c >/dev/null || die "log-out on $1: $(H status)"
   [ "$(fstatus "$1")" = done ] || die "$1 should be done after log-out"
 }
@@ -47,7 +47,7 @@ echo "1. block pauses, unblock resumes the same session"
 P="$WORK/p1"; new_project "$P"
 H claim alpha >/dev/null || die "claim alpha"
 s_alpha=$(q "SELECT id FROM session_log WHERE feature_id=1;")
-H record-review approved --by human:tester >/dev/null || die "record-review alpha"
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "record-review alpha"
 H block alpha "waiting on beta" >/dev/null || die "block alpha"
 [ -n "$(q "SELECT paused_at FROM session_log WHERE id=$s_alpha;")" ] || die "session not paused"
 pass "block pauses the session"

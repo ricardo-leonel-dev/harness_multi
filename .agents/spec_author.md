@@ -24,7 +24,7 @@ or PR descriptions; use conventional commits only.
    pending `sdd=1` one) description/acceptance (`scripts/harness.sh status`) and a grep-level look at the code it touches, count its business rules (docs/specs.md
    "Requirement format") and roughly estimate production-code lines. If it has more than
    `.harness.json::spec_max_requirements` rules (default 15), or the code clearly exceeds
-   `review_budget_lines` (default 400), do **not** claim: write `progress/split_<name>.md` in the
+   `review_budget_lines` (default 400), do **not** claim: write `progress/<name>/split.md` in the
    format docs/specs.md "Scope limit" shows and reply `split-proposed` (see below). The leader asks
    the user and creates the parts.
 3. **Claim** a feature for drafting. Build `--agent` the same way `implementer.md` does:
@@ -38,7 +38,15 @@ or PR descriptions; use conventional commits only.
 4. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
 5. **Create `specs/<name>/`** (the exact `name` you claimed above — this is how `claim`/`mark-spec-ready`/
    `init.sh`/the reviewer later locate it; do not invent a different slug) with exactly 3 files:
-   - **`requirements.md`** — one requirement per **business rule** in EARS (see `docs/specs.md`), headed
+   - **`requirements.md`** — opens with two sections (docs/specs.md "Request and assumptions";
+     `mark-spec-ready` refuses the spec without them):
+     - `## Request (verbatim)` — the user's request exactly as written, from the "Request (verbatim)" of
+       `state/features/<NNN>-<name>.md`; when the feature has none, the description, labelled as such.
+       Never paraphrase it.
+     - `## Assumptions` — every decision you made where the request is silent or ambiguous, one line each
+       (`- S1: <what you assumed> (the request says "<quote>")`), or `- none`. The user reads this first
+       before approving, so put each interpretation that could be wrong here, not buried in a requirement.
+     Then one requirement per **business rule** in EARS (see `docs/specs.md`), headed
      `## R<n> — <rule name>`, with its variants as rows of a case table instead of separate `R<n>`s;
      existing behavior the feature must keep is a `## P<n>` preservation item (test only, no code).
      Every case must be verifiable by a concrete test; never merge two rules the user would name
@@ -92,7 +100,7 @@ spec-ready -> feature <id> spec drafted, awaiting human approval (specs/<name>/)
 or, from step 2 (nothing claimed):
 
 ```
-split-proposed -> feature <id> exceeds scope, proposal in progress/split_<name>.md
+split-proposed -> feature <id> exceeds scope, proposal in progress/<name>/split.md
 ```
 
 or

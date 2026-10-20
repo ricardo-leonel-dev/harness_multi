@@ -33,6 +33,8 @@ CREATE TABLE features (
   depends_on TEXT NOT NULL DEFAULT '[]',      -- JSON array of local feature names that must be 'done' first
   superseded_by TEXT,                         -- name of the feature that absorbed this one (status='superseded')
   superseded_from TEXT,                       -- status before supersede, restored by unsupersede
+  size TEXT NOT NULL DEFAULT 'normal',        -- 'normal' or 'small' (validated in bash); small may close via log-out --quick
+  request TEXT,                               -- the user's request verbatim (add-feature --request, Notion card text)
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   deleted_at TEXT
@@ -65,6 +67,8 @@ CREATE TABLE session_log (
   closed_at TEXT,                -- NULL = "current session"; set = a "history" entry
   paused_at TEXT,                -- set by `block`, cleared by `unblock`: the session stays open
                                   -- (closed_at NULL) but stops occupying the project's slot
+  held_at TEXT,                  -- set by `hold`, cleared by `unhold`: the session keeps the slot
+                                  -- but log-out refuses it, so the work stops until the user decides
   deleted_at TEXT
 );
 
@@ -177,6 +181,17 @@ CREATE TABLE agent_usage_files (
   size INTEGER NOT NULL,
   recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   PRIMARY KEY (project_id, path)
+);
+
+-- Short lessons worth carrying between features (harness.sh learn/recall/forget).
+-- Never loaded automatically: the leader recalls at most 5 matching notes at claim.
+CREATE TABLE learnings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  feature_id INTEGER REFERENCES features(id) ON DELETE SET NULL,  -- feature it came from, if any
+  note TEXT NOT NULL,                                             -- at most 300 characters
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT                                                 -- set by forget
 );
 
 CREATE INDEX idx_features_project_status ON features(project_id, status);

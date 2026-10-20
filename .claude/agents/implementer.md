@@ -27,10 +27,16 @@ or PR descriptions; use conventional commits only.
    `<your model name>` with your own real model identity (e.g. "Claude Sonnet 5", "GPT-5.1-Codex") — never leave the
    placeholder literal. The `leader ->` prefix is always accurate here: per `AGENTS.md` §0 you are only ever invoked
    by the orchestrating leader, never run directly.
+   - If the leader says the session is already open (a feature escalated from the quick path), don't claim:
+     `status` shows it; read `progress/<name>/escalate.md` first and continue from there.
    - If the leader named a specific feature: `scripts/harness.sh claim --agent "leader -> implementer (<your model name>)" <feature_number-or-name>`.
    - Otherwise: `scripts/harness.sh claim --agent "leader -> implementer (<your model name>)"` (claims the lowest-numbered
      pending one). This atomically marks the feature `in_progress` and opens a session — there is no separate "save"
      step, and a second concurrent claim is rejected by the database, not just discouraged by convention.
+   - `claim` prints the feature's work folder, `progress/<name>/` (`<name>` is the feature's name, not its
+     number). Every file you write for this feature — handoff, logs, diffs, notes — goes there; `log-out`
+     deletes the folder once the feature is done, so nothing that must survive belongs in it. The user's
+     request verbatim, when recorded, is in `state/features/<NNN>-<name>.md` under "Request (verbatim)".
 3. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
    Before creating deliverables, check `git status --short --untracked-files=all` and
    `git check-ignore -v -- <planned paths>`. A check-ignore exit 1 means no matching exclusion.
@@ -58,13 +64,13 @@ or PR descriptions; use conventional commits only.
    the approved spec, not a suggestion; `append-log` any deviation and why.
    If the feature touches user-facing UI and has **no** such section (e.g. an `sdd=0` feature), load the
    `frontend-design:frontend-design` skill with the Skill tool when it appears in your available skills,
-   and record the visual decisions you made in `progress/impl_<feature>.md`.
+   and record the visual decisions you made in `progress/<name>/impl.md`.
    **Reading large files:** locate what you need with `Grep` (or `grep -n`) and `Read` only that line
    range (`offset`/`limit`); never re-read a whole large file you already read this session. For JSON
    resources such as i18n catalogs, add or change keys with `jq` or an `Edit` anchored on a neighboring
    key — don't read the whole file to append to it.
 5. **Write the tests** that validate the acceptance criteria. For an `sdd=1` feature, additionally
-   maintain an `R<n> → test` traceability map in `progress/impl_<feature>.md` (see below) — every
+   maintain an `R<n> → test` traceability map in `progress/<name>/impl.md` (see below) — every
    requirement id in `requirements.md` must map to at least one concrete test you can point to by
    file+test-name; a requirement with no mapped test is a gap to close before reporting readiness.
    One test per rule (table-driven for its cases), one per `P<n>` preservation item, no padding.
@@ -99,14 +105,17 @@ or PR descriptions; use conventional commits only.
    commands/results, elapsed preparation/verification time, and owned disposable cleanup
    in the handoff. Offline checks alone do not prove runtime behavior. Clean up only
    positively identified disposables created by this task; retain project data and evidence.
-8. **Do not log out, and do not spawn the reviewer yourself.** Write your handoff to `progress/impl_<feature>.md`
+8. **Do not log out, and do not spawn the reviewer yourself.** `./init.sh` warns about any task still `[ ]`
+   in `tasks.md`: tick it or justify it first. Write your handoff to `progress/<name>/impl.md`
    (outcome, scope, verification — see the Anti-Telephone convention in `AGENTS.md`; for `sdd=1` features,
-   include the `R<n> → test` traceability table from step 5) and end your turn reporting
+   include the `R<n> → test` traceability table from step 5; for `sdd=0` features, an `## Assumptions` list
+   of what you decided where the request was not explicit, or "none") and end your turn reporting
    readiness to the leader. The leader — never you — delegates to the `reviewer` subagent; you do not have (and
    should not attempt to use) the ability to spawn one. Spawning your own reviewer duplicates the review the leader
    already performs and wastes tokens on a second, redundant pass.
-9. You will be invoked again by the leader with the reviewer's verdict, referencing `progress/impl_<feature>.md`
-   and `progress/review.md`:
+9. After the review the leader launches a fresh implementer (you, starting clean) with the verdict,
+   referencing `progress/<name>/impl.md` and `progress/<name>/review.md` — read those two files instead of
+   re-reading the code you no longer have in context:
    - **Approved** — read both files, then run:
      ```
      scripts/harness.sh log-out --changes <file1> <file2> ... --verification "<summary>" --closure "<summary>"
@@ -119,7 +128,9 @@ or PR descriptions; use conventional commits only.
      `log-out` mechanically refuses to close a session that doesn't have a `record-review approved` verdict on
      it — if it fails with that error, do not try to work around it (e.g. editing `harness.db` directly); it
      means the reviewer's approval never actually got recorded, so stop and report that back to the leader.
-   - **Changes requested** — address the required changes from `progress/review.md`, return to step 4,
+     It also refuses when the last `./init.sh` of the session failed or files changed after it passed: run
+     `./init.sh` once (changes after the review go back to the reviewer, not straight to `log-out`).
+   - **Changes requested** — address the required changes from `progress/<name>/review.md`, return to step 4,
      then re-verify (step 7) and re-report readiness (step 8). State exactly what changed since
      the reviewed version and run checks affected by that change. Keep the mandatory init gate;
      do not additionally repeat separate behavioral suites for a prose or Git-exclusion-only
@@ -151,7 +162,7 @@ but it must still surface in your final report (see below), not be silently swal
 Your final response after step 8 (ready for review, before any verdict) is **a single line**:
 
 ```
-ready -> feature <id> implemented, awaiting review (progress/impl_<feature>.md)
+ready -> feature <id> implemented, awaiting review (progress/<name>/impl.md)
 ```
 
 Your final response after step 9 (once a review verdict resolves it) is **a single line**:
@@ -169,7 +180,7 @@ done -> feature <id> implemented and reviewed (commit pending); sync warnings: <
 or, if the reviewer requested changes and you addressed them and are awaiting re-review:
 
 ```
-ready -> feature <id> revised per review, awaiting re-review (progress/impl_<feature>.md)
+ready -> feature <id> revised per review, awaiting re-review (progress/<name>/impl.md)
 ```
 
 or

@@ -311,6 +311,38 @@ CREATE TABLE IF NOT EXISTS agent_usage_files (
 SQL
 fi
 
+# Adds features.size, session_log.held_at and the learnings table (quick path
+# and learnings). size is 'normal' or 'small', validated in bash like
+# review_status, so a plain ADD COLUMN is enough: a small feature may close
+# through `log-out --quick`. held_at is set by `hold` when the user rejects an
+# escalation; unlike paused_at it keeps the project's slot, so nothing else is
+# claimable until `unhold`. Keep in sync with db/schema.sqlite.sql.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|size|'; then
+  sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN size TEXT NOT NULL DEFAULT 'normal';"
+fi
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(session_log);" | grep -q '|held_at|'; then
+  sqlite3 "$DB_PATH" "ALTER TABLE session_log ADD COLUMN held_at TEXT;"
+fi
+# Adds features.request: the user's request verbatim, kept apart from the
+# leader's description so the spec and the reviewer can check the work against
+# what was actually asked. Keep in sync with db/schema.sqlite.sql.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|request|'; then
+  sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN request TEXT;"
+fi
+if [ -z "$(sqlite3 "$DB_PATH" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='learnings';")" ]; then
+  sqlite3 "$DB_PATH" <<'SQL'
+.bail on
+CREATE TABLE IF NOT EXISTS learnings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  feature_id INTEGER REFERENCES features(id) ON DELETE SET NULL,
+  note TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at TEXT
+);
+SQL
+fi
+
 db() {
   sqlite3 "$DB_PATH" "$@"
 }

@@ -29,7 +29,7 @@ git -C "$REPO" check-ignore -q "$B/mock-data/manifests/initial.json"
 # Only project-owned files may show up for commit; harness-owned ones never do.
 untracked > "$WORK/visible"
 for f in .gitignore .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md \
-         docs/verification.md specs/README.md .claude/settings.json; do
+         docs/verification.md specs/README.md; do
   grep -qxF "service-a/$f" "$WORK/visible"
   grep -qxF "svc [b]/$f" "$WORK/visible"
 done
@@ -84,6 +84,19 @@ git -C "$WORK/wt" check-ignore -q sub/mock-data/selection.json
 [ -f "$WORK/wt/sub/mock-data/selection.json" ]
 if git -C "$WORK/wt" status --porcelain --untracked-files=all | grep -q 'sub/AGENTS.md'; then exit 1; fi
 pass 'worktree installs write to the shared exclude file'
+
+# Old installs scaffolded Claude-only hooks; a reinstall removes exactly those.
+[ ! -e "$A/.claude/settings.json" ]
+OLD_STOP='{"hooks":[{"type":"command","command":"./init.sh > /tmp/harness_init.log 2>&1 && echo ok"}]}'
+OLD_SUB='{"hooks":[{"type":"command","command":"cd x; bash scripts/harness.sh record-usage \"$@\" >/dev/null 2>&1; exit 0"}]}'
+OWN='{"hooks":[{"type":"command","command":"echo mine"}]}'
+printf '{"hooks":{"Stop":[%s],"SubagentStop":[%s]}}\n' "$OLD_STOP" "$OLD_SUB" > "$A/.claude/settings.json"
+printf '{"permissions":{"allow":["Bash(ls)"]},"hooks":{"Stop":[%s,%s],"SubagentStop":[%s]}}\n' "$OLD_STOP" "$OWN" "$OLD_SUB" > "$B/.claude/settings.json"
+install_into "$A"
+install_into "$B"
+[ ! -e "$A/.claude/settings.json" ]
+jq -e '.permissions.allow == ["Bash(ls)"] and (.hooks.Stop | length) == 1 and .hooks.Stop[0].hooks[0].command == "echo mine" and (.hooks | has("SubagentStop") | not)' "$B/.claude/settings.json" >/dev/null
+pass 'reinstall removes the old harness hooks and keeps everything else'
 
 N="$WORK/not a repo"; mkdir -p "$N"
 install_into "$N"

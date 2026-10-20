@@ -93,6 +93,12 @@ while IFS= read -r row; do
       SDD_MISSING=1
     fi
   done
+  # Unticked tasks on the feature being implemented: the reviewer rejects them
+  # (C6), so say it now instead of spending a review round on it. Advisory.
+  if [ "$fstatus" = in_progress ] && [ -f "specs/$fname/tasks.md" ]; then
+    open_tasks=$(grep -oE '^- \[ \] T[0-9]+' "specs/$fname/tasks.md" | sed 's/^- \[ \] //' | tr '\n' ' ' | sed 's/ $//')
+    [ -z "$open_tasks" ] || warn "specs/$fname/tasks.md still has unticked tasks: $open_tasks — tick them, or justify each in the handoff, before review"
+  fi
 done < <(sqlite3 -json "$DB_PATH" "
   SELECT f.name, f.status FROM features f
   JOIN projects p ON p.id = f.project_id
@@ -173,8 +179,7 @@ echo ""
 echo "── 4.6. Recording agent usage (best-effort) ────────────"
 
 # Runs before the snapshot and the mirror sync so both see fresh agent_runs,
-# for Claude Code and Codex CLI alike (this script also runs from the Claude
-# Code Stop hook). Cheap per turn: the --since window plus skipping transcripts
+# for Claude Code and Codex CLI alike. Cheap per run: the --since window plus skipping transcripts
 # unchanged since they were last parsed. Bounded: --max-seconds is the primary
 # limit (macOS has no timeout(1)); timeout/gtimeout, when present, is only an
 # outer guard. Never affects EXIT_CODE; per-file warnings collapse into one line.
@@ -188,8 +193,8 @@ else
   USAGE_OUT="$(${USAGE_GUARD[@]+"${USAGE_GUARD[@]}"} bash "$SCRIPT_DIR/scripts/harness.sh" record-usage \
     --max-seconds 15 2>&1 | sed $'s/\033\\[[0-9;]*m//g')" || true
   USAGE_RECORDED="$(printf '%s\n' "$USAGE_OUT" | grep -o 'recorded [0-9]* agent run(s).*' | tail -n 1)"
-  USAGE_BUDGET="$(printf '%s\n' "$USAGE_OUT" | grep 'token budget:' | sed 's/^\[WARN\][[:space:]]*//')"
-  USAGE_WARNS="$(printf '%s\n' "$USAGE_OUT" | grep '\[WARN\]' | grep -vc 'token budget:')"
+  USAGE_BUDGET="$(printf '%s\n' "$USAGE_OUT" | grep -E 'token budget:|reopened with' | sed 's/^\[WARN\][[:space:]]*//')"
+  USAGE_WARNS="$(printf '%s\n' "$USAGE_OUT" | grep '\[WARN\]' | grep -vcE 'token budget:|reopened with')"
   if [ -n "$USAGE_RECORDED" ] && [ "${USAGE_WARNS:-0}" -eq 0 ]; then
     ok "agent usage: $USAGE_RECORDED"
   elif [ -n "$USAGE_RECORDED" ]; then
@@ -197,7 +202,9 @@ else
   else
     warn "agent usage not recorded — run scripts/harness.sh record-usage for details (continuing)"
   fi
-  [ -z "$USAGE_BUDGET" ] || warn "$USAGE_BUDGET"
+  while IFS= read -r line; do
+    [ -z "$line" ] || warn "$line"
+  done <<<"$USAGE_BUDGET"
 fi
 
 echo ""
@@ -217,6 +224,15 @@ bash "$SCRIPT_DIR/scripts/sync_postgres.sh"
 # Deliberately not gated on this command's exit code: the mirror is
 # optional, and every failure path inside sync_postgres.sh already prints
 # its own [WARN] rather than propagating as a session-blocking error.
+
+# log-out reads this from the active session: the overall result (a run
+# without verify_command is "none", never a pass) plus a fingerprint of the
+# tree it ran on.
+INIT_RESULT=fail
+if [ $EXIT_CODE -eq 0 ]; then
+  if [ -n "$VERIFY_COMMAND" ]; then INIT_RESULT=pass; else INIT_RESULT=none; fi
+fi
+bash "$SCRIPT_DIR/scripts/harness.sh" record-init "$INIT_RESULT" >/dev/null 2>&1 || true
 
 echo ""
 echo "── 7. Summary ───────────────────────────────────────────"

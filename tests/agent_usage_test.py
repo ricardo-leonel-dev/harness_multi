@@ -235,23 +235,65 @@ INSERT INTO session_log (id, project_id, feature_id, agent, started_at, closed_a
         self.assertEqual(len(dry.stdout.strip().splitlines()), 4)
         self.assertEqual(len(self.rows()), 12)
 
-    def test_single_transcript_update_and_hook(self):
+    def test_single_transcript_update(self):
         with open(self.leader, 'a', encoding='utf-8') as handle:
             handle.write(json.dumps(claude_line('2026-01-10T11:45:00.000Z', str(self.project), 'sess-1',
                                                 kind='assistant', mid='m3', usage=usage(5, 0, 0, 5))) + '\n')
-        settings = json.loads((ROOT / 'templates/settings.json.tmpl').read_text())
-        command = settings['hooks']['SubagentStop'][0]['hooks'][0]['command']
-        payload = json.dumps({'session_id': 'sess-1', 'transcript_path': str(self.leader),
-                              'agent_transcript_path': str(self.leader.parent / 'sess-1/subagents/agent-rev2.jsonl')})
-        hook = subprocess.run(['bash', '-c', command], input=payload, cwd=self.work, capture_output=True,
-                              text=True, env=dict(self.env, CLAUDE_PROJECT_DIR=str(self.project)))
-        self.assertEqual((hook.returncode, hook.stdout, hook.stderr), (0, '', ''))
+        rev2 = self.leader.parent / 'sess-1/subagents/agent-rev2.jsonl'
+        result = self.harness('record-usage', '--transcript', str(self.leader), '--transcript', str(rev2))
+        self.assertEqual(result.returncode, 0, result.stderr)
         rows = self.rows()
         self.assertEqual(sorted(rows), ['rev2', 'sess-1'])
         self.assertEqual(rows['sess-1']['total_tokens'], 3133)
-        broken = subprocess.run(['bash', '-c', command], input='not json', cwd=self.work, capture_output=True,
-                                text=True, env=dict(self.env, CLAUDE_PROJECT_DIR=str(self.work / 'missing')))
-        self.assertEqual(broken.returncode, 0)
+
+    def test_no_claude_hooks_template(self):
+        # Claude Code and Codex behave alike: init.sh records usage, stats refreshes it.
+        self.assertFalse((ROOT / 'templates/settings.json.tmpl').exists())
+
+    def test_reopened_subagent_warns(self):
+        cwd = str(self.project)
+        base = self.claude_home / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', cwd) / 'sess-1' / 'subagents'
+        heavy = claude_line('2026-01-10T10:40:00.000Z', cwd, 'sess-1', agent='impl9', kind='assistant',
+                            mid='r2', usage=usage(10, 0, 150_000, 5))
+        jsonl(base / 'agent-impl9.jsonl', [
+            claude_line('2026-01-10T10:05:00.000Z', cwd, 'sess-1', agent='impl9'),
+            claude_line('2026-01-10T10:30:00.000Z', cwd, 'sess-1', agent='impl9', kind='assistant',
+                        mid='r1', usage=usage(10, 0, 140_000, 5)),
+            claude_line('2026-01-10T10:39:00.000Z', cwd, 'sess-1', agent='impl9'),  # follow-up after it answered
+            heavy])
+        (base / 'agent-impl9.meta.json').write_text(json.dumps(
+            {'agentType': 'implementer', 'description': 'Implement alpha again', 'spawnDepth': 1}))
+        working = claude_line('2026-01-10T10:30:00.000Z', cwd, 'sess-1', agent='impl8', kind='assistant',
+                              mid='w1', usage=usage(10, 0, 140_000, 5), tool_use='toolu_x')
+        jsonl(base / 'agent-impl8.jsonl', [
+            claude_line('2026-01-10T10:05:00.000Z', cwd, 'sess-1', agent='impl8'), working,
+            claude_line('2026-01-10T10:31:00.000Z', cwd, 'sess-1', agent='impl8'),  # mid-turn message
+            claude_line('2026-01-10T10:32:00.000Z', cwd, 'sess-1', agent='impl8', kind='assistant',
+                        mid='w2', usage=usage(10, 0, 150_000, 5))])
+        day = self.codex_home / 'sessions' / '2026' / '01' / '10'
+        meta = {'id': 'cx-re', 'cwd': cwd, 'timestamp': '2026-01-10T13:15:00.000Z', 'agent_role': 'implementer',
+                'agent_nickname': 'Kepler', 'agent_path': '/root/impl', 'parent_thread_id': 'cx-lead'}
+        msg = lambda ts: {'type': 'response_item', 'timestamp': ts,
+                          'payload': {'type': 'agent_message', 'recipient': '/root/impl', 'content': 'SECRET'}}
+        count = lambda ts, n: {'type': 'event_msg', 'timestamp': ts, 'payload': {'type': 'token_count', 'info': {
+            'total_token_usage': codex_tokens(n, 0, 1, 0), 'last_token_usage': codex_tokens(n, 0, 1, 0)}}}
+        done = lambda ts: {'type': 'event_msg', 'timestamp': ts, 'payload': {'type': 'task_complete'}}
+        jsonl(day / 'rollout-g-reopen.jsonl', [
+            {'type': 'session_meta', 'timestamp': '2026-01-10T13:15:00.000Z', 'payload': meta},
+            done('2026-01-10T13:15:00.000Z'),  # copied from the parent's history: not this agent's turn
+            msg('2026-01-10T13:15:01.000Z'), count('2026-01-10T13:16:00.000Z', 90_000),
+            done('2026-01-10T13:20:00.000Z'),
+            msg('2026-01-10T13:25:00.000Z'), count('2026-01-10T13:25:05.000Z', 97_000)])
+        result = self.harness('record-usage')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        warnings = [l for l in result.stderr.splitlines() if 'reopened with' in l]
+        self.assertEqual(len(warnings), 2, result.stderr)
+        self.assertIn('implementer "Implement alpha again" reopened with 150k context', warnings[0] + warnings[1])
+        self.assertIn('implementer "Kepler" reopened with 97k context', warnings[0] + warnings[1])
+        (self.project / '.harness.json').write_text(
+            '{"project_slug":"t","db_path":"harness.db","snapshot_path":"state","reopen_warn_tokens":0}')
+        quiet = self.harness('record-usage', '--full')
+        self.assertNotIn('reopened with', quiet.stderr)
 
     def test_stats_tree_and_snapshot(self):
         self.assertEqual(self.harness('record-usage').returncode, 0)

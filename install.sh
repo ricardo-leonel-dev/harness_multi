@@ -9,7 +9,7 @@
 # Harness-core files (AGENTS.md + a CLAUDE.md symlink to it, .claude/agents/*.md,
 # .codex/agents/*.toml, init.sh, scripts/*.sh) are copied/relinked unconditionally
 # — re-running install.sh refreshes them. docs/{architecture,conventions,verification}.md,
-# CHECKPOINTS.md, .claude/settings.json, specs/, and .harness.json are created
+# CHECKPOINTS.md, specs/, and .harness.json are created
 # only if absent — never clobbers project-owned content. Shared instructions and
 # docs/specs.md are refreshed; --profile postgres explicitly adds shared SQL tools
 # on each install. Harness-owned files and the state/ snapshot are listed in the
@@ -213,19 +213,29 @@ if [ "$PROFILE" = postgres ]; then
   ok "refreshed postgres profile tools, shared instructions, and test_helpers (harness/test_helpers/)"
 fi
 
-mkdir -p "$TARGET_DIR/.claude"
-if [ -f "$TARGET_DIR/.claude/settings.json" ]; then
-  warn ".claude/settings.json already exists — leaving as-is (may have project-specific hooks)"
-  if ! jq -e '.hooks.SubagentStop' "$TARGET_DIR/.claude/settings.json" >/dev/null 2>&1; then
-    warn "  it has no SubagentStop hook: copy the record-usage hook from templates/settings.json.tmpl to log agent usage automatically"
+# The harness no longer installs Claude Code hooks, so Claude Code and Codex CLI
+# behave the same: agents run ./init.sh themselves (it also records agent usage)
+# and `stats` refreshes usage before printing. Earlier installs scaffolded a Stop
+# hook (the full ./init.sh after every reply) and a SubagentStop record-usage
+# hook: remove exactly those two entries and leave anything else untouched.
+SETTINGS="$TARGET_DIR/.claude/settings.json"
+if [ -f "$SETTINGS" ] && jq -e . "$SETTINGS" >/dev/null 2>&1; then
+  HOOKS_FILTER='def drop(f): if .hooks[f] then .hooks[f] |= map(select(([.hooks[]?.command // ""] | any(test("init\\.sh > /tmp/harness_init\\.log|harness\\.sh record-usage"))) | not)) | if (.hooks[f] | length) == 0 then del(.hooks[f]) else . end else . end;
+    drop("Stop") | drop("SubagentStop") | if .hooks == {} then del(.hooks) else . end'
+  CLEANED="$(jq "$HOOKS_FILTER" "$SETTINGS")"
+  if [ "$CLEANED" != "$(jq . "$SETTINGS")" ]; then
+    if [ "$CLEANED" = "{}" ]; then
+      rm -f "$SETTINGS"
+      ok "removed .claude/settings.json (it only held the harness's old Stop/SubagentStop hooks)"
+    else
+      printf '%s\n' "$CLEANED" > "$SETTINGS"
+      ok "removed the harness's old Stop/SubagentStop hooks from .claude/settings.json (other settings kept)"
+    fi
   fi
   if jq -e '[.hooks.PostToolUse[]?.hooks[]?.command // empty | select(test("verify_command"))] | length > 0' \
-      "$TARGET_DIR/.claude/settings.json" >/dev/null 2>&1; then
-    warn "  its PostToolUse hook runs verify_command (the full suite) after every Edit/Write — remove it; agents run targeted tests with scripts/harness.sh test and init.sh runs the suite once"
+      "$SETTINGS" >/dev/null 2>&1; then
+    warn ".claude/settings.json has a PostToolUse hook that runs verify_command (the full suite) after every Edit/Write — remove it; agents run targeted tests with scripts/harness.sh test and init.sh runs the suite once"
   fi
-else
-  cp "$TOOLKIT_DIR/templates/settings.json.tmpl" "$TARGET_DIR/.claude/settings.json"
-  ok "scaffolded .claude/settings.json (Claude Code hooks: init.sh on session stop, record-usage on subagent stop — Codex CLI has no equivalent hook mechanism, see docs/specs.md)"
 fi
 
 # specs/ holds git-tracked spec content for sdd=1 features (see docs/specs.md) —

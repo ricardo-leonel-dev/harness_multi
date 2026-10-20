@@ -16,6 +16,8 @@ Subcommands (normally reached through scripts/harness.sh record-usage / stats):
            Bounded: --max-seconds (default 20) caps the run; at the limit it
            stops scanning, records what it already parsed, prints one [WARN]
            and the next run continues where this one stopped.
+           Warns when a finished subagent was sent a follow-up while carrying
+           at least --reopen-warn-tokens of context (a fresh agent is cheaper).
   stats    print the invocation tree (parent -> children) per feature with
            per-run duration/tokens, totals per feature and per project.
 
@@ -50,6 +52,7 @@ RUNTIMES = ('claude', 'codex')
 TOKEN_FIELDS = ('input_tokens', 'cache_read_tokens', 'cache_write_tokens',
                 'output_tokens', 'reasoning_tokens', 'total_tokens')
 DEFAULT_MAX_SECONDS = 20.0
+DEFAULT_REOPEN_WARN_TOKENS = 80_000  # context a finished subagent carries into a follow-up
 MAX_BUSY_SECONDS = 3.0  # sqlite busy wait, carved out of the --max-seconds budget
 _now = time.monotonic  # indirection so tests can drive the deadline with a fake clock
 ROW_FIELDS = ('runtime', 'agent_role', 'label', 'external_id', 'parent_external_id',
@@ -168,6 +171,7 @@ def parse_claude(path, roots=None):
     usage = {}
     first = last = None
     cwds, session_id, agent_id = set(), None, None
+    finished, reopens, awaiting = False, [], False
     for obj in lines:
         stamp = parse_ts(obj.get('timestamp'))
         if stamp:
@@ -178,10 +182,25 @@ def parse_claude(path, roots=None):
         session_id = session_id or (obj.get('sessionId') if isinstance(obj.get('sessionId'), str) else None)
         agent_id = agent_id or (obj.get('agentId') if isinstance(obj.get('agentId'), str) else None)
         message = obj.get('message')
+        if obj.get('type') == 'user' and isinstance(message, dict) and is_prompt(message.get('content')):
+            # A prompt after the agent ended its turn is a follow-up sent to an
+            # agent that already answered: it re-reads its whole context.
+            awaiting, finished = finished, False
         if obj.get('type') == 'assistant' and isinstance(message, dict):
+            blocks = message.get('content') if isinstance(message.get('content'), list) else []
+            tools = [b.get('name') for b in blocks if isinstance(b, dict) and b.get('type') == 'tool_use']
+            if tools:
+                # Handing the report back to the caller ends the agent's turn.
+                finished = all(isinstance(t, str) and t.endswith('Handback') for t in tools)
+            elif any(isinstance(b, dict) and b.get('type') == 'text' for b in blocks):
+                finished = True
             mid, use = message.get('id'), message.get('usage')
             if isinstance(mid, str) and isinstance(use, dict):
                 usage[mid] = (use, message.get('model'))  # repeated per content block: last wins
+                if awaiting:
+                    reopens.append(sum(as_int(use.get(k)) for k in
+                                       ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')))
+                    awaiting = False
     if stats['bad']:
         warn(f'{path}: skipped {stats["bad"]} malformed line(s)')
     if first is None or (session_id is None and not usage):
@@ -224,8 +243,16 @@ def parse_claude(path, roots=None):
     row = {'runtime': 'claude', 'agent_role': role, 'label': label, 'external_id': external,
            'parent_external_id': parent, 'spawn_depth': depth, 'model': model,
            **totals, 'reasoning_tokens': None, 'total_tokens': sum(totals.values()),
-           'source_path': str(path)}
+           'source_path': str(path), '_reopens': reopens if is_subagent else []}
     return finish_row(row, first, last)
+
+
+def is_prompt(content):
+    """A user turn written as a prompt (text), not a tool result."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    return (isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'text' for b in content)
+            and not any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content))
 
 
 def claude_spawner(path, tool_use_id):
@@ -284,6 +311,7 @@ def parse_codex(path, roots=None):
     lines, stats = read_lines(path)
     meta, usage, model = None, None, None
     first = last = None
+    tasks, finished, reopens, awaiting = 0, False, [], False
     for obj in lines:
         stamp = parse_ts(obj.get('timestamp'))
         if stamp:
@@ -301,6 +329,19 @@ def parse_codex(path, roots=None):
             info = payload.get('info')
             if isinstance(info, dict) and isinstance(info.get('total_token_usage'), dict):
                 usage = info['total_token_usage']  # cumulative: the last one wins
+                last_use = info.get('last_token_usage')
+                if awaiting and isinstance(last_use, dict):
+                    reopens.append(as_int(last_use.get('input_tokens')))
+                    awaiting = False
+        elif kind == 'event_msg' and payload.get('type') == 'task_complete':
+            finished = True
+        elif (kind == 'response_item' and payload.get('type') == 'agent_message' and meta
+              and payload.get('recipient') and payload.get('recipient') == own_path(meta)):
+            # The parent's first message is the task; one sent after the agent
+            # completed a turn reopens it with everything it has read so far.
+            tasks += 1
+            awaiting = tasks > 1 and finished
+            finished = False  # task_complete events copied from the parent's history don't count
     if stats['bad']:
         warn(f'{path}: skipped {stats["bad"]} malformed line(s)')
     if meta is None or not isinstance(meta.get('id'), str):
@@ -319,7 +360,7 @@ def parse_codex(path, roots=None):
     start = parse_ts(meta.get('timestamp')) or first
     row = {'runtime': 'codex', 'agent_role': role, 'label': label, 'external_id': meta['id'],
            'parent_external_id': parent, 'spawn_depth': depth, 'model': model,
-           'source_path': str(path)}
+           'source_path': str(path), '_reopens': reopens if parent else []}
     if usage:
         cached = as_int(usage.get('cached_input_tokens'))
         written = as_int(usage.get('cache_write_input_tokens'))
@@ -331,6 +372,27 @@ def parse_codex(path, roots=None):
     else:
         row.update(dict.fromkeys(TOKEN_FIELDS))
     return finish_row(row, start, last if last and start and last >= start else start)
+
+
+def own_path(meta):
+    source = meta.get('source') if isinstance(meta.get('source'), dict) else {}
+    subagent = source.get('subagent') if isinstance(source.get('subagent'), dict) else {}
+    spawn = subagent.get('thread_spawn') if isinstance(subagent.get('thread_spawn'), dict) else {}
+    return meta.get('agent_path') or spawn.get('agent_path')
+
+
+def warn_reopens(rows, limit):
+    """One [WARN] per subagent that got a follow-up while already carrying a
+    large context: a fresh agent reading only the handoff costs a fraction."""
+    if limit <= 0:
+        return
+    for row in rows:
+        heavy = [n for n in row.get('_reopens') or [] if n >= limit]
+        if heavy:
+            name = f'{row["agent_role"]} "{row["label"]}"' if row.get('label') else row['agent_role']
+            warn(f'{name} reopened with {max(heavy) // 1000}k context ({len(heavy)} follow-up(s), '
+                 f'{(row.get("total_tokens") or 0) / 1e6:.1f}M tokens in total) — launch a fresh agent '
+                 'for follow-ups instead of messaging a finished one')
 
 
 def detect_and_parse(path, roots):
@@ -582,6 +644,7 @@ def cmd_collect(args):
     except sqlite3.Error as error:
         warn(f'could not record agent runs: {error}')
         return 0
+    warn_reopens(rows, args.reopen_warn_tokens)
     counts = {r: sum(1 for row in rows if row['runtime'] == r) for r in RUNTIMES}
     note = f', skipped {len(skipped)} unchanged file(s)' if skipped else ''
     print(f'[OK]    recorded {len(rows)} agent run(s) (claude: {counts["claude"]}, codex: {counts["codex"]}){note}')
@@ -770,6 +833,9 @@ def main(argv=None):
     collect.add_argument('--dry-run', action='store_true', help='print rows as JSON lines, write nothing')
     collect.add_argument('--full', action='store_true',
                          help='re-parse every transcript in the window, even unchanged ones')
+    collect.add_argument('--reopen-warn-tokens', type=int, default=DEFAULT_REOPEN_WARN_TOKENS,
+                         help='warn when a finished subagent gets a follow-up with at least this much '
+                              'context (0 disables)')
     collect.add_argument('--max-seconds', type=float, default=DEFAULT_MAX_SECONDS,
                          help=f'time budget incl. sqlite busy wait (default {DEFAULT_MAX_SECONDS:g}); '
                          'stops early and keeps partial progress')

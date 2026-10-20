@@ -37,10 +37,11 @@ or PR descriptions; use conventional commits only.
 decompose to **1 `spec_author` subagent** (same discipline as an `implementer` subagent — 1 at a time,
 no research subagent unless the feature's *location* is unknown, which is rarely relevant for spec
 drafting). When `spec_author` reports `spec-ready -> ... (specs/<name>/)`, **stop and hand control back
-to the user** — present the three files (or a pointer to them) and explicitly ask for approval before
-doing anything else with that feature.
+to the user** — show the `## Assumptions` of `requirements.md` first (each one is a gap in the user's request
+that the spec filled; that is where misreadings hide), then a short summary and a pointer to the three files,
+and explicitly ask for approval before doing anything else with that feature.
 
-When `spec_author` reports `split-proposed -> ... (progress/split_<name>.md)` instead, the feature is too
+When `spec_author` reports `split-proposed -> ... (progress/<name>/split.md)` instead, the feature is too
 big for one spec (docs/specs.md "Scope limit"). Show the user the proposal's parts table and ask
 (Claude Code: `AskUserQuestion`) whether to split as proposed. On approval, create each part in order with
 `scripts/harness.sh add-feature --name <part> --title "<title>" --description "<rules it owns>" --sdd
@@ -77,6 +78,11 @@ reviewer additionally walks `CHECKPOINTS.md`'s C6 group.
 
 For each received task:
 
+0. **Keep the user's words.** When you create a feature for the task, pass the user's request verbatim with
+   `add-feature ... --request "<their words, unedited>"` (your own summary goes in `--description`). For an
+   existing feature without one (`state/features/*.md` has no "Request" section) that the user describes now,
+   `scripts/harness.sh set-request <feature> "<their words>"`. Notion intake stores the card text by itself.
+
 1. Identify whether it requires **one** or **multiple** features (`scripts/harness.sh status` lists them).
 2. If the task names a specific feature, pass that reference (number or name) through to the `implementer` so it can
    `scripts/harness.sh claim <target>` explicitly instead of defaulting to the lowest-numbered pending one.
@@ -99,28 +105,80 @@ For each received task:
      feature description as the condition itself (e.g. "check these files: [...]. If a file contains a FOR loop,
      refactor it using Y as reference. Modify only files that need it.") and let the implementer both triage and
      fix in its own step 4.
-5. **Spawn exactly 1 `reviewer` subagent when the implementer reports ready for review** (its final line is
-   `ready -> feature <id> ... (progress/impl_<feature>.md)` — see `implementer.md`'s "Communication with the
+5. **Spawn exactly 1 `reviewer` subagent as soon as the implementer reports ready for review** — don't ask the
+   user anything in between: deviations, open questions and doubts in the handoff are the reviewer's to judge,
+   and a question here can leave the feature waiting for hours. Ask the user only after the verdict, when it
+   needs a human decision. Never launch a second reviewer for the same change. (Its final line is
+   `ready -> feature <id> ... (progress/<name>/impl.md)` — see `implementer.md`'s "Communication with the
    leader"). The implementer never spawns its own reviewer — it doesn't have that ability, and it isn't supposed
    to try; if you see it attempt to, that's a bug in its instructions, not something to imitate. Point the reviewer
-   at `progress/impl_<feature>.md`.
+   at `progress/<name>/impl.md`.
 6. **Route the reviewer's verdict back to a fresh `implementer` call** (same feature, referencing both
-   `progress/impl_<feature>.md` and `progress/review.md` — the implementer does not need to be "resumed",
-   just told to read those two files):
+   `progress/<name>/impl.md` and `progress/<name>/review.md` — the implementer does not need to be "resumed",
+   just told to read those two files). **Fresh means a new agent** (Claude Code: a new `Agent` call; Codex CLI:
+   a new `spawn_agent`), never a follow-up message (`SendMessage`/`send_input`) to an agent that already
+   answered: it would re-read everything it accumulated (100-200k tokens) on every step. The same goes for
+   any small follow-up — ticking `tasks.md`, a log-out, a commit (`record-usage` warns when it happens). Then:
    - Approved → instruct it to run `scripts/harness.sh log-out` per its own protocol step 9.
-   - Changes requested → instruct it to address `progress/review.md`'s required changes and re-report
+   - Changes requested → instruct it to address `progress/<name>/review.md`'s required changes and re-report
      readiness; repeat from step 5 above.
    - Never run `log-out` yourself, and never have the reviewer run it — only the implementer does, per
      `AGENTS.md`'s hard rule.
 
    **Hard rule: never instruct an implementer to run `log-out` except in the Approved branch above, after a
    `reviewer` subagent has actually run and reported `APPROVED`.** Do not tell it to log out "at the end" of
-   its own turn, before review, or as a shortcut for a task you consider trivial — every feature, no matter
-   how small, goes through the reviewer first. `log-out` itself now mechanically refuses to close a session
+   its own turn, before review, or as a shortcut for a task you consider trivial — every feature goes through
+   the reviewer first, except a `size=small` feature that the `quick_implementer` closes with
+   `log-out --quick`, whose gate checks the change mechanically (see "Small Tasks" below). `log-out` itself now mechanically refuses to close a session
    without a reviewer's `record-review approved` verdict on it (see `scripts/harness.sh`'s `record-review`),
    so a leader mistake here surfaces as a hard failure rather than silently shipping unreviewed code — but
    never rely on that mechanical gate as the only check; treat "spawn the reviewer before log-out" as the
    actual rule, not something the tooling exists to catch after the fact.
+
+## Untracked Tasks (no harness record)
+
+When the user asks for a task **without the harness** ("sin harness", "sin registro", "es una prueba", a
+throwaway measurement or experiment), launch **1 `quick_implementer` in untracked mode**: say "untracked
+mode" in its prompt with the user's request verbatim. It claims nothing, writes nothing under `progress/`, has
+no reviewer, Notion card or `log-out`, runs only targeted tests, and answers with a short summary of the diff.
+Report that summary. No second agent reviews it unless the user asks. If the change turns out to need the
+harness (stored data, security, a contract others consume, more than a contained change), it says so instead
+of doing it: offer the user a tracked feature.
+
+## Small Tasks (quick path)
+
+**Classify each `sdd=0` feature before launching anyone.** It is small when it needs no spec, about 4 files or fewer (tests
+included; `quick_max_files`), no new dependency, and no new screen or flow (a contained fix, a copy change, a one-component
+adjustment). Follow-up fixes of a feature already closed (a bug the user found in it, a cleanup a review
+suggested) are usually small too. If unsure, it is normal. Announce it in one line ("I'm treating 34 as small: one component and its
+test") so the user can override, then `scripts/harness.sh set-size <feature> small` (or `add-feature --size
+small` when you create it). Small features go to **1 `quick_implementer`**, no reviewer up front. Its reply:
+
+- `done -> ...` — the quick gate closed it. Report to the user.
+- `review-needed -> ...` — the gate refused or the agent declared a risk. Launch 1 `reviewer` pointing at
+  `progress/<name>/quick.md`, then route the verdict back to a fresh `quick_implementer` (approved → plain
+  `log-out`; changes requested → fix and re-report), exactly like the normal flow below.
+- `escalate -> ...` — the task is bigger than it looked. Show the user the reason from
+  `progress/<name>/escalate.md` and ask (Claude Code: `AskUserQuestion`) whether to continue as a normal
+  feature. **Approve:** `set-size <feature> normal`, then launch 1 `implementer` telling it the session is already
+  open (it continues it, no claim) and to read the escalate file first; then reviewer as usual. **Reject:**
+  `scripts/harness.sh hold "<reason>"` — the session keeps the project's slot and nothing else can be claimed or
+  closed until the user decides (`unhold` to resume, or `block` to set it aside). Report and stop.
+
+## Learnings
+
+Right before launching the agent that claims a feature (implementer, quick_implementer or spec_author), run
+`scripts/harness.sh recall <2-3 keywords from the feature>` once. It prints at most 5 notes; paste the relevant
+ones into that agent's prompt and nothing else (no recall by subagents, no recall on every turn).
+
+Record a lesson with `scripts/harness.sh learn --feature <feature> "<lesson, <= 300 chars>"` when the user
+reports a bug the tests missed, when a new feature exists to fix one that is already `done` (record what the
+first one got wrong), or when a reviewer's `progress/<name>/review.md` lists a `Learnings candidate`. Lessons
+about this project go to `learn` only — not to your own agent memory, which the other runtimes and models
+working on this project never see. Write the
+rule, not the story ("register canDeactivate guards with a static import: a lazy thunk is treated as allow").
+Use `scripts/harness.sh forget <id>` when a note turns out wrong or obsolete. Mention any learn/forget in your
+report.
 
 ## Verification effort and timing
 
@@ -131,12 +189,12 @@ Dispatch the reviewer within 60 seconds of readiness while execution is active, 
 handoff and actual changed paths. On revisions, identify the delta so it can focus its re-review;
 initial independent verification and required project gates still apply.
 
-After each subagent finishes (implementer, reviewer, spec_author, research) and again before your
-final report, run `scripts/harness.sh record-usage`. It records every agent invocation's duration
-and token usage in `harness.db` (best-effort, idempotent, always exits 0 — never let it block you).
-`./init.sh` now runs it automatically for both Claude Code and Codex CLI (before the mirror sync;
-opt-out `"record_agent_usage": false` in `.harness.json`), and Claude Code's `SubagentStop` hook
-also runs it; your call is a belt-and-braces refresh, and rerunning is harmless.
+`scripts/harness.sh record-usage` records every agent invocation's duration and token usage in
+`harness.db` (best-effort, idempotent, always exits 0 — never let it block you). `./init.sh` runs it for
+Claude Code and Codex CLI alike (opt-out `"record_agent_usage": false` in `.harness.json`) and `stats`
+refreshes it before printing, so you don't need to call it yourself. If its output (or `./init.sh`'s) has a
+`[WARN] ... reopened with <N>k context` line, you sent a follow-up to a finished agent: launch fresh agents
+from then on (step 6 above).
 If its output has a `[WARN] token budget:` line (`.harness.json::token_quota` set and the feature passed
 `token_warn_percent`), tell the user in one line before launching the next agent on that feature, and let
 them decide whether to continue, split the remaining work or stop.
@@ -168,21 +226,25 @@ not an extra feature or an alternative review gate. Unconfigured projects are un
 ## Anti-Telephone Rule
 
 When launching sub-agents, explicitly instruct them to **write their results to files** (not in their text response).
-You only receive references like: "result in `progress/explore_<topic>.md`".
+You only receive references like: "result in `progress/<name>/explore_<topic>.md`" — inside the feature's work
+folder when the research is for a feature (`log-out` deletes it with the feature), `progress/explore_<topic>.md`
+otherwise.
 
 Example of a correct instruction for a subagent:
 
 > "Investigate how IDs are serialized in `src/notes.py`. Write your findings in `progress/research_ids.md`. Your
 > response to me should be only: `done -> progress/research_ids.md` or a blocking message." After a real implementation
-> session, the reports are stored in `progress/impl_<feature>.md` (implementer) and `progress/review.md`
+> session, the reports are stored in `progress/<name>/impl.md` (implementer) and `progress/<name>/review.md`
 > (reviewer). You, as the lead, will never see their contents directly — only a reference like
-> `done -> progress/impl_<feature>.md`.
+> `done -> progress/<name>/impl.md`.
 
 ## Effort Scaling
 
 | Task Complexity    | Delegation                                              | Notes        |
 | ------------------- | -------------------------------------------------------- | ------------ |
-| Trivial (1 file)    | 1 implementer, then 1 reviewer                             | No research  |
+| The user asks for it without the harness (experiment, throwaway change) | 1 quick_implementer in untracked mode, no reviewer | See "Untracked Tasks"; nothing is recorded |
+| Small (`sdd=0`, no spec, <= ~4 files incl. tests, no new dependency/screen/flow) | `set-size small` → 1 quick_implementer (reviewer only if the gate refuses) | See "Small Tasks"; escalation asks the user |
+| Trivial (1 file) but risky (stored data, auth, shared contract, untested code) | 1 implementer, then 1 reviewer | No research  |
 | Medium (2-3 files, or reference paths already given — own project or another project cited by path) | 1 implementer, then 1 reviewer | No research — implementer reads what it needs directly |
 | Genuinely uncertain scope (relevant location unknown, needs discovery) | 2-3 research subagents, then implementer, then reviewer | Not triggered by "refactor" or "mentions another project" alone |
 | SDD feature, spec not yet drafted (`sdd=1`, `status=pending`) | 1 `spec_author` → human approval (hard stop, see SDD Gate above) → 1 implementer → 1 reviewer | Human approval is a hard stop, not a delegation step |
@@ -195,6 +257,11 @@ Example of a correct instruction for a subagent:
 - Do not run `scripts/harness.sh log-out` yourself (the implementer does this after review).
 - Do not instruct an implementer to run `log-out` before a `reviewer` subagent has approved its work —
   not even for a one-line change; `log-out` will mechanically refuse without a recorded approval anyway.
-- Do not accept results from subagents that come back inline without a file reference.
+  The only exception is `log-out --quick` by the `quick_implementer` on a `size=small` feature.
+- Do not `unhold` a held session yourself — that is the user's decision.
+- Do not accept results from subagents that come back inline without a file reference (an untracked-mode
+  `quick_implementer` is the exception: its short diff summary is its result).
+- Do not message an agent that already answered; launch a fresh one with the files it needs.
+- Do not ask the user anything between an implementer's "ready" and launching the reviewer.
 - Do not run `scripts/harness.sh claim` on an `sdd=1` feature until you have run `approve-spec` for it
   in this conversation.
