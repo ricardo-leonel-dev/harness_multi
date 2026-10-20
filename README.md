@@ -304,8 +304,12 @@ reviewer pass, spec_author, nested spawns) with parent/depth, model, duration an
 input/cache/output/reasoning/total tokens — numbers only, never transcript content.
 `./init.sh` runs it automatically for both runtimes (best-effort, before the snapshot
 and mirror sync, one `[OK]`/`[WARN]` line, never affects init's exit status; set
-`"record_agent_usage": false` in `.harness.json` to opt out). Claude Code also runs it
-from the scaffolded `SubagentStop` hook, and the leader may rerun it (idempotent).
+`"record_agent_usage": false` in `.harness.json` to opt out), and `stats` refreshes it
+before printing (`--no-refresh` skips that). The harness installs no Claude Code hooks, so
+both runtimes behave the same; a reinstall removes the `Stop`/`SubagentStop` hooks older
+versions scaffolded and keeps any other setting. `record-usage` also warns when a finished
+subagent was messaged again while carrying `reopen_warn_tokens` (default 80000) of context:
+follow-ups belong to a fresh agent.
 It is incremental (transcripts unchanged since last parsed are skipped; `--full`
 rescans) and time-bounded (`--max-seconds`, default 20; at the limit it keeps
 partial progress, warns and the next run continues).
@@ -323,8 +327,7 @@ feature reaches that share of the quota.
   a flag per file, e.g. `ng test --watch=false {files:--include}`; check it with **two**
   test files, since a wrong form often works with one): `scripts/harness.sh test
   <file...>` runs only those tests; output goes to `progress/test_last.log`, as does
-  `./init.sh`'s full suite. The scaffolded Claude Code hooks no longer run the suite
-  after every edit.
+  `./init.sh`'s full suite.
 - `review_budget_lines` (default 400, 0 disables): `log-out` logs the changed
   code/test lines and warns, never blocks, above it.
 Covered by `bash tests/scope_discipline_test.sh`.
@@ -339,7 +342,7 @@ reporting.
   a reviewer only when the change, measured from git against the session's start (files
   already uncommitted at claim excluded), stays within `quick_max_diff_lines` (80) and
   `quick_max_files` (4; both configurable in `.harness.json`), touches no dependency file, matches the files declared in
-  `progress/quick_<name>.md` with `Risk: none`, and the last `./init.sh` passed on that
+  `progress/<name>/quick.md` with `Risk: none`, and the last `./init.sh` passed on that
   same tree. Otherwise it refuses with the reasons and the reviewer runs as usual.
 - An agent that finds the task bigger escalates; the user decides. A rejection runs
   `hold`: the session keeps the project's slot, so claim and log-out refuse until
@@ -347,7 +350,30 @@ reporting.
 - `learn` keeps one lesson of up to 300 characters in `harness.db`; the leader runs
   `recall <keywords>` once per claim (at most 5 notes) and `forget <id>` drops stale ones.
   Nothing is loaded automatically.
+- A task the user wants without the harness goes to the `quick_implementer` in untracked
+  mode: no claim, no `progress/` files, no reviewer; it answers with a diff summary.
 Covered by `bash tests/quick_path_test.sh`.
+
+### Feature work folders, verbatim requests and worktrees
+
+- Each feature's handoffs and logs live in `progress/<name>/` (`impl.md`, `quick.md`,
+  `review.md`, `escalate.md`, `split.md`, research and logs). `claim` prints it; `log-out`
+  and `supersede` delete it — what must survive goes in the session's verification/closure.
+  The quick gate also accepts `progress/<number>/quick.md` and the older flat
+  `progress/quick_<name|number>.md`.
+- `add-feature --request "<verbatim>"` / `set-request` keep the user's own words
+  (`notion-import` stores the card text); the snapshot shows them. `requirements.md` must open
+  with `## Request (verbatim)` and `## Assumptions` (`mark-spec-ready` checks both), and the
+  leader shows the assumptions first when asking for approval.
+- `./init.sh` warns when the feature being implemented still has unticked `tasks.md` items.
+- `log-out`'s DIFF says `tests=n/a` when the project keeps `tests/` out of git on purpose.
+- `scripts/harness.sh link-worktree <worktree_project_dir>`, run from the main checkout,
+  gives a git worktree the same harness (symlinks to `harness.db`, `scripts/`, agents,
+  `AGENTS.md`, `.harness.json`; `docs/`, `specs/`, `CHECKPOINTS.md` only when the worktree
+  has none) and keeps `progress/` a local directory, so agents never write through a symlink
+  into another checkout. It lists the links in the shared `.git/info/exclude` and is safe to
+  re-run.
+Covered by `bash tests/feature_flow_test.sh`.
 
 ## Versioned PostgreSQL mock data
 

@@ -323,6 +323,12 @@ fi
 if ! sqlite3 "$DB_PATH" "PRAGMA table_info(session_log);" | grep -q '|held_at|'; then
   sqlite3 "$DB_PATH" "ALTER TABLE session_log ADD COLUMN held_at TEXT;"
 fi
+# Adds features.request: the user's request verbatim, kept apart from the
+# leader's description so the spec and the reviewer can check the work against
+# what was actually asked. Keep in sync with db/schema.sqlite.sql.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|request|'; then
+  sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN request TEXT;"
+fi
 if [ -z "$(sqlite3 "$DB_PATH" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='learnings';")" ]; then
   sqlite3 "$DB_PATH" <<'SQL'
 .bail on

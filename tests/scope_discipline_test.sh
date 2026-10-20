@@ -45,7 +45,7 @@ q() { sqlite3 "$P/harness.db" "$1"; }
 write_spec() {
   local n="$1" i
   mkdir -p "$P/specs/alpha"
-  : > "$P/specs/alpha/requirements.md"
+  printf '## Request (verbatim)\nDo the rules.\n\n## Assumptions\n- none\n\n' > "$P/specs/alpha/requirements.md"
   : > "$P/specs/alpha/tasks.md"
   for i in $(seq 1 "$n"); do
     printf '## R%s — Rule %s\nThe system SHALL do %s.\n\n' "$i" "$i" "$i" >> "$P/specs/alpha/requirements.md"

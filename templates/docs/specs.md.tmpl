@@ -65,6 +65,29 @@ specs/<name>/
 which is a disposable, wholesale-regenerated view of the database kept out of git, spec content here
 is the actual source material).
 
+## Request and assumptions
+
+`requirements.md` opens with two sections, before any requirement (`mark-spec-ready` refuses the spec
+without them):
+
+```markdown
+## Request (verbatim)
+Quiero agregar el endpoint "/assets/clients/products/{productId}" … que resuelven a un mismo controller
+y el código sea similar a ellos
+
+## Assumptions
+- S1: reuse assetsController/assetsLogic (the request says "resuelven a un mismo controller").
+- S2: productId always arrives well formed; it is not validated.
+```
+
+- **Request (verbatim)** is the user's own words, copied from the feature's recorded request
+  (`add-feature --request`, `set-request`, or the Notion card text) — never a summary. A feature with no
+  recorded request uses its description, labelled as such.
+- **Assumptions** lists every decision the spec makes where the request is silent or ambiguous, one line
+  each, or `- none`. The leader shows them to the user first when asking for approval: a misreading is
+  cheap to fix here and expensive once code exists. The reviewer later checks the change against the
+  request, not only against the requirements.
+
 ## Requirement format: EARS
 
 Every requirement in `requirements.md` gets a stable id (`R1`, `R2`, ...) and follows one of these five
@@ -121,7 +144,7 @@ context — so a feature that needs more is split, not squeezed.
 
 The `spec_author` estimates scope **before** `claim-spec`. If the feature has more than 15
 business rules, or its production code would clearly exceed the review budget (below), it writes
-`progress/split_<name>.md` and reports `split-proposed`, without claiming:
+`progress/<name>/split.md` and reports `split-proposed`, without claiming:
 
 ```markdown
 # Split proposal — <name>
@@ -164,7 +187,7 @@ failing test for a rule before the code that satisfies it:
 ```
 
 The `implementer` checks these off in order as it works; the `reviewer` rejects the feature if any are
-left `[ ]` without a documented justification in `progress/impl_<feature>.md`.
+left `[ ]` without a documented justification in `progress/<name>/impl.md`.
 
 ## Traceability
 
@@ -172,7 +195,7 @@ Every `R<n>` must be covered by **at least one concrete, currently-passing test*
 row by an assertion — a table-driven test (`it.each`, `@pytest.mark.parametrize`, subtests) is the
 natural shape: one test per rule, one row per case. Every `P<n>` needs one test proving the
 existing behavior still holds. No padding tests beyond that. The `implementer` documents the
-mapping in `progress/impl_<feature>.md`:
+mapping in `progress/<name>/impl.md`:
 
 ```markdown
 ## Traceability

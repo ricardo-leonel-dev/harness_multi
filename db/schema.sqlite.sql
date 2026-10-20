@@ -34,6 +34,7 @@ CREATE TABLE features (
   superseded_by TEXT,                         -- name of the feature that absorbed this one (status='superseded')
   superseded_from TEXT,                       -- status before supersede, restored by unsupersede
   size TEXT NOT NULL DEFAULT 'normal',        -- 'normal' or 'small' (validated in bash); small may close via log-out --quick
+  request TEXT,                               -- the user's request verbatim (add-feature --request, Notion card text)
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   deleted_at TEXT

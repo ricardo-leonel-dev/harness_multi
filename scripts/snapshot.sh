@@ -13,13 +13,14 @@ mkdir -p "$SNAPSHOT_PATH/features" "$SNAPSHOT_PATH/sessions"
 
 pid=$(db "SELECT id FROM projects WHERE slug='$(sql_escape "$PROJECT_SLUG")' AND deleted_at IS NULL LIMIT 1;")
 
-sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, acceptance, status,
+sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, request, acceptance, status,
   superseded_by, created_at, updated_at FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL
   ORDER BY feature_number;" | jq -c '.[]' | while IFS= read -r row; do
   number=$(jq -r '.feature_number' <<<"$row")
   name=$(jq -r '.name' <<<"$row")
   title=$(jq -r '.title' <<<"$row")
   desc=$(jq -r '.description // ""' <<<"$row")
+  request=$(jq -r '.request // ""' <<<"$row")
   status=$(jq -r '.status' <<<"$row")
   superseded_by=$(jq -r '.superseded_by // ""' <<<"$row")
   fid=$(jq -r '.id' <<<"$row")
@@ -39,6 +40,11 @@ sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, a
     echo "updated_at: $updated"
     echo "---"
     echo
+    if [ -n "$request" ]; then
+      echo "## Request (verbatim)"
+      echo "$request"
+      echo
+    fi
     echo "## Description"
     echo "$desc"
     echo
