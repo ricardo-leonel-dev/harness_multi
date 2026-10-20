@@ -108,12 +108,12 @@ Ordered checkboxes (`T1`, `T2`, ...), each tagged with the `R<n>` id(s) it cover
 ```
 
 The `implementer` checks these off in order as it works; the `reviewer` rejects the feature if any are
-left `[ ]` without a documented justification in `progress/impl_<feature>.md`.
+left `[ ]` without a documented justification in `progress/<name>/impl.md`.
 
 ## Traceability
 
 Every `R<n>` must be covered by **at least one concrete, currently-passing test**. The `implementer`
-documents this mapping in `progress/impl_<feature>.md`:
+documents this mapping in `progress/<name>/impl.md`:
 
 ```markdown
 ## Traceability

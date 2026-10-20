@@ -32,7 +32,7 @@ sqlite3 "$P/harness.db" "INSERT INTO projects (id, slug) VALUES ('p1','t');"
 H() { (cd "$P" && HOME="$WORK/home" HARNESS_AGENT=implementer ANTHROPIC_MODEL= bash scripts/harness.sh "$@") 2>&1; }
 q() { sqlite3 "$P/harness.db" "$1"; }
 g() { (cd "$P" && git -c user.email=t@t -c user.name=t "$@"); }
-handoff() { printf 'Cambio: %s\nArchivos: %s\nRisk: %s\nMotivo: test\n' "$2" "$3" "$4" > "$P/progress/quick_$1.md"; }
+handoff() { mkdir -p "$P/progress/$1"; printf 'Cambio: %s\nArchivos: %s\nRisk: %s\nMotivo: test\n' "$2" "$3" "$4" > "$P/progress/$1/quick.md"; }
 
 echo "1. schema and size"
 q "ALTER TABLE features DROP COLUMN size; ALTER TABLE session_log DROP COLUMN held_at; DROP TABLE learnings;"
@@ -64,7 +64,7 @@ printf 'pre\n' > "$P/src/pre.ts"; printf 'x\nlocal\n' > "$P/src/other.ts"   # un
 H claim tiny >/dev/null || die "claim tiny"
 printf 'a\nB\n' > "$P/src/app.ts"
 out=$(H log-out --quick --changes src/app.ts --verification v --closure c) && die "--quick without handoff/init must refuse"
-grep -q 'handoff progress/quick_tiny.md is missing' <<<"$out" && grep -q 'init.sh has not passed' <<<"$out" \
+grep -q 'handoff progress/tiny/quick.md is missing' <<<"$out" && grep -q 'init.sh has not passed' <<<"$out" \
   || die "missing reasons: $out"
 grep -q 'QUICK: refused' <<<"$(q "SELECT entry FROM session_log_entries;")" || die "refusal must be logged"
 pass "refuses without handoff or a passing init, and logs why"
@@ -75,7 +75,7 @@ grep -q "Risk: low" <<<"$out" || die "Risk reason missing: $out"
 handoff tiny "fix" "src/app.ts" "none"
 printf 'y\n' >> "$P/src/other.ts"
 out=$(H log-out --quick --changes src/app.ts --verification v --closure c) && die "undeclared/changed-after-init must refuse"
-grep -q 'not declared in progress/quick_tiny.md: src/other.ts' <<<"$out" || die "undeclared reason missing: $out"
+grep -q 'not declared in progress/tiny/quick.md: src/other.ts' <<<"$out" || die "undeclared reason missing: $out"
 grep -q 'changed after the last passing ./init.sh' <<<"$out" || die "stale init reason missing: $out"
 pass "refuses Risk other than none, undeclared files and a tree changed after init"
 printf 'x\nlocal\n' > "$P/src/other.ts"
@@ -109,6 +109,7 @@ out=$(H log-out --quick --changes src/app.ts --verification v --closure c) || di
 grep -q 'quick gate passed: 2 lines, 1 files' <<<"$out" || die "pass summary missing: $out"
 [ "$(q "SELECT status FROM features WHERE name='tiny';")" = done ] || die "quick close must mark done"
 [ "$(q "SELECT review_status FROM session_log ORDER BY id DESC LIMIT 1;")" = quick ] || die "review_status should be quick"
+[ ! -e "$P/progress/tiny" ] || die "log-out must delete the work folder progress/tiny/"
 pass "clean small change closes without a reviewer, ignoring files already uncommitted at claim"
 
 g add -A && g commit -qm tiny >/dev/null

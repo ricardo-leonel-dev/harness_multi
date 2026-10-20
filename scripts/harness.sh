@@ -11,14 +11,16 @@
 #                                              "sdd": true per item opts it into spec-driven development;
 #                                              optional "depends_on": [name...] gates claim on those LOCAL
 #                                              features — same project — being 'done' first)
-#   add-feature --name <slug> --title <t> [--description <d>] [--acceptance <item...>] [--sdd]
-#               [--depends-on <name...>] [--size small|normal]
+#   add-feature --name <slug> --title <t> [--description <d>] [--request <text>] [--acceptance <item...>]
+#               [--sdd] [--depends-on <name...>] [--size small|normal]
 #                                              create a single pending feature directly (no seed file) — for
 #                                              ad-hoc tasks the leader creates on the spot, no matching pending
 #                                              feature existed; --sdd requires an approved spec before claim;
 #                                              --depends-on names other LOCAL features (same project, must
 #                                              already exist) that must be 'done' before this one is claimable;
-#                                              --size small lets it close through log-out --quick (default normal)
+#                                              --size small lets it close through log-out --quick (default normal);
+#                                              --request keeps the user's request verbatim (the spec quotes it)
+#   set-request <feature_number|name> <text>  store/replace a feature's verbatim user request
 #   set-size <feature_number|name> <small|normal>
 #                                              change a not-yet-done feature's size (leader's classification,
 #                                              or back to normal when an escalation is approved)
@@ -50,7 +52,8 @@
 #                                              drafting so approve-spec can't approve it mid-revision); finish
 #                                              with mark-spec-ready as usual. Approved specs are not re-openable.
 #   mark-spec-ready                           close the current spec-drafting session: verifies
-#                                              specs/<name>/{requirements,design,tasks}.md exist, records
+#                                              specs/<name>/{requirements,design,tasks}.md exist (requirements.md
+#                                              with its "## Request (verbatim)" and "## Assumptions" sections), records
 #                                              requirement/task counts, moves the feature to spec_ready
 #                                              (best-effort: pushes notion_status_spec_ready if source_id is set).
 #                                              Refuses a spec with more than .harness.json::spec_max_requirements
@@ -81,6 +84,9 @@
 #                                              (GPT-5)") to take precedence.
 #                                              (best-effort: also pushes notion_status_in_progress to the
 #                                              feature's source Notion page, if it has a source_id)
+#                                              Prints the feature's work folder, progress/<name>/: every handoff
+#                                              (impl.md, quick.md, review.md, escalate.md, logs) goes there, and
+#                                              log-out deletes it once the feature is done
 #                                              An explicit TARGET that is in_progress/blocked with NO open session
 #                                              (e.g. lost to cancel-session --force) is resumed instead: new session,
 #                                              status in_progress, "RESUMED: previous session <id> was cancelled"
@@ -122,12 +128,13 @@
 #                                              Also logs a "DIFF: code=N, tests=M" entry measured from
 #                                              git for the --changes paths (lockfiles/generated/prose
 #                                              excluded) and warns, never blocks, when code exceeds
-#                                              .harness.json::review_budget_lines (default 400, 0 disables)
+#                                              .harness.json::review_budget_lines (default 400, 0 disables).
+#                                              On success it deletes the feature's work folder progress/<name>/
 #   log-out --quick --changes <item...> --verification <text> --closure <text>
 #                                              small features only: close without a reviewer when the quick gate
 #                                              passes — diff <= quick_max_diff_lines (80) and <= quick_max_files (4)
 #                                              against the session base, no dependency file, every changed file
-#                                              declared under "Archivos:" in progress/quick_<name>.md, "Risk: none"
+#                                              declared under "Archivos:" in progress/<name>/quick.md, "Risk: none"
 #                                              there, and the last ./init.sh green on the current tree. Otherwise
 #                                              refuses with the reasons (logged): launch the reviewer. A reviewer's
 #                                              approval wins; requested changes are never bypassed
@@ -186,17 +193,28 @@
 #                                              spawns) with role, label, parent/depth, model, duration and token
 #                                              usage — never transcript content. Runs are attributed to the harness
 #                                              session whose window contains their start. --transcript reads only
-#                                              that file (the SubagentStop hook passes it); --since is an ISO
+#                                              that file; --since is an ISO
 #                                              date/time or Nd/Nh. Incremental: files unchanged (mtime+size)
 #                                              since last parsed are skipped; --full rescans them. --max-seconds
 #                                              (default 20) bounds the run: at the limit it keeps partial
 #                                              progress and warns. Any parse/IO problem is a [WARN]; exits 0.
 #                                              When .harness.json sets token_quota, also warns once the active
 #                                              feature's tokens reach token_warn_percent (default 15) of it.
+#                                              Warns when a finished subagent was messaged again while carrying
+#                                              >= reopen_warn_tokens (default 80000) of context.
 #   stats [TARGET]                            agent invocation tree (parent -> children) per feature with per-run
 #                                              duration/tokens, totals per feature and per project, plus agent effort
 #                                              vs. union of agent intervals vs. session elapsed (see
-#                                              harness/instructions/timing.md); TARGET limits it to one feature
+#                                              harness/instructions/timing.md); TARGET limits it to one feature.
+#                                              Runs record-usage first so the latest agents are included
+#                                              (--no-refresh skips that)
+#   link-worktree <worktree_project_dir>      run from the main checkout: give a git worktree of this repository
+#                                              the harness without a second harness.db — symlinks what must be
+#                                              shared (harness.db, scripts, agents, AGENTS.md, .harness.json, ...;
+#                                              project files such as docs/ or specs/ only when the worktree lacks
+#                                              them) and keeps progress/ a real local directory, so agents writing
+#                                              handoffs never write outside the worktree. Lists the links in the
+#                                              shared .git/info/exclude. Safe to re-run: existing files are kept
 #   test [file...]                            run tests with output to progress/test_last.log, printing only
 #                                              the result (and the log's tail on failure): with files and
 #                                              .harness.json::test_targeted_command (its {files} placeholder
@@ -252,7 +270,7 @@ check_spec_scope() {
   max_req="$(config '.spec_max_requirements' '15')"
   [[ "$max_req" =~ ^[0-9]+$ ]] || max_req=15
   if [ "$max_req" -gt 0 ] && [ "$req" -gt "$max_req" ]; then
-    fail "$prefix: $dir has $req requirements (limit spec_max_requirements=$max_req) — merge clauses into one requirement per business rule, or write progress/split_$name.md and report split-proposed (docs/specs.md \"Scope limit\")"
+    fail "$prefix: $dir has $req requirements (limit spec_max_requirements=$max_req) — merge clauses into one requirement per business rule, or write progress/$name/split.md and report split-proposed (docs/specs.md \"Scope limit\")"
     exit 1
   fi
 }
@@ -280,10 +298,11 @@ VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape 
 }
 
 cmd_add_feature() {
-  local name="" title="" desc="" accept_items=() sdd=0 depends_items=() size=normal
+  local name="" title="" desc="" request="" accept_items=() sdd=0 depends_items=() size=normal
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
+      --request) request="$2"; shift 2 ;;
       --size) size="$2"; shift 2 ;;
       --title) title="$2"; shift 2 ;;
       --description) desc="$2"; shift 2 ;;
@@ -304,7 +323,7 @@ cmd_add_feature() {
     esac
   done
   if [ -z "$name" ] || [ -z "$title" ]; then
-    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>] [--size small|normal]"
+    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--request <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>] [--size small|normal]"
     exit 1
   fi
   case "$size" in small|normal) ;; *) fail "--size must be 'small' or 'normal', got: $size"; exit 1 ;; esac
@@ -340,8 +359,9 @@ cmd_add_feature() {
   local depends_on; depends_on="$(json_array "${depends_items[@]+"${depends_items[@]}"}")"
   local now; now="$(now_iso)"
 
-  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, size, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$size', '$now', '$now');"
+  local request_sql=NULL; [ -n "$request" ] && request_sql="'$(sql_escape "$request")'"
+  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, size, request, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$size', $request_sql, '$now', '$now');"
   local sdd_note=""; [ "$sdd" = "1" ] && sdd_note=", sdd"
   [ "$size" = "small" ] && sdd_note="$sdd_note, small"
   local deps_note=""; [ "$depends_on" != "[]" ] && deps_note=", depends on: $depends_on"
@@ -369,6 +389,31 @@ WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status NOT IN
 RETURNING feature_number || ' ' || name;")
   [ -n "$updated" ] || { fail "no matching feature that is not done/superseded: $target"; exit 1; }
   ok "feature $updated is now $size"
+}
+
+# set-request <TARGET> <text> — the user's request verbatim, for a feature
+# created without --request (seed, older install) or whose request changed
+# before work started. The spec_author quotes it in requirements.md.
+cmd_set_request() {
+  local target="${1:-}"; shift || true
+  local text="$*"
+  if [ -z "$target" ] || [ -z "$text" ]; then
+    fail "usage: set-request <feature_number|name> <text>"; exit 1
+  fi
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local updated
+  updated=$(db "UPDATE features SET request='$(sql_escape "$text")', updated_at='$(now_iso)'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where
+RETURNING feature_number || ' ' || name;")
+  [ -n "$updated" ] || { fail "no matching feature: $target"; exit 1; }
+  ok "stored the verbatim request for feature $updated"
 }
 
 cmd_link_notion() {
@@ -507,8 +552,9 @@ cmd_notion_import() {
     else
       source_id_sql="NULL"
     fi
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, source_id, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', $source_id_sql, '$now', '$now');"
+    # The card's text is the user's own request: keep it verbatim too.
+    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, source_id, request, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', $source_id_sql, NULLIF('$(sql_escape "$desc")', ''), '$now', '$now');"
     next_number=$((next_number + 1))
   done
   ok "imported notion tasks from $seed_file"
@@ -630,6 +676,13 @@ cmd_mark_spec_ready() {
   agent_str=$(db "SELECT agent FROM session_log WHERE id=$sid;")
 
   check_spec_scope "$spec_dir" "$req_count" "$name" "cannot mark spec ready"
+  # The user approves the spec against their own words: requirements.md opens
+  # with the request verbatim and the assumptions made to fill its gaps.
+  local section
+  for section in "Request (verbatim)" "Assumptions"; do
+    grep -qF "## $section" "$spec_dir/requirements.md" \
+      || { fail "cannot mark spec ready: $spec_dir/requirements.md has no '## $section' section (docs/specs.md \"Request and assumptions\")"; exit 1; }
+  done
 
   local now; now="$(now_iso)"
   local existing_spec_id
@@ -907,6 +960,7 @@ WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")
 VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")', '$now');"
   record_session_base "$(current_session_id)"
   ok "claimed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
+  ok "work folder: $(feature_dir "$(jq -r '.[0].name' <<<"$updated")")/ (handoffs and logs; deleted at log-out)"
 
   local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$updated")
   if [ -n "$source_id" ]; then
@@ -1134,6 +1188,36 @@ cmd_record_review() {
 # is_review_excluded <path> — lockfiles, generated/build output and prose are
 # not code a person reviews line by line, so they don't count toward the
 # review budget.
+# feature_dir <name> — the feature's work folder. Every handoff and log an
+# agent writes for one feature lives there, so log-out can delete it as a unit.
+feature_dir() {
+  printf 'progress/%s' "$1"
+}
+
+# clean_feature_dir <name> — deletes progress/<name>/ once the feature no
+# longer needs it (done or superseded). harness.db keeps what matters: plan,
+# log, verification, closure and the review verdict. Only plain slugs are
+# accepted, so a malformed name can never reach outside progress/.
+clean_feature_dir() {
+  local name="$1" dir
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
+  dir="$(feature_dir "$name")"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  rm -rf -- "$dir" && ok "removed work folder $dir/"
+}
+
+# quick_handoff <name> <number> — the quick handoff that exists, preferring
+# progress/<name>/quick.md; the number-named folder and the older flat
+# progress/quick_<name|number>.md files are accepted too, since agents have
+# used both. Prints the preferred path when none exists.
+quick_handoff() {
+  local f
+  for f in "progress/$1/quick.md" "progress/$2/quick.md" "progress/quick_$1.md" "progress/quick_$2.md"; do
+    [ -f "$f" ] && { printf '%s' "$f"; return; }
+  done
+  printf 'progress/%s/quick.md' "$1"
+}
+
 is_review_excluded() {
   case "$1" in
     *.lock|*.lockb|*-lock.json|*-lock.yaml|*.lock.json|go.sum|*.min.js|*.min.css|*.map|*.snap) return 0 ;;
@@ -1225,7 +1309,15 @@ record_diff_size() {
 
   local budget; budget="$(config '.review_budget_lines' '400')"
   [[ "$budget" =~ ^[0-9]+$ ]] || budget=400
-  local entry="DIFF: code=$code lines, tests=$tests lines, files=$files (review_budget_lines=$budget$scope)"
+  # Some projects keep their tests out of git on purpose (.git/info/exclude):
+  # git can't see them, so 0 would read as "no tests were written".
+  local tests_note="$tests lines" d
+  if [ "$tests" = 0 ]; then
+    for d in tests test spec __tests__; do
+      if [ -d "$d" ] && git check-ignore -q -- "$d/" 2>/dev/null; then tests_note="n/a ($d/ is ignored by git)"; break; fi
+    done
+  fi
+  local entry="DIFF: code=$code lines, tests=$tests_note, files=$files (review_budget_lines=$budget$scope)"
   db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] $entry")', '$(now_iso)');"
   ok "$entry"
   if [ "$budget" -gt 0 ] && [ "$code" -gt "$budget" ]; then
@@ -1268,13 +1360,14 @@ cmd_record_init() {
   db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] INIT: $1 fp=$fp', '$(now_iso)');"
 }
 
-# quick_gate <session_id> <feature_name> — the signals log-out --quick checks
-# itself instead of trusting the agent. Fills QUICK_REASONS (empty = pass),
-# QUICK_LINES and QUICK_FILES. Size, files and dependencies come from git
-# against the session base; Risk and the declared files from the handoff
-# progress/quick_<name>.md; the init result from record-init's fingerprint.
+# quick_gate <session_id> <feature_name> <feature_number> — the signals
+# log-out --quick checks itself instead of trusting the agent. Fills
+# QUICK_REASONS (empty = pass), QUICK_LINES and QUICK_FILES. Size, files and
+# dependencies come from git against the session base; Risk and the declared
+# files from the handoff (see quick_handoff); the init result from
+# record-init's fingerprint.
 quick_gate() {
-  local sid="$1" handoff="progress/quick_$2.md"
+  local sid="$1" handoff; handoff="$(quick_handoff "$2" "$3")"
   QUICK_REASONS=(); QUICK_LINES=0; QUICK_FILES=0
   if ! git rev-parse --git-dir >/dev/null 2>&1; then
     QUICK_REASONS+=("not a git repository: the change can't be measured"); return
@@ -1367,8 +1460,8 @@ cmd_log_out() {
   # reviewer", never "work around it". A reviewer's approval, if one already
   # exists, simply wins; their requested changes are never bypassed.
   if [ "$quick" = 1 ] && [ "$review_status" != "approved" ]; then
-    local fname fsize
-    IFS='|' read -r fname fsize < <(db "SELECT f.name, f.size FROM features f JOIN session_log sl ON sl.feature_id=f.id WHERE sl.id=$sid;")
+    local fname fsize fnum
+    IFS='|' read -r fname fsize fnum < <(db "SELECT f.name, f.size, f.feature_number FROM features f JOIN session_log sl ON sl.feature_id=f.id WHERE sl.id=$sid;")
     if [ "$fsize" != "small" ]; then
       fail "log-out --quick is only for features marked small (feature $fname is ${fsize:-unknown}) — use the reviewer path"
       exit 1
@@ -1377,7 +1470,7 @@ cmd_log_out() {
       fail "log-out --quick refused: a reviewer already requested changes on session $sid — it needs their approval"
       exit 1
     fi
-    quick_gate "$sid" "$fname"
+    quick_gate "$sid" "$fname" "$fnum"
     if [ "${#QUICK_REASONS[@]}" -gt 0 ]; then
       local joined; joined=$(printf '%s; ' "${QUICK_REASONS[@]}"); joined="${joined%; }"
       db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] QUICK: refused — $joined")', '$(now_iso)');"
@@ -1419,6 +1512,7 @@ SQL
     exit 1
   fi
   ok "session $sid logged out"
+  clean_feature_dir "$(db "SELECT name FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")"
 
   local source_id; source_id=$(db "SELECT source_id FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")
   if [ -n "$source_id" ]; then
@@ -1745,6 +1839,7 @@ RETURNING id;" 2>&1)
   db_exec "INSERT INTO feature_notes (feature_id, entry, created_at)
 VALUES ($fid, '$(sql_escape "[$attribution] SUPERSEDED by $by_label (was $status_now): $reason")', '$now');"
   ok "superseded: $fnum $fname → $by_label (was $status_now)"
+  clean_feature_dir "$fname"
 
   # A dependent can never be claimed while its depends_on names a feature
   # that will never be 'done' — don't rewrite it silently, just say so.
@@ -1991,15 +2086,22 @@ COMMIT;"
 }
 
 # record-usage/stats live in scripts/agent_usage.py (python3 stdlib only).
-# record-usage must never block the caller (SubagentStop hook, leader): a
+# record-usage must never block the caller (init.sh, stats, leader): a
 # missing python3/script is a [WARN] and exit 0, same as every parse problem.
+# .harness.json::reopen_warn_tokens (default 80000, 0 disables): record-usage
+# warns when a finished subagent gets a follow-up carrying that much context.
+reopen_warn_tokens() {
+  local n; n="$(config '.reopen_warn_tokens' '80000')"
+  [[ "$n" =~ ^[0-9]+$ ]] && printf '%s' "$n" || printf '80000'
+}
+
 cmd_record_usage() {
   if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$SCRIPT_DIR/agent_usage.py" ]; then
     warn "record-usage needs python3 and scripts/agent_usage.py (re-run install.sh) — skipping"
     return 0
   fi
   python3 "$SCRIPT_DIR/agent_usage.py" --db "$DB_PATH" --project-slug "$PROJECT_SLUG" \
-    collect --project-root "$(pwd)" "$@" || true
+    collect --project-root "$(pwd)" --reopen-warn-tokens "$(reopen_warn_tokens)" "$@" || true
   warn_token_budget
 }
 
@@ -2076,12 +2178,87 @@ cmd_test() {
   return "$rc"
 }
 
+# link-worktree <dir> — see the usage comment. Items are relative to the
+# project directory (the same subdirectory inside the worktree).
+cmd_link_worktree() {
+  local wt="${1:-}"
+  [ -n "$wt" ] || { fail "usage: link-worktree <worktree_project_dir> (run from the main checkout)"; exit 1; }
+  [ -d "$wt" ] || { fail "not a directory: $wt"; exit 1; }
+  wt="$(cd "$wt" && pwd)"
+  local main; main="$(pwd)"
+  [ "$wt" != "$main" ] || { fail "link-worktree takes the worktree's project directory, not this checkout"; exit 1; }
+  local common_main common_wt
+  common_main="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
+  common_wt="$(cd "$wt" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
+  if [ -z "$common_main" ] || [ "$common_main" != "$common_wt" ]; then
+    fail "$wt is not a worktree of this repository"; exit 1
+  fi
+
+  # Harness-owned: always shared. Project-owned: only when the worktree has no
+  # copy of its own (e.g. excluded from git); a tracked one is the branch's.
+  local shared="AGENTS.md CLAUDE.md init.sh harness.db harness scripts .harness.json .claude/agents .codex mock-data"
+  local fallback="docs CHECKPOINTS.md specs features.seed.json"
+  local item child linked=() kept=()
+  for item in $shared $fallback; do
+    [ -e "$main/$item" ] || continue
+    if [ -L "$wt/$item" ] || [ -e "$wt/$item" ]; then
+      # A real directory in the worktree (e.g. tracked project scripts next to
+      # the harness ones): link only the harness children it is missing.
+      if [ -d "$wt/$item" ] && [ ! -L "$wt/$item" ] && [ -d "$main/$item" ] && [[ " $shared " == *" $item "* ]]; then
+        for child in "$main/$item"/*; do
+          [ -e "$child" ] || continue
+          if [ ! -e "$wt/$item/${child##*/}" ] && [ ! -L "$wt/$item/${child##*/}" ]; then
+            ln -s "$child" "$wt/$item/${child##*/}" && linked+=("$item/${child##*/}")
+          fi
+        done
+      else
+        kept+=("$item")
+      fi
+      continue
+    fi
+    mkdir -p "$(dirname "$wt/$item")"
+    ln -s "$main/$item" "$wt/$item" && linked+=("$item")
+  done
+
+  # progress/ holds each agent's handoffs: a symlink there sends every write
+  # outside the worktree, which agent sandboxes and permission prompts treat
+  # as an external path. The main checkout's progress/ is left as it is.
+  if [ -L "$wt/progress" ]; then
+    rm -f "$wt/progress" && ok "progress/ was a symlink to another checkout — replaced by a local directory"
+  fi
+  mkdir -p "$wt/progress"
+
+  local prefix exclude_file begin end
+  prefix="$(cd "$wt" && git rev-parse --show-prefix)"
+  exclude_file="$common_main/info/exclude"
+  begin="# >>> harness-worktree-links: /$prefix (written by harness.sh link-worktree)"
+  end="# <<< harness-worktree-links: /$prefix"
+  mkdir -p "$(dirname "$exclude_file")"; touch "$exclude_file"
+  {
+    awk -v begin="$begin" -v end="$end" '$0 == begin { skip = 1; next } $0 == end { skip = 0; next } !skip' "$exclude_file"
+    printf '%s\n' "$begin"
+    # No trailing slash: git matches a symlink as a file, never as a directory.
+    for item in $shared $fallback progress; do printf '/%s%s\n' "$prefix" "$item" | sed 's/[][*?\\]/\\&/g'; done
+    printf '%s\n' "$end"
+  } > "$exclude_file.tmp" && mv "$exclude_file.tmp" "$exclude_file"
+
+  ok "worktree $wt: linked ${#linked[@]} item(s)${linked[0]+: ${linked[*]}}; progress/ is local"
+  [ "${#kept[@]}" -eq 0 ] || ok "already present, left as they are: ${kept[*]}"
+}
+
 cmd_stats() {
   if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$SCRIPT_DIR/agent_usage.py" ]; then
     fail "stats needs python3 and scripts/agent_usage.py (re-run install.sh)"
     exit 1
   fi
-  python3 "$SCRIPT_DIR/agent_usage.py" --db "$DB_PATH" --project-slug "$PROJECT_SLUG" stats "$@"
+  # Refresh first so agents that finished after the last ./init.sh show up;
+  # record-usage is best-effort and bounded, so a slow scan never blocks this.
+  local args=() a refresh=1
+  for a in "$@"; do
+    if [ "$a" = "--no-refresh" ]; then refresh=0; else args+=("$a"); fi
+  done
+  [ "$refresh" = 0 ] || cmd_record_usage --max-seconds 10 >/dev/null 2>&1 || true
+  python3 "$SCRIPT_DIR/agent_usage.py" --db "$DB_PATH" --project-slug "$PROJECT_SLUG" stats "${args[@]+"${args[@]}"}"
 }
 
 cmd_snapshot() {
@@ -2150,6 +2327,7 @@ main() {
     hold) cmd_hold "$@" ;;
     unhold) cmd_unhold "$@" ;;
     set-size) cmd_set_size "$@" ;;
+    set-request) cmd_set_request "$@" ;;
     learn) cmd_learn "$@" ;;
     recall) cmd_recall "$@" ;;
     forget) cmd_forget "$@" ;;
@@ -2161,6 +2339,7 @@ main() {
     check-blockers) cmd_check_blockers ;;
     record-usage) cmd_record_usage "$@" ;;
     stats) cmd_stats "$@" ;;
+    link-worktree) cmd_link_worktree "$@" ;;
     test) cmd_test "$@" ;;
     *)
       fail "unknown subcommand: $sub"

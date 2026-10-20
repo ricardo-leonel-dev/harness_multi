@@ -19,12 +19,16 @@ You **decompose and coordinate**; you never implement directly.
   reviewer gate.
 - ✅ Delegate every coding task. Claude Code: `Agent` tool with `subagent_type` `implementer` (code and tests for
   **one** feature), then `reviewer`; for an `sdd=1` feature still `pending`, `spec_author` first (§6); for a
-  small `sdd=0` feature, `quick_implementer` (leader.md "Small Tasks"). Codex CLI: the custom agents of the
-  same names in `.codex/agents/*.toml`.
+  small `sdd=0` feature, `quick_implementer` (leader.md "Small Tasks"); for a task the user wants **without the
+  harness**, `quick_implementer` in untracked mode (leader.md "Untracked Tasks": no claim, no `progress/`
+  files, no reviewer). Codex CLI: the custom agents of the same names in `.codex/agents/*.toml`.
+- Follow-ups always go to a **fresh** agent (new `Agent`/`spawn_agent` call), never as a message to an agent that
+  already answered — it would re-read its whole context on every step.
 - If the task needs investigation first, launch 2-3 parallel subagents with focused queries (Claude Code:
   `Explore`/`general-purpose`; Codex CLI: `explorer`).
-- **Anti-telephone:** tell subagents to write results to files (e.g. `progress/explore_<topic>.md`) and return
-  only the path, never the content.
+- **Anti-telephone:** tell subagents to write results to files and return only the path, never the content. A
+  feature's files live in its work folder `progress/<name>/` (`claim` prints it, `log-out` deletes it); research
+  not tied to a feature goes to `progress/explore_<topic>.md`.
 
 ### Startup Protocol
 
@@ -35,7 +39,8 @@ You **decompose and coordinate**; you never implement directly.
 5. If any feature is `blocked`: `scripts/harness.sh check-blockers` (best-effort; see
    `harness/instructions/cross-project.md`).
 6. Apply the escalation table in `.claude/agents/leader.md` / `.codex/agents/leader.toml`.
-7. **Time discipline:** don't re-verify what the implementer verified; launch the reviewer within 60s of "ready";
+7. **Time discipline:** don't re-verify what the implementer verified; launch the reviewer within 60s of "ready",
+   without asking the user anything first;
    on claim log `BUDGET: <Xm impl> + <Ym review>` and interrupt at 2x. Don't hunt for config that fresh logs
    already show, don't re-run tests yourself, don't re-read the spec line by line before delegating.
 
@@ -89,12 +94,15 @@ scripts/harness.sh set-plan "<step1>" "<step2>" ...
 ```
 
 `claim` atomically marks the feature `in_progress` and opens the session. Before launching the agent that
-claims, the leader runs `scripts/harness.sh recall <keywords>` once and passes the matching notes on.
+claims, the leader runs `scripts/harness.sh recall <keywords>` once and passes the matching notes on. When the
+leader creates a feature it keeps the user's words with `add-feature --request "<verbatim>"`; specs open with
+that request and the assumptions made to fill its gaps (`docs/specs.md` "Request and assumptions").
 
 ## 4. Closing
 
 `./init.sh` must pass, the `reviewer` records `record-review approved`, then the `implementer` runs
-`scripts/harness.sh log-out --changes <files...> --verification "<summary>" --closure "<summary>"`. Work shipped
+`scripts/harness.sh log-out --changes <files...> --verification "<summary>" --closure "<summary>"`, which also
+deletes the feature's `progress/<name>/` (anything worth keeping goes in `--verification`/`--closure`). Work shipped
 without a session, absorbed features, notes outside a session and blockers: `lifecycle.md`.
 
 ## 5. When This Role Does Not Apply
@@ -113,5 +121,5 @@ Only after the user approves the 3 spec files **in this conversation** does the 
 `.harness.json::human_user`, unless the user says "approve as <name>" in the same turn. This is the only command
 that stores a literal human name; `record-review` rejects bare names. For spec changes before approval, launch the
 `spec_author` again (`claim-spec <target>` re-opens a `spec_ready` spec). A `split-proposed ->
-progress/split_<name>.md` answer means: ask the user, create the parts (`add-feature --sdd --depends-on`), then
+progress/<name>/split.md` answer means: ask the user, create the parts (`add-feature --sdd --depends-on`), then
 `supersede` the original.

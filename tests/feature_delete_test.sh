@@ -42,7 +42,7 @@ fdeleted() { q "SELECT IFNULL(deleted_at,'') FROM features WHERE name='$1' ORDER
 # write_spec <name> — the three files mark-spec-ready requires.
 write_spec() {
   mkdir -p "$P/specs/$1"
-  printf '# Requirements\n\n- R1: WHEN x THE SYSTEM SHALL y\n' > "$P/specs/$1/requirements.md"
+  printf '# Requirements\n\n## Request (verbatim)\nx\n\n## Assumptions\n- none\n\n- R1: WHEN x THE SYSTEM SHALL y\n' > "$P/specs/$1/requirements.md"
   printf '# Design\n' > "$P/specs/$1/design.md"
   printf '# Tasks\n\n- T1: do it (R1)\n' > "$P/specs/$1/tasks.md"
 }
