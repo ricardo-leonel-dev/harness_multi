@@ -144,7 +144,7 @@
 #   learn [--feature TARGET] <note...>        keep one lesson (<= 300 chars), linked to the active feature
 #   recall [term...]                          at most 5 learnings matching the terms (newest 5 without terms)
 #   forget <learning_id>                      soft-delete a learning that no longer applies
-#   record-init <pass|fail>                   (init.sh) log the verify result + tree fingerprint on the session
+#   record-init <pass|fail|none>              (init.sh) log the verify result + tree fingerprint on the session
 #   delete-feature <TARGET>                   soft-delete a feature and its specs (sets deleted_at) — refuses
 #                                              while the feature has an open or paused session
 #   status                                     print current project/feature/session state
@@ -1336,11 +1336,12 @@ is_dependency_file() {
 }
 
 # tree_fingerprint — hash of HEAD plus every uncommitted change under this
-# project (progress/ and the snapshot excluded: init.sh itself rewrites them),
-# so log-out --quick can tell whether the last ./init.sh saw the code it closes.
+# project (progress/, the snapshot and harness.db excluded: the harness itself
+# rewrites them), so log-out can tell whether the last ./init.sh saw the code
+# it closes.
 tree_fingerprint() {
   git rev-parse --git-dir >/dev/null 2>&1 || return 1
-  local ex=(-- . ":(exclude)progress" ":(exclude)$SNAPSHOT_PATH") f
+  local ex=(-- . ":(exclude)progress" ":(exclude)$SNAPSHOT_PATH" ":(exclude)$DB_PATH*") f
   {
     git rev-parse HEAD 2>/dev/null
     git diff HEAD --binary "${ex[@]}" 2>/dev/null
@@ -1350,14 +1351,31 @@ tree_fingerprint() {
   } | shasum | cut -d' ' -f1
 }
 
-# record-init <pass|fail> — init.sh calls this after its verify step: logs the
-# result with the tree fingerprint on the active session (no-op without one).
+# record-init <pass|fail|none> — init.sh calls this after its verify step: logs
+# the result (none = green but no verify_command) with the tree fingerprint on
+# the active session (no-op without one).
 cmd_record_init() {
-  case "${1:-}" in pass|fail) ;; *) fail "usage: record-init <pass|fail>"; exit 1 ;; esac
+  case "${1:-}" in pass|fail|none) ;; *) fail "usage: record-init <pass|fail|none>"; exit 1 ;; esac
   local sid; sid="$(current_session_id)"
   [ -n "$sid" ] || return 0
   local fp; fp="$(tree_fingerprint)" || fp=none
   db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] INIT: $1 fp=$fp', '$(now_iso)');"
+}
+
+# init_verdict <session_id> — the last ./init.sh recorded on the session,
+# checked against the tree now: pass | none | missing | failed | stale. Outside
+# git there is no fingerprint, so a pass can't go stale.
+init_verdict() {
+  local last fp
+  last=$(db "SELECT entry FROM session_log_entries WHERE session_id=$1 AND entry LIKE '[harness] INIT: %' ORDER BY id DESC LIMIT 1;")
+  case "$last" in
+    "") echo missing ;;
+    "[harness] INIT: pass"*)
+      fp="$(tree_fingerprint)" || fp=none
+      if [ "$fp" = none ] || [ "$last" = "[harness] INIT: pass fp=$fp" ]; then echo pass; else echo stale; fi ;;
+    "[harness] INIT: none"*) echo none ;;
+    *) echo failed ;;
+  esac
 }
 
 # quick_gate <session_id> <feature_name> <feature_number> — the signals
@@ -1415,12 +1433,11 @@ quick_gate() {
     done
   fi
 
-  local last
-  last=$(db "SELECT entry FROM session_log_entries WHERE session_id=$sid AND entry LIKE '[harness] INIT: %' ORDER BY id DESC LIMIT 1;")
-  case "$last" in
-    "") QUICK_REASONS+=("./init.sh has not passed in this session") ;;
-    "[harness] INIT: pass fp=$(tree_fingerprint)") ;;
-    "[harness] INIT: pass"*) QUICK_REASONS+=("files changed after the last passing ./init.sh") ;;
+  case "$(init_verdict "$sid")" in
+    pass) ;;
+    missing) QUICK_REASONS+=("./init.sh has not passed in this session") ;;
+    stale) QUICK_REASONS+=("files changed after the last passing ./init.sh") ;;
+    none) QUICK_REASONS+=("./init.sh ran without a verify_command") ;;
     *) QUICK_REASONS+=("the last ./init.sh failed") ;;
   esac
 }
@@ -1488,6 +1505,16 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[
     fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved' first (do NOT pass --by; the harness auto-attributes from \$ANTHROPIC_MODEL); only the implementer runs log-out, and only after that approval is recorded"
     exit 1
   fi
+
+  # Whoever ran it, the full suite must have passed on exactly the code being
+  # closed: a change after the reviewer's ./init.sh needs another run.
+  case "$(init_verdict "$sid")" in
+    pass) ;;
+    none) warn "no verify_command in .harness.json: closing without a test suite" ;;
+    missing) fail "cannot log out session $sid: ./init.sh has not run in this session — run it and log out once it is green"; exit 1 ;;
+    stale) fail "cannot log out session $sid: files changed after the last passing ./init.sh — run it again and log out once it is green"; exit 1 ;;
+    *) fail "cannot log out session $sid: the last ./init.sh failed — fix it (a reviewer approval doesn't cover a red suite) and re-run it"; exit 1 ;;
+  esac
 
   # "${arr[@]+"${arr[@]}"}" rather than "${arr[@]:-}": same reason as in
   # cmd_add_feature — ':-' turns an empty array into [""], bare "${arr[@]}"

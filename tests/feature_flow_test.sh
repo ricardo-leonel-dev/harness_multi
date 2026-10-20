@@ -76,7 +76,7 @@ out=$(H claim plain) || die "claim plain: $out"
 grep -q 'work folder: progress/plain/' <<<"$out" || die "claim should name the work folder: $out"
 mkdir -p "$P/progress/plain" && printf 'handoff\n' > "$P/progress/plain/impl.md"
 printf 'b\n' >> "$P/src/app.ts"
-H record-review approved --by human:tester >/dev/null
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
 H log-out --changes src/app.ts --verification v --closure c >/dev/null || die "log-out plain"
 [ ! -e "$P/progress/plain" ] || die "log-out must delete progress/plain/"
 pass "claim names progress/<name>/ and log-out deletes it"
@@ -104,7 +104,7 @@ echo "4. DIFF with ignored tests"
 printf 'tests/\n' >> "$P/.gitignore" && g add -A && g commit -qm ignore-tests >/dev/null
 H add-feature --name t_ignored --title T >/dev/null && H claim t_ignored >/dev/null
 printf 'd\n' >> "$P/src/app.ts" && printf 'test\n' > "$P/tests/app.test.ts"
-H record-review approved --by human:tester >/dev/null
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
 out=$(H log-out --changes src/app.ts tests/app.test.ts --verification v --closure c) || die "log-out t_ignored: $out"
 grep -q 'tests=n/a (tests/ is ignored by git)' <<<"$out" || die "DIFF should say tests are not visible: $out"
 pass "DIFF reports tests=n/a when tests/ is ignored by git"
