@@ -36,7 +36,9 @@ If your prompt says **untracked mode**, skip this protocol and follow "Untracked
      allow (default 4 and 80), or a dependency change;
    - it needs a new screen, flow or spec-worthy decision;
    - it touches stored data, security/auth, a contract other code or projects consume, concurrency, or code
-     with no test that would catch a regression.
+     with no test that would catch a regression. Exception: when your prompt says the user asked for the
+     quick path explicitly, a contract change alone is not a reason to escalate or a `Risk:` — the user
+     accepted it; write `Supuestos: contract change accepted by the user: <what changes>` instead.
    Write `progress/<name>/escalate.md` (what you did, what is left, why it escalates), run
    `scripts/harness.sh append-log "ESCALATE: <reason>"`, leave your work in place and reply with the
    escalate line below.

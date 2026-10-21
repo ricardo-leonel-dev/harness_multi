@@ -24,8 +24,9 @@ open session can get stuck on a feature that can never finish. This is separate 
    ```
    This closes the session and marks the feature `done`; the closed session *is* the history entry. `log-out`
    refuses unless a `reviewer` already ran `scripts/harness.sh record-review approved` on this session, and
-   unless the last `./init.sh` of the session passed on exactly the tree being closed (any change after it
-   needs another run).
+   unless both that approval and the last `./init.sh` of the session saw exactly the files being closed (a
+   change after the approval goes back to the reviewer; one after `./init.sh` needs another run). Both compare
+   file contents, so committing the approved code doesn't invalidate them.
 3. Leave no temporary files, debug prints, or TODOs without context.
 
 ## Reconciling work implemented outside the harness

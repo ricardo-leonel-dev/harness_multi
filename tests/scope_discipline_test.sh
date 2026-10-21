@@ -106,11 +106,11 @@ echo "3. log-out review budget"
 P="$WORK/p3"; new_project "$P" '{"review_budget_lines":5}'
 (cd "$P" && git init -q && mkdir -p src && printf 'a\nb\n' > src/app.ts && git add src && \
   git -c user.email=t@t -c user.name=t commit -qm base) || die "git setup"
+H claim beta >/dev/null || die "claim beta"
 printf 'a\nB\nc\nd\n' > "$P/src/app.ts"                     # +3 -1 = 4 code lines
 mkdir -p "$P/src/x"; printf '1\n2\n3\n' > "$P/src/x/app.spec.ts"   # 3 test lines (untracked)
 printf 'lock\n%.0s' $(seq 1 50) > "$P/bun.lock"            # excluded
 printf 'doc\n' > "$P/NOTES.md"                              # excluded
-H claim beta >/dev/null || die "claim beta"
 H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "record-review"
 out=$(H log-out --changes src/app.ts src/x bun.lock NOTES.md --verification v --closure c) || die "log-out: $out"
 grep -q 'DIFF: code=4 lines, tests=3 lines, files=2' <<<"$out" || die "wrong DIFF: $out"
@@ -119,8 +119,9 @@ grep -q 'exceeds' <<<"$out" && die "4 code lines must not exceed a budget of 5: 
 pass "DIFF logged with code/test split, lockfile and prose excluded"
 [ "$(q "SELECT status FROM features WHERE name='beta';")" = done ] || die "log-out must still close"
 q "UPDATE features SET status='pending' WHERE name='beta';"
+H claim beta >/dev/null || die "re-claim beta"
 printf 'x\n%.0s' $(seq 1 10) >> "$P/src/app.ts"
-H claim beta >/dev/null && H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "re-claim beta"
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "re-claim beta"
 out=$(H log-out --changes src/app.ts --verification v --closure c) || die "log-out over budget must not block: $out"
 grep -q 'exceeds review_budget_lines=5' <<<"$out" || die "over-budget warning missing: $out"
 pass "over budget warns and still closes"

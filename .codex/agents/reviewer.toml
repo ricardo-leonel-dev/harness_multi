@@ -106,7 +106,8 @@ or PR descriptions; use conventional commits only.
 7. Use the **Write tool** to create `progress/<name>/review.md` with the block below — this is a required
    action, not something to only describe in your response. Do this before composing anything else, and write
    it once with the final verdict (don't draft it and rewrite it).
-8. **Record your verdict mechanically**, so it isn't just prose another agent could talk its way past:
+8. **Record your verdict mechanically**, so it isn't just prose another agent could talk its way past (an
+   approval covers the files exactly as they are when you record it; `log-out` refuses it if they change after):
    ```
    scripts/harness.sh record-review approved
    ```

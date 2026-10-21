@@ -74,6 +74,14 @@ running `approve-spec`.** `claim` will refuse an unapproved spec on its own now,
 as the *only* check — treat `approve-spec` as the explicit, intentional act of recording approval, not
 an incidental side effect of `claim` failing and you fixing it after the fact.
 
+**Before launching the `spec_author`, check whether the request is already complete.** It is when it fits in
+3 rules or fewer with no "depends" or "or", leaves no contract, validation or error case to decide, adds no
+screen or flow, and could be resumed from the request plus the diff. Then ask once, in one line, before
+anything else: "<N> looks complete: <the request in one phrase>. Do it without SDD? If you say no, I keep SDD."
+Only on an explicit yes run `scripts/harness.sh drop-sdd <N> "<why it is complete>"` and treat it as an `sdd=0`
+feature (classify its size as in "Small Tasks"). On no, silence or any doubt, keep SDD. Never drop SDD on your
+own, never ask twice for the same feature, and never suggest adding SDD.
+
 Once approved, decomposition proceeds exactly like any other feature — 1 implementer, then 1 reviewer —
 except the implementer additionally works from `specs/<name>/{requirements,design,tasks}.md`, and the
 reviewer additionally walks `CHECKPOINTS.md`'s C6 group.
@@ -156,7 +164,12 @@ included; `quick_max_files`), no new dependency, and no new screen or flow (a co
 adjustment). Follow-up fixes of a feature already closed (a bug the user found in it, a cleanup a review
 suggested) are usually small too. If unsure, it is normal. Announce it in one line ("I'm treating 34 as small: one component and its
 test") so the user can override, then `scripts/harness.sh set-size <feature> small` (or `add-feature --size
-small` when you create it). Small features go to **1 `quick_implementer`**, no reviewer up front. Its reply:
+small` when you create it). Small features go to **1 `quick_implementer`**, no reviewer up front.
+When the user explicitly asks for the quick path ("implementer rápido", "vía rápida") on a change that alters a
+contract (an API response, an exported type), honor it: mark it small, name the contract in the announcement
+line ("small at your request; it changes the `sales_by_sku` response") and write "user asked for the quick
+path" in the `quick_implementer` prompt, so it doesn't escalate for the contract alone. Stored data,
+security/auth and dependencies still escalate. Its reply:
 
 - `done -> ...` — the quick gate closed it. Report to the user.
 - `review-needed -> ...` — the gate refused or the agent declared a risk. Launch 1 `reviewer` pointing at
@@ -248,7 +261,7 @@ Example of a correct instruction for a subagent:
 | ------------------- | -------------------------------------------------------- | ------------ |
 | The user asks for it without the harness (experiment, throwaway change) | 1 quick_implementer in untracked mode, no reviewer | See "Untracked Tasks"; nothing is recorded |
 | Small (`sdd=0`, no spec, <= ~4 files incl. tests, no new dependency/screen/flow) | `set-size small` → 1 quick_implementer (reviewer only if the gate refuses) | See "Small Tasks"; escalation asks the user |
-| Trivial (1 file) but risky (stored data, auth, shared contract, untested code) | 1 implementer, then 1 reviewer | No research  |
+| Trivial (1 file) but risky (stored data, auth, shared contract, untested code) | 1 implementer, then 1 reviewer (a contract change the user explicitly sent down the quick path goes there instead) | No research  |
 | Medium (2-3 files, or reference paths already given — own project or another project cited by path) | 1 implementer, then 1 reviewer | No research — implementer reads what it needs directly |
 | Genuinely uncertain scope (relevant location unknown, needs discovery) | 2-3 research subagents, then implementer, then reviewer | Not triggered by "refactor" or "mentions another project" alone |
 | SDD feature, spec not yet drafted (`sdd=1`, `status=pending`) | 1 `spec_author` → human approval (hard stop, see SDD Gate above) → 1 implementer → 1 reviewer | Human approval is a hard stop, not a delegation step |
