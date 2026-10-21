@@ -21,6 +21,9 @@
 #                                              --size small lets it close through log-out --quick (default normal);
 #                                              --request keeps the user's request verbatim (the spec quotes it)
 #   set-request <feature_number|name> <text>  store/replace a feature's verbatim user request
+#   drop-sdd <feature_number|name> <reason>   turn a pending sdd=1 feature into sdd=0 before any spec exists
+#                                              (only after the user accepted it in this conversation); the
+#                                              reason is kept as a feature note
 #   set-size <feature_number|name> <small|normal>
 #                                              change a not-yet-done feature's size (leader's classification,
 #                                              or back to normal when an escalation is approved)
@@ -389,6 +392,34 @@ WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status NOT IN
 RETURNING feature_number || ' ' || name;")
   [ -n "$updated" ] || { fail "no matching feature that is not done/superseded: $target"; exit 1; }
   ok "feature $updated is now $size"
+}
+
+# drop-sdd <TARGET> <reason> — the leader found the request already complete
+# and the user accepted skipping the spec. Only a pending sdd=1 feature with no
+# spec started; the reason stays as a feature note.
+cmd_drop_sdd() {
+  local target="${1:-}"; shift || true
+  local reason="$*"
+  if [ -z "$target" ] || [ -z "$reason" ]; then
+    fail "usage: drop-sdd <feature_number|name> <reason>"; exit 1
+  fi
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local now; now="$(now_iso)"
+  local updated
+  updated=$(db "UPDATE features SET sdd=0, updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status='pending' AND sdd=1 AND $where
+  AND NOT EXISTS (SELECT 1 FROM specs WHERE specs.feature_id=features.id AND specs.deleted_at IS NULL)
+RETURNING id || ' ' || feature_number || ' ' || name;")
+  [ -n "$updated" ] || { fail "no pending sdd=1 feature without a spec matches: $target"; exit 1; }
+  db_exec "INSERT INTO feature_notes (feature_id, entry, created_at) VALUES (${updated%% *}, '$(sql_escape "SDD dropped: $reason")', '$now');"
+  ok "feature ${updated#* } is now sdd=0"
 }
 
 # set-request <TARGET> <text> — the user's request verbatim, for a feature
@@ -1044,7 +1075,7 @@ SQL
     exit 1
   fi
 
-  record_session_base "$new_sid"
+  record_session_base "$new_sid" "$prev_sid"
   local row
   row=$(sqlite3 -json "$DB_PATH" "SELECT feature_number, name, title, source_id FROM features WHERE id=$fid;")
   ok "resumed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$row") (new session $new_sid; ${resumed#RESUMED: })"
@@ -1179,6 +1210,10 @@ cmd_record_review() {
   local now; now="$(now_iso)"
 
   db_exec "UPDATE session_log SET review_status='$(sql_escape "$verdict")', reviewed_by='$(sql_escape "$by")', reviewed_at='$now' WHERE id=$sid;"
+  # The approval covers the code as it is now: log-out refuses it once that
+  # code changes (review_verdict).
+  local fp; fp="$(tree_fingerprint)" || fp=none
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] REVIEW: $verdict_raw fp=$fp', '$now');"
   if [ -n "$notes" ]; then
     db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "REVIEW ($verdict_raw): $notes")', '$now');"
   fi
@@ -1239,13 +1274,20 @@ is_test_path() {
 # so record_diff_size still sees work the implementer commits before log-out,
 # plus a DIRTY entry with the files already uncommitted at that point, so the
 # quick gate doesn't count them as this session's work. No-op outside git or
-# before the first commit.
+# before the first commit. Given the cancelled session a resume replaces, it
+# copies that session's entries instead: the feature's own work so far counts.
 record_session_base() {
-  local sid="$1" sha dirty
+  local sid="$1" prev="${2:-}" sha dirty
   [ -n "$sid" ] || return 0
+  if [ -n "$prev" ] && [ -n "$(db "SELECT 1 FROM session_log_entries WHERE session_id=$prev AND entry LIKE '[harness] BASE: %' LIMIT 1;")" ]; then
+    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at)
+      SELECT $sid, entry, '$(now_iso)' FROM session_log_entries
+      WHERE session_id=$prev AND (entry LIKE '[harness] BASE: %' OR entry LIKE '[harness] DIRTY:%') ORDER BY id;"
+    return 0
+  fi
   sha=$(git rev-parse --verify --quiet HEAD 2>/dev/null) || return 0
   db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] BASE: $sha', '$(now_iso)');"
-  dirty=$(dirty_listing HEAD)
+  dirty=$(dirty_listing HEAD -w)
   [ -z "$dirty" ] || db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] DIRTY:
 $dirty")', '$(now_iso)');"
 }
@@ -1253,13 +1295,43 @@ $dirty")', '$(now_iso)');"
 # dirty_listing <base> — one "<blob hash> <path>" line per file under this
 # project that differs from <base> or is untracked ("deleted" for a removed
 # file), skipping progress/ and the snapshot, which the harness rewrites.
+# With -w the contents are also stored in git's object database, so the
+# session can later measure its own changes against them (session_file_lines).
 dirty_listing() {
-  local file
+  local file write="${2:-}"
   { git diff --name-only --relative "$1" -- . 2>/dev/null; git ls-files --others --exclude-standard -- . 2>/dev/null; } \
     | while IFS= read -r file; do
         case "$file" in ""|progress/*|"$SNAPSHOT_PATH"/*) continue ;; esac
-        if [ -f "$file" ]; then printf '%s %s\n' "$(git hash-object -- "$file")" "$file"; else printf 'deleted %s\n' "$file"; fi
+        if [ -f "$file" ]; then printf '%s %s\n' "$(git hash-object $write -- "$file")" "$file"; else printf 'deleted %s\n' "$file"; fi
       done
+}
+
+# session_file_lines <base> <claim listing> <file> — lines this session
+# changed in <file>. A file already uncommitted at claim is measured against
+# its contents then (kept by record_session_base), not against <base>, so work
+# left uncommitted by an earlier feature doesn't count; 0 if untouched since.
+# Otherwise: the diff against <base>, or the whole file when it is new.
+# Binary files count 0.
+session_file_lines() {
+  local base="$1" before="$2" file="$3" old new added deleted _ n=0
+  old=$(while IFS= read -r line; do [ "${line#* }" = "$file" ] && { echo "${line%% *}"; break; }; done <<<"$before")
+  if [ -n "$old" ] && [ "$old" != deleted ] && git cat-file -e "$old" 2>/dev/null; then
+    if [ -f "$file" ]; then new=$(git hash-object -w -- "$file"); else new=$(git hash-object -w /dev/null); fi
+    [ "$new" != "$old" ] || { echo 0; return; }
+    read -r added deleted _ < <(git diff --numstat "$old" "$new" 2>/dev/null)
+  elif [ "$old" != deleted ] && { git cat-file -e "$base:./$file" 2>/dev/null || git ls-files --error-unmatch -- "$file" >/dev/null 2>&1; }; then
+    read -r added deleted _ < <(git diff --numstat --relative "$base" -- "$file" 2>/dev/null)
+  elif [ -f "$file" ]; then
+    added=$(wc -l < "$file" | tr -d ' '); deleted=0
+  fi
+  [[ "${added:-}" =~ ^[0-9]+$ && "${deleted:-}" =~ ^[0-9]+$ ]] && n=$((added + deleted))
+  echo "$n"
+}
+
+# session_claim_listing <session_id> — the DIRTY listing logged at claim
+# (empty when the tree was clean then).
+session_claim_listing() {
+  db "SELECT substr(entry, 18) FROM session_log_entries WHERE session_id=$1 AND entry LIKE '[harness] DIRTY:%' ORDER BY id LIMIT 1;"
 }
 
 # session_diff_base <session_id> — prints "<base>\t<scope note>": the
@@ -1279,8 +1351,8 @@ session_diff_base() {
 }
 
 # record_diff_size <session_id> <path...> — advisory review budget: counts
-# changed lines (git diff against the session's BASE commit, falling back to
-# HEAD, for tracked paths; whole file for untracked ones) in the paths log-out was given, split into production code and tests,
+# the lines this session changed (session_file_lines) in the paths log-out was
+# given, split into production code and tests,
 # logs a DIFF entry on the session (data for calibrating future splits) and
 # warns when code exceeds .harness.json::review_budget_lines (default 400; 0
 # disables the warning). Never blocks: outside git or with no paths it's a no-op.
@@ -1288,22 +1360,18 @@ record_diff_size() {
   local sid="$1"; shift
   [ $# -gt 0 ] || return 0
   git rev-parse --git-dir >/dev/null 2>&1 || return 0
-  local code=0 tests=0 files=0 path added deleted file n base scope
+  local code=0 tests=0 files=0 path file n base scope before
   IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
+  before=$(session_claim_listing "$sid")
   for path in "$@"; do
-    while IFS=$'\t' read -r added deleted file; do
+    while IFS= read -r file; do
       [ -n "$file" ] || continue
       is_review_excluded "$file" && continue
-      [[ "$added" =~ ^[0-9]+$ ]] || continue  # binary
-      n=$((added + deleted)); files=$((files + 1))
+      n=$(session_file_lines "$base" "$before" "$file")
+      [ "$n" -gt 0 ] || continue  # binary, or uncommitted at claim and untouched since
+      files=$((files + 1))
       if is_test_path "$file"; then tests=$((tests + n)); else code=$((code + n)); fi
-    done < <(git diff --numstat --relative "$base" -- "$path" 2>/dev/null)
-    while IFS= read -r file; do
-      [ -n "$file" ] && [ -f "$file" ] || continue
-      is_review_excluded "$file" && continue
-      n=$(wc -l < "$file" | tr -d ' '); files=$((files + 1))
-      if is_test_path "$file"; then tests=$((tests + n)); else code=$((code + n)); fi
-    done < <(git ls-files --others --exclude-standard -- "$path" 2>/dev/null)
+    done < <(git diff --name-only --relative "$base" -- "$path" 2>/dev/null; git ls-files --others --exclude-standard -- "$path" 2>/dev/null)
   done
   [ "$files" -gt 0 ] || return 0
 
@@ -1335,20 +1403,24 @@ is_dependency_file() {
   return 1
 }
 
-# tree_fingerprint — hash of HEAD plus every uncommitted change under this
-# project (progress/, the snapshot and harness.db excluded: the harness itself
-# rewrites them), so log-out can tell whether the last ./init.sh saw the code
-# it closes.
+# tree_fingerprint — git tree hash of this project's files as they are on
+# disk, tracked and untracked (progress/, the snapshot and harness.db
+# excluded: the harness itself rewrites them), so log-out can tell whether the
+# last ./init.sh and the reviewer's approval saw the code it closes. It hashes
+# contents only, so committing them, or a commit elsewhere in the repository,
+# doesn't change it. Built in a throwaway copy of the index; the real index is
+# untouched.
 tree_fingerprint() {
   git rev-parse --git-dir >/dev/null 2>&1 || return 1
-  local ex=(-- . ":(exclude)progress" ":(exclude)$SNAPSHOT_PATH" ":(exclude)$DB_PATH*") f
-  {
-    git rev-parse HEAD 2>/dev/null
-    git diff HEAD --binary "${ex[@]}" 2>/dev/null
-    git ls-files --others --exclude-standard -z "${ex[@]}" 2>/dev/null | while IFS= read -r -d '' f; do
-      printf '%s ' "$f"; shasum < "$f"
-    done
-  } | shasum | cut -d' ' -f1
+  local idx prefix tree
+  idx=$(mktemp) || return 1
+  cp "$(git rev-parse --git-path index)" "$idx" 2>/dev/null || rm -f "$idx"
+  prefix=$(git rev-parse --show-prefix 2>/dev/null)
+  GIT_INDEX_FILE="$idx" git add -A -- . ":(exclude)progress" ":(exclude)$SNAPSHOT_PATH" ":(exclude)$DB_PATH*" >/dev/null 2>&1
+  tree=$(GIT_INDEX_FILE="$idx" git write-tree ${prefix:+--prefix="$prefix"} 2>/dev/null)
+  rm -f "$idx"
+  [ -n "$tree" ] || return 1
+  printf '%s\n' "$tree"
 }
 
 # record-init <pass|fail|none> — init.sh calls this after its verify step: logs
@@ -1378,6 +1450,21 @@ init_verdict() {
   esac
 }
 
+# review_verdict <session_id> — whether the recorded approval covers the tree
+# now: current | stale | legacy (approved before approvals carried a
+# fingerprint). Outside git there is no fingerprint, so it can't go stale.
+review_verdict() {
+  local last fp
+  last=$(db "SELECT entry FROM session_log_entries WHERE session_id=$1 AND entry LIKE '[harness] REVIEW: approved fp=%' ORDER BY id DESC LIMIT 1;")
+  [ -n "$last" ] || { echo legacy; return; }
+  fp="$(tree_fingerprint)" || fp=none
+  if [ "$fp" = none ] || [ "$last" = "[harness] REVIEW: approved fp=none" ] || [ "$last" = "[harness] REVIEW: approved fp=$fp" ]; then
+    echo current
+  else
+    echo stale
+  fi
+}
+
 # quick_gate <session_id> <feature_name> <feature_number> — the signals
 # log-out --quick checks itself instead of trusting the agent. Fills
 # QUICK_REASONS (empty = pass), QUICK_LINES and QUICK_FILES. Size, files and
@@ -1395,23 +1482,17 @@ quick_gate() {
   max_files="$(config '.quick_max_files' '4')"; [[ "$max_files" =~ ^[0-9]+$ ]] || max_files=4
 
   # Files already uncommitted at claim and untouched since (same blob) are not
-  # this session's work. One touched further counts with its whole diff.
-  local base scope added deleted file changed=() before line
+  # this session's work; one touched further counts only what changed since.
+  local base scope file changed=() before line
   IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
   [ -z "$scope" ] || QUICK_REASONS+=("the session base is not in this branch's history: the change can't be measured")
-  before=$(db "SELECT substr(entry, 18) FROM session_log_entries WHERE session_id=$sid AND entry LIKE '[harness] DIRTY:%' ORDER BY id LIMIT 1;")
+  before=$(session_claim_listing "$sid")
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     grep -qxF -- "$line" <<<"$before" || changed+=("${line#* }")
   done < <(dirty_listing "$base")
   for file in "${changed[@]+"${changed[@]}"}"; do
-    if git cat-file -e "$base:./$file" 2>/dev/null || git ls-files --error-unmatch -- "$file" >/dev/null 2>&1; then
-      while IFS=$'\t' read -r added deleted _; do
-        [[ "$added" =~ ^[0-9]+$ ]] && QUICK_LINES=$((QUICK_LINES + added + deleted))
-      done < <(git diff --numstat --relative "$base" -- "$file" 2>/dev/null)
-    elif [ -f "$file" ]; then
-      QUICK_LINES=$((QUICK_LINES + $(wc -l < "$file")))
-    fi
+    QUICK_LINES=$((QUICK_LINES + $(session_file_lines "$base" "$before" "$file")))
   done
   QUICK_FILES=${#changed[@]}
 
@@ -1504,6 +1585,16 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[
   if [ "$review_status" != "approved" ] && [ "$review_status" != "quick" ]; then
     fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved' first (do NOT pass --by; the harness auto-attributes from \$ANTHROPIC_MODEL); only the implementer runs log-out, and only after that approval is recorded"
     exit 1
+  fi
+
+  # The reviewer approved a specific state of the code: a change after it
+  # (a fix nobody reviewed) needs the reviewer again.
+  if [ "$review_status" = "approved" ]; then
+    case "$(review_verdict "$sid")" in
+      current) ;;
+      legacy) warn "the approval on session $sid predates review fingerprints: it can't be checked against the code being closed" ;;
+      *) fail "cannot log out session $sid: files changed after the reviewer approved them — the reviewer must review the change and record its verdict again"; exit 1 ;;
+    esac
   fi
 
   # Whoever ran it, the full suite must have passed on exactly the code being
@@ -2354,6 +2445,7 @@ main() {
     hold) cmd_hold "$@" ;;
     unhold) cmd_unhold "$@" ;;
     set-size) cmd_set_size "$@" ;;
+    drop-sdd) cmd_drop_sdd "$@" ;;
     set-request) cmd_set_request "$@" ;;
     learn) cmd_learn "$@" ;;
     recall) cmd_recall "$@" ;;

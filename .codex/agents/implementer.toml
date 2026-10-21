@@ -132,7 +132,8 @@ or PR descriptions; use conventional commits only.
      it — if it fails with that error, do not try to work around it (e.g. editing `harness.db` directly); it
      means the reviewer's approval never actually got recorded, so stop and report that back to the leader.
      It also refuses when the last `./init.sh` of the session failed or files changed after it passed: run
-     `./init.sh` once (changes after the review go back to the reviewer, not straight to `log-out`).
+     `./init.sh` once. And it refuses when files changed after the reviewer approved: never edit after the
+     approval; report the change to the leader so it goes back to the reviewer.
    - **Changes requested** — address the required changes from `progress/<name>/review.md`, return to step 4,
      then re-verify (step 7) and re-report readiness (step 8). State exactly what changed since
      the reviewed version and run checks affected by that change. Keep the mandatory init gate;

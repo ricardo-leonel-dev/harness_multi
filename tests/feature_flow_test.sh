@@ -5,7 +5,8 @@
 #   1. features.request keeps the user's request verbatim (add-feature
 #      --request, set-request, notion-import) and the snapshot shows it.
 #   2. mark-spec-ready refuses a requirements.md without its "Request
-#      (verbatim)" and "Assumptions" sections.
+#      (verbatim)" and "Assumptions" sections; drop-sdd only applies before a
+#      spec exists.
 #   3. Each feature works in progress/<name>/: claim names it, log-out and
 #      supersede delete it, and the quick gate also finds a handoff named by
 #      feature number or in the older flat progress/quick_<x>.md form.
@@ -67,6 +68,13 @@ printf '\n## Assumptions\n- S1: none\n' >> "$P/specs/spec_one/requirements.md"
 out=$(H mark-spec-ready) || die "mark-spec-ready with both sections: $out"
 grep -q 'R=1, T=1' <<<"$out" || die "the sections must not count as requirements: $out"
 pass "mark-spec-ready requires the request and assumptions sections"
+out=$(H drop-sdd spec_one "complete") && die "drop-sdd must refuse a feature whose spec exists"
+H add-feature --name clear_one --title "Clear one" --sdd >/dev/null || die "add-feature clear_one"
+out=$(H drop-sdd clear_one) && die "drop-sdd needs a reason"
+H drop-sdd clear_one "one field, nothing to decide" >/dev/null || die "drop-sdd clear_one"
+[ "$(q "SELECT sdd FROM features WHERE name='clear_one';")" = 0 ] || die "drop-sdd must set sdd=0"
+[ "$(q "SELECT entry FROM feature_notes n JOIN features f ON f.id=n.feature_id WHERE f.name='clear_one';")" = "SDD dropped: one field, nothing to decide" ] || die "drop-sdd must keep the reason"
+pass "drop-sdd turns a pending feature without a spec into sdd=0 and keeps the reason"
 
 echo "3. work folder"
 g init -q && mkdir -p "$P/tests"
