@@ -50,7 +50,7 @@ If the task names a feature (number or name), pass it to the `implementer` so it
 
 | Path | Contents | Read when |
 | --- | --- | --- |
-| `scripts/harness.sh` | Single entry point for harness state (`harness.db`, SQLite, gitignored) | Every claim, log, log-out |
+| `scripts/harness.sh` | Single entry point for harness state (`harness.db`, SQLite, git-excluded) | Every claim, log, log-out |
 | `state/` | Generated, read-only snapshot of `harness.db` (never edit or commit) | Human review |
 | `.harness.json` | Runtime config: verify/test commands, budgets, Notion ids | You need a command or setting |
 | `docs/{architecture,conventions,verification}.md` | Project's definition of good work, style, verification | Before implementing / verifying |

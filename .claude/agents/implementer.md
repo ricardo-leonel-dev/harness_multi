@@ -74,6 +74,7 @@ or PR descriptions; use conventional commits only.
    requirement id in `requirements.md` must map to at least one concrete test you can point to by
    file+test-name; a requirement with no mapped test is a gap to close before reporting readiness.
    One test per rule (table-driven for its cases), one per `P<n>` preservation item, no padding.
+   Tests assert behavior, not text: `harness/instructions/testing.md` "What a test asserts".
    **Running tests while you iterate:** run only the files you're working on with
    `scripts/harness.sh test <test-file...>` — it uses `.harness.json::test_targeted_command` (falls back
    to the full `verify_command` when unset), writes the whole output to `progress/test_last.log`, and

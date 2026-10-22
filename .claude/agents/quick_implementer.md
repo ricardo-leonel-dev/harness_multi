@@ -31,6 +31,7 @@ If your prompt says **untracked mode**, skip this protocol and follow "Untracked
 3. **Implement** the smallest change that meets the acceptance criteria. Locate code with `Grep` and read only
    the line ranges you need. Add or adjust a test that fails without the change, and run it with
    `scripts/harness.sh test <test-file...>` (output in `progress/test_last.log` — grep it, don't re-run).
+   Assert behavior, not text (`harness/instructions/testing.md` "What a test asserts").
 4. **Escalate** as soon as any of these is true — don't push through:
    - the change needs more files or lines than `.harness.json::quick_max_files` / `quick_max_diff_lines`
      allow (default 4 and 80), or a dependency change;
@@ -69,6 +70,11 @@ The user wants this change without the harness record: nothing in `harness.db`, 
 - Make the change the request asks for, reading only the line ranges you need. If it has a test that covers
   it, run just that one with `scripts/harness.sh test <test-file...>` (its shared, overwritten
   `progress/test_last.log` is the one exception to the rule above); add a test only when the user asked.
+- **Aligning tests with a change the user made by hand:** change only tests and their support files, never
+  `src/`. Run the suite with `scripts/harness.sh test` (no files), make each failing assertion follow the new
+  behavior, and when a shared fake or an assertion broke only because it matched text, fix it the way
+  `harness/instructions/testing.md` "What a test asserts" says. If a failure shows the manual change broke
+  behavior the request didn't mean to change, don't adapt that test: report it.
 - If the change touches stored data, security/auth or a contract other code or projects consume, or is more
   than a contained change, don't make it: reply `needs-harness -> <reason>`.
 - Reply with a short summary instead of a handoff line: what changed (file and a phrase each), what you ran

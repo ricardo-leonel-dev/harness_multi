@@ -47,6 +47,9 @@ or PR descriptions; use conventional commits only.
      log is incomplete).
    - For each source file among them, confirm a test file exists that actually imports/exercises *that* file
      — not just any pre-existing, unrelated test elsewhere in the repo.
+   - Does it assert behavior, not text (`harness/instructions/testing.md` "What a test asserts")? A test
+     that reads source/config text, asserts a comment or a whole query string, or a fake that routes by
+     query text is a `CHANGES_REQUESTED` reason.
    - Actually run that test yourself and confirm it passes — `scripts/harness.sh test <test-file...>`
      runs just those files (output in `progress/test_last.log`; grep it rather than re-running to read it).
      The full suite runs in your step-5 `./init.sh`; don't run it a second time separately. A log entry or

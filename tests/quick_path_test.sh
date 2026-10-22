@@ -91,6 +91,18 @@ out=$(H log-out --changes src/other.ts --verification v --closure c) || die "an 
 grep -q 'predates review fingerprints' <<<"$out" || die "legacy approval warning missing: $out"
 pass "commits keep init and the approval valid; an older approval closes with a warning"
 
+g add -A && g commit -qm legacy >/dev/null
+H add-feature --name sandboxed --title Sandboxed >/dev/null && H claim sandboxed >/dev/null || die "claim sandboxed"
+printf 'sandbox\n' >> "$P/src/other.ts"; printf 'new\n' > "$P/src/sandboxed.ts"
+chmod -R a-w "$P/.git"                                    # Codex sandbox: .git is read-only
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
+fp_ro=$(q "SELECT entry FROM session_log_entries WHERE entry LIKE '[harness] REVIEW: %' ORDER BY id DESC LIMIT 1;")
+chmod -R u+w "$P/.git"
+grep -q "fp=$(g rev-parse HEAD^{tree})" <<<"$fp_ro" && die "a read-only .git must not fingerprint the last commit instead of the files: $fp_ro"
+out=$(H log-out --changes src/other.ts src/sandboxed.ts --verification v --closure c) \
+  || die "init and approval recorded with a read-only .git must stay valid with a writable one: $out"
+pass "fingerprints are the same with a read-only .git (Codex sandbox)"
+
 printf 'pre\n' > "$P/src/pre.ts"; printf 'x\nlocal\n' > "$P/src/other.ts"   # uncommitted before the claim
 H claim tiny >/dev/null || die "claim tiny"
 printf 'a\nB\n' > "$P/src/app.ts"
