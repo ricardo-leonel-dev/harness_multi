@@ -17,7 +17,10 @@ or PR descriptions; use conventional commits only.
 
 ## Startup Protocol
 
-1. Read `AGENTS.md` for guidance.
+1. `AGENTS.md` is already in your context (Claude Code and Codex CLI both load it): don't read it again. Don't
+   read the other agents' definitions (`.claude/agents/*`, `.codex/agents/*`) either — each agent reads its own,
+   and you only need their reply lines, quoted in this file. Read `harness/instructions/*.md` only when its
+   trigger in `AGENTS.md` applies to a step you are about to take, not up front.
 2. Run `scripts/harness.sh status` to see current features and any open session — this is the SQLite-backed replacement
    for reading `feature_list.json`/`progress/current.md` directly.
 3. Run `./init.sh`. If it fails, stop and report the issue.
@@ -74,7 +77,9 @@ screen or flow, and could be resumed from the request plus the diff. Then ask on
 anything else: "<N> looks complete: <the request in one phrase>. Do it without SDD? If you say no, I keep SDD."
 Only on an explicit yes run `scripts/harness.sh drop-sdd <N> "<why it is complete>"` and treat it as an `sdd=0`
 feature (classify its size as in "Small Tasks"). On no, silence or any doubt, keep SDD. Never drop SDD on your
-own, never ask twice for the same feature, and never suggest adding SDD.
+own, never ask twice for the same feature, and never suggest adding SDD. When the user asks for SDD on a feature
+already created without it, run `scripts/harness.sh add-sdd <N> "<their words>"`; never delete and re-add a
+feature to change it.
 
 Once approved, decomposition proceeds exactly like any other feature — 1 implementer, then 1 reviewer —
 except the implementer additionally works from `specs/<name>/{requirements,design,tasks}.md`, and the
@@ -140,6 +145,27 @@ For each received task:
    so a leader mistake here surfaces as a hard failure rather than silently shipping unreviewed code — but
    never rely on that mechanical gate as the only check; treat "spawn the reviewer before log-out" as the
    actual rule, not something the tooling exists to catch after the fact.
+
+## Waiting for subagents
+
+Every step you take while a subagent works re-reads your whole context, so waiting costs tokens, not just time.
+Wait in one call until the subagent answers and act only on its reply line:
+
+<!--claude-only-->- Claude Code: a foreground `Agent` call already returns with the reply. For a background agent, end your
+<!--claude-only-->  turn and let its completion notification wake you; never loop on `sleep`, `Bash` or status checks.
+<!--codex-only-->- Codex CLI: `wait_agent` with the longest `timeout_ms` the tool accepts (it returns as soon as a message
+<!--codex-only-->  arrives, so a long timeout costs no time); when it times out, call it again the same way. Never wait
+<!--codex-only-->  with `sleep` or short timeouts.
+- Meanwhile, don't read the diff, `progress/` files, `state/` or the spec to follow its progress, and don't send
+  the user progress messages: report once, when the reply arrives. Interrupting at 2x the `BUDGET` is the only
+  reason to act before it.
+
+## Notion push failures
+
+`claim`, `mark-spec-ready`, `log-out` and `supersede` update the feature's Notion card themselves. When their
+output has a `[WARN] Notion card of feature <N> still shows its previous status` line (typically a subagent
+sandbox without network), run the command it names, `scripts/harness.sh notion-push <N>`, yourself (with
+network permission if your runtime asks for it). Don't read the Notion scripts to find another way.
 
 ## Untracked Tasks (no harness record)
 

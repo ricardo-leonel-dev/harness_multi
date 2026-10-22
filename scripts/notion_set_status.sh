@@ -5,6 +5,8 @@
 # notion_status_done); every failure here is a [WARN], never a [FAIL] — it must never
 # block claim or log-out. Requires curl; skips cleanly without it, without a token, or
 # when the feature being claimed/closed has no source_id (wasn't imported from Notion).
+# Exits 3 when the request itself failed (network or HTTP error, e.g. a sandbox without
+# network) so harness.sh can name the retry command; callers treat it as a warning.
 #
 # Requires the Notion integration to have "Update content" capability, not just read
 # (notion.so/my-integrations -> your integration -> Capabilities) — the read-only
@@ -50,14 +52,14 @@ fi
 schema=$(curl -sS -m 10 -w '\n%{http_code}' -X GET \
   "https://api.notion.com/v1/databases/$DATABASE_ID" \
   -H "Authorization: Bearer $TOKEN" \
-  -H "Notion-Version: 2022-06-28") || { warn "Notion schema lookup failed (network error) — skipping status update"; exit 0; }
+  -H "Notion-Version: 2022-06-28") || { warn "Notion schema lookup failed (network error) — skipping status update"; exit 3; }
 
 schema_status="${schema##*$'\n'}"
 schema_body="${schema%$'\n'*}"
 
 if [[ "$schema_status" != 2* ]]; then
   warn "Notion schema lookup failed (HTTP $schema_status) — skipping status update. Body: $schema_body"
-  exit 0
+  exit 3
 fi
 
 status_prop=$(jq -c '
@@ -82,14 +84,14 @@ resp=$(curl -sS -m 10 -w '\n%{http_code}' -X PATCH \
   -H "Authorization: Bearer $TOKEN" \
   -H "Notion-Version: 2022-06-28" \
   -H "Content-Type: application/json" \
-  -d "$payload") || { warn "Notion status update failed (network error) — skipping"; exit 0; }
+  -d "$payload") || { warn "Notion status update failed (network error) — skipping"; exit 3; }
 
 resp_status="${resp##*$'\n'}"
 resp_body="${resp%$'\n'*}"
 
 if [[ "$resp_status" != 2* ]]; then
   warn "Notion status update failed (HTTP $resp_status) — skipping. Body: $resp_body"
-  exit 0
+  exit 3
 fi
 
 ok "pushed Notion status \"$STATUS_VALUE\" to page $PAGE_ID"

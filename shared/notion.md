@@ -23,7 +23,9 @@ The token lives in the env var named by `notion_token_env` (default `NOTION_API_
 
 `claim` sets a Notion-sourced feature's (one with a `source_id`) `Status` to `notion_status_in_progress`
 (default `In Progress`); `log-out` sets `notion_status_done` (default `Done`); `supersede` sets
-`notion_status_superseded` (default `Done`). Never call `scripts/notion_set_status.sh` directly.
+`notion_status_superseded` (default `Done`). Never call `scripts/notion_set_status.sh` directly. When the push
+fails (no network in a subagent's sandbox, an HTTP error), the command prints a `[WARN]` naming
+`scripts/harness.sh notion-push <N>`, which pushes the feature's current status again.
 
 ## Ad-hoc task → Notion card (with confirmation)
 
@@ -40,5 +42,6 @@ scripts/harness.sh link-notion <slug> <page_id-from-the-previous-command's-outpu
 
 Pass `--sdd` to both commands or to neither: `add-feature --sdd` is what gates `claim`; the Notion flag only
 ticks the card's optional "SDD" checkbox so the board matches. `link-notion` stamps `source_id`, so push-back
-applies from the next `claim`. If the user declines the card, create the local feature anyway (`add-feature`
+applies from the next `claim`. A feature created without `--sdd` that the user later wants with a spec gets
+`scripts/harness.sh add-sdd <N> "<reason>"`; its card's "SDD" checkbox, if any, stays as it was. If the user declines the card, create the local feature anyway (`add-feature`
 alone) — this never blocks the work.

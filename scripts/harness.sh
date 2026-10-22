@@ -24,6 +24,8 @@
 #   drop-sdd <feature_number|name> <reason>   turn a pending sdd=1 feature into sdd=0 before any spec exists
 #                                              (only after the user accepted it in this conversation); the
 #                                              reason is kept as a feature note
+#   add-sdd <feature_number|name> <reason>    turn a pending sdd=0 feature into sdd=1 when the user asks for a
+#                                              spec (never delete and re-add it); the reason is kept as a note
 #   set-size <feature_number|name> <small|normal>
 #                                              change a not-yet-done feature's size (leader's classification,
 #                                              or back to normal when an escalation is approved)
@@ -37,6 +39,8 @@
 #                                              Notion push-back starts applying to it (pairs with notion-create-feature
 #                                              for the ad-hoc-task-to-Notion flow — see AGENTS.md)
 #   import-sessions <seed.json>               bulk-load historical (closed) sessions
+#   notion-push <feature_number|name>         retry the Notion status push (log-out/claim in a sandbox without
+#                                              network leave a [WARN] naming this command)
 #   notion-diff                               (stdin: JSON array of {source_id,...}) prints only entries not yet imported
 #   notion-import <file.json>                 import entries as pending features, auto-numbered, source_id stored
 #                                              (optional "sdd" checkbox property carried through if present;
@@ -422,6 +426,70 @@ RETURNING id || ' ' || feature_number || ' ' || name;")
   ok "feature ${updated#* } is now sdd=0"
 }
 
+# add-sdd <TARGET> <reason> — the user asked for a spec on a feature already
+# created without one. Only a pending sdd=0 feature; the reason stays as a
+# feature note. Never delete and re-add a feature to change this.
+cmd_add_sdd() {
+  local target="${1:-}"; shift || true
+  local reason="$*"
+  if [ -z "$target" ] || [ -z "$reason" ]; then
+    fail "usage: add-sdd <feature_number|name> <reason>"; exit 1
+  fi
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local now; now="$(now_iso)"
+  local updated
+  updated=$(db "UPDATE features SET sdd=1, size='normal', updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status='pending' AND sdd=0 AND $where
+RETURNING id || ' ' || feature_number || ' ' || name;")
+  [ -n "$updated" ] || { fail "no pending sdd=0 feature matches: $target"; exit 1; }
+  db_exec "INSERT INTO feature_notes (feature_id, entry, created_at) VALUES (${updated%% *}, '$(sql_escape "SDD added: $reason")', '$now');"
+  ok "feature ${updated#* } is now sdd=1"
+}
+
+# push_notion_status <feature_id> — best-effort push of the feature's current
+# status to its Notion card (no-op without a source_id or for a status with no
+# Notion column). A network or HTTP failure — a sandbox without network, most
+# often — names the command that retries it.
+push_notion_status() {
+  local fid="${1:-}"
+  [[ "$fid" =~ ^[0-9]+$ ]] || return 0
+  local row; row=$(db "SELECT COALESCE(source_id,'') || '|' || status || '|' || feature_number FROM features WHERE id=$fid;")
+  local source_id="${row%%|*}" rest="${row#*|}"
+  local status="${rest%%|*}" fnum="${rest#*|}"
+  [ -n "$source_id" ] || return 0
+  local value
+  case "$status" in
+    spec_ready) value=$(config '.notion_status_spec_ready' 'Spec Ready') ;;
+    in_progress) value=$(config '.notion_status_in_progress' 'In Progress') ;;
+    done) value=$(config '.notion_status_done' 'Done') ;;
+    superseded) value=$(config '.notion_status_superseded' 'Done') ;;
+    *) return 0 ;;
+  esac
+  bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$value" ||
+    warn "Notion card of feature $fnum still shows its previous status — retry with network: scripts/harness.sh notion-push $fnum"
+}
+
+# notion-push <TARGET> — retry the Notion status push for one feature.
+cmd_notion_push() {
+  local target="${1:?usage: notion-push <feature_number|name>}"
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local fid; fid=$(db "SELECT id FROM features WHERE project_id='$(sql_escape "$(project_id)")' AND deleted_at IS NULL AND $where;")
+  [ -n "$fid" ] || { fail "no feature matches: $target"; exit 1; }
+  push_notion_status "$fid"
+}
+
 # set-request <TARGET> <text> — the user's request verbatim, for a feature
 # created without --request (seed, older install) or whose request changed
 # before work started. The spec_author quotes it in requirements.md.
@@ -741,10 +809,7 @@ COMMIT;
 SQL
   ok "spec ready for review: $spec_dir (feature $fnum $name, R=$req_count, T=$task_count$revised_note)"
 
-  local source_id; source_id=$(db "SELECT source_id FROM features WHERE id=$fid;")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_spec_ready' 'Spec Ready')"
-  fi
+  push_notion_status "$fid"
 }
 
 cmd_approve_spec() {
@@ -993,10 +1058,7 @@ VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")
   ok "claimed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
   ok "work folder: $(feature_dir "$(jq -r '.[0].name' <<<"$updated")")/ (handoffs and logs; deleted at log-out)"
 
-  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$updated")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_in_progress' 'In Progress')"
-  fi
+  push_notion_status "$(jq -r '.[0].id' <<<"$updated")"
 }
 
 # The project's active session. A paused session (its feature is blocked) is
@@ -1081,10 +1143,7 @@ SQL
   ok "resumed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$row") (new session $new_sid; ${resumed#RESUMED: })"
   warn "any review verdict stayed on the old session — record-review must run again on session $new_sid before log-out"
 
-  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$row")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_in_progress' 'In Progress')"
-  fi
+  push_notion_status "$fid"
 }
 
 cmd_append_log() {
@@ -1638,10 +1697,7 @@ SQL
   ok "session $sid logged out"
   clean_feature_dir "$(db "SELECT name FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")"
 
-  local source_id; source_id=$(db "SELECT source_id FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_done' 'Done')"
-  fi
+  push_notion_status "$(db "SELECT feature_id FROM session_log WHERE id=$sid;")"
 }
 
 cmd_block() {
@@ -1880,10 +1936,7 @@ VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
 
   ok "reopened: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 
-  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$updated")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_in_progress' 'In Progress')"
-  fi
+  push_notion_status "$(jq -r '.[0].id' <<<"$updated")"
 }
 
 cmd_supersede() {
@@ -1974,10 +2027,7 @@ WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.status 
     warn "these features depend on $fname and can't be claimed until their depends_on is fixed (e.g. point them at $(jq -r '.[0].name' <<<"$by_row") with 'set-depends-on'): $(tr '\n' ',' <<<"$dependents" | sed 's/,$//; s/,/, /g')"
   fi
 
-  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$row")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_superseded' 'Done')"
-  fi
+  push_notion_status "$(jq -r '.[0].id' <<<"$row")"
 }
 
 cmd_unsupersede() {
@@ -2452,6 +2502,8 @@ main() {
     unhold) cmd_unhold "$@" ;;
     set-size) cmd_set_size "$@" ;;
     drop-sdd) cmd_drop_sdd "$@" ;;
+    add-sdd) cmd_add_sdd "$@" ;;
+    notion-push) cmd_notion_push "$@" ;;
     set-request) cmd_set_request "$@" ;;
     learn) cmd_learn "$@" ;;
     recall) cmd_recall "$@" ;;
