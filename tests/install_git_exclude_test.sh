@@ -28,7 +28,7 @@ git -C "$REPO" check-ignore -q "$B/mock-data/manifests/initial.json"
 
 # Only project-owned files may show up for commit; harness-owned ones never do.
 untracked > "$WORK/visible"
-for f in .gitignore .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md \
+for f in .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md \
          docs/verification.md specs/README.md; do
   grep -qxF "service-a/$f" "$WORK/visible"
   grep -qxF "svc [b]/$f" "$WORK/visible"

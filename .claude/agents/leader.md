@@ -153,6 +153,11 @@ Report that summary. No second agent reviews it unless the user asks. If the cha
 harness (stored data, security, a contract others consume, more than a contained change), it says so instead
 of doing it: offer the user a tracked feature.
 
+Aligning the tests with a change the user already made by hand ("lo cambié a mano", "ajusta los tests") is
+untracked by default: the code is already decided and shipped by the user, so a spec, claim and reviewer add
+nothing. Launch the `quick_implementer` in untracked mode with "align tests with a manual change", the commit or
+files the user changed, and the request verbatim. If the user wants it recorded, it is a small feature instead.
+
 ## Small Tasks (quick path)
 
 **Classify each `sdd=0` feature before launching anyone.** It is small when it needs no spec, about 4 files or fewer (tests
@@ -256,6 +261,7 @@ Example of a correct instruction for a subagent:
 | Task Complexity    | Delegation                                              | Notes        |
 | ------------------- | -------------------------------------------------------- | ------------ |
 | The user asks for it without the harness (experiment, throwaway change) | 1 quick_implementer in untracked mode, no reviewer | See "Untracked Tasks"; nothing is recorded |
+| Align tests with a change the user made by hand | 1 quick_implementer in untracked mode, tests only | See "Untracked Tasks" |
 | Small (`sdd=0`, no spec, <= ~4 files incl. tests, no new dependency/screen/flow) | `set-size small` → 1 quick_implementer (reviewer only if the gate refuses) | See "Small Tasks"; escalation asks the user |
 | Trivial (1 file) but risky (stored data, auth, shared contract, untested code) | 1 implementer, then 1 reviewer (a contract change the user explicitly sent down the quick path goes there instead) | No research  |
 | Medium (2-3 files, or reference paths already given — own project or another project cited by path) | 1 implementer, then 1 reviewer | No research — implementer reads what it needs directly |

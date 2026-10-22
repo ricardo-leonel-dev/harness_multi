@@ -1302,7 +1302,7 @@ dirty_listing() {
   { git diff --name-only --relative "$1" -- . 2>/dev/null; git ls-files --others --exclude-standard -- . 2>/dev/null; } \
     | while IFS= read -r file; do
         case "$file" in ""|progress/*|"$SNAPSHOT_PATH"/*) continue ;; esac
-        if [ -f "$file" ]; then printf '%s %s\n' "$(git hash-object $write -- "$file")" "$file"; else printf 'deleted %s\n' "$file"; fi
+        if [ -f "$file" ]; then printf '%s %s\n' "$(git hash-object $write -- "$file" 2>/dev/null || git hash-object -- "$file")" "$file"; else printf 'deleted %s\n' "$file"; fi
       done
 }
 
@@ -1408,17 +1408,23 @@ is_dependency_file() {
 # excluded: the harness itself rewrites them), so log-out can tell whether the
 # last ./init.sh and the reviewer's approval saw the code it closes. It hashes
 # contents only, so committing them, or a commit elsewhere in the repository,
-# doesn't change it. Built in a throwaway copy of the index; the real index is
-# untouched.
+# doesn't change it. Built in a throwaway copy of the index and a throwaway
+# object directory (the real objects are only read, as alternates), so it gives
+# the same answer where .git is read-only, as in the Codex sandbox.
 tree_fingerprint() {
   git rev-parse --git-dir >/dev/null 2>&1 || return 1
-  local idx prefix tree
-  idx=$(mktemp) || return 1
-  cp "$(git rev-parse --git-path index)" "$idx" 2>/dev/null || rm -f "$idx"
+  local tmp objects prefix tree
+  tmp=$(mktemp -d) && mkdir "$tmp/objects" || return 1
+  objects=$(cd "$(git rev-parse --git-path objects)" && pwd -P) || { rm -rf "$tmp"; return 1; }
+  cp "$(git rev-parse --git-path index)" "$tmp/index" 2>/dev/null
   prefix=$(git rev-parse --show-prefix 2>/dev/null)
-  GIT_INDEX_FILE="$idx" git add -A -- . ":(exclude)progress" ":(exclude)$SNAPSHOT_PATH" ":(exclude)$DB_PATH*" >/dev/null 2>&1
-  tree=$(GIT_INDEX_FILE="$idx" git write-tree ${prefix:+--prefix="$prefix"} 2>/dev/null)
-  rm -f "$idx"
+  # add exits 1 when an exclude names an ignored path (harness.db, progress/)
+  # though it staged everything else, so its status is not checked.
+  GIT_INDEX_FILE="$tmp/index" GIT_OBJECT_DIRECTORY="$tmp/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects" \
+    git add -A -- . ":(exclude)progress" ":(exclude)$SNAPSHOT_PATH" ":(exclude)$DB_PATH*" >/dev/null 2>&1
+  tree=$(GIT_INDEX_FILE="$tmp/index" GIT_OBJECT_DIRECTORY="$tmp/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects" \
+    git write-tree ${prefix:+--prefix="$prefix"} 2>/dev/null)
+  rm -rf "$tmp"
   [ -n "$tree" ] || return 1
   printf '%s\n' "$tree"
 }

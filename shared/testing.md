@@ -26,6 +26,19 @@ may reuse its own earlier passing behavioral evidence only after checking that c
 verification config and environment are unchanged; rerun what the revision affects. Required `./init.sh` runs and
 stricter project checkpoints stay mandatory.
 
+## What a test asserts
+
+A test checks what the code does for its callers, so a correct change made by hand (renaming a value, pointing
+config at another index, rewording a comment) only breaks the tests whose rule it really changes.
+
+- Assert results: return values, the response payload, and what was sent to a dependency, read as data.
+- Never read source or config files (`env.*.yml`, `src/...`) to assert their text, and never assert comments or
+  formatting. Take expected values from the constant or env var the code reads instead of repeating literals.
+- For a query or request built as text, assert only the parts this feature's rule is about (`sale` is 0, the
+  campaign filter), one targeted match each, never the whole string.
+- A fake answers by which call it is (an argument, a label, the call order), not by searching the query text for
+  a value a business change may rename: otherwise one renamed value breaks every test that shares the fake.
+
 ## Test runs
 
 - **Targeted:** `scripts/harness.sh test <file...>` runs only those files via

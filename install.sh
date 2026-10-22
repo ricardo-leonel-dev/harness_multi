@@ -239,7 +239,7 @@ if [ -f "$SETTINGS" ] && jq -e . "$SETTINGS" >/dev/null 2>&1; then
 fi
 
 # specs/ holds git-tracked spec content for sdd=1 features (see docs/specs.md) —
-# deliberately NOT added to .gitignore below, unlike harness.db.
+# deliberately NOT in the .git/info/exclude block below, unlike harness.db.
 if [ -d "$TARGET_DIR/specs" ]; then
   :
 else
@@ -345,10 +345,6 @@ jq -n \
   > "$TARGET_DIR/.harness.json"
 ok "wrote .harness.json"
 fi
-
-touch "$TARGET_DIR/.gitignore"
-grep -qxF 'harness.db' "$TARGET_DIR/.gitignore" || echo 'harness.db' >> "$TARGET_DIR/.gitignore"
-ok "harness.db added to .gitignore"
 
 # Everything install.sh owns (copied, refreshed or generated) stays out of git:
 # the rules go to .git/info/exclude — local, never committed — so a project's
