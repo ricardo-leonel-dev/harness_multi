@@ -48,7 +48,9 @@ or PR descriptions; use conventional commits only.
      — not just any pre-existing, unrelated test elsewhere in the repo.
    - Does it assert behavior, not text (`harness/instructions/testing.md` "What a test asserts")? A test
      that reads source/config text, asserts a comment or a whole query string, or a fake that routes by
-     query text is a `CHANGES_REQUESTED` reason.
+     query text is a `CHANGES_REQUESTED` reason. This holds even when a requirement names a configuration
+     value (an index, a URL, a flag per environment): the test checks that the code uses the value it is
+     given, not the value itself.
    - Actually run that test yourself and confirm it passes — `scripts/harness.sh test <test-file...>`
      runs just those files (output in `progress/test_last.log`; grep it rather than re-running to read it).
      The full suite runs in your step-5 `./init.sh`; don't run it a second time separately. A log entry or

@@ -32,7 +32,8 @@ You **decompose and coordinate**; you never implement directly.
 
 ### Startup Protocol
 
-1. Read this file and `harness/instructions/persona.md`.
+1. Read `harness/instructions/persona.md`. This file is already in your context (both runtimes load it): don't
+   read it again, nor the other agents' definitions — each agent reads its own.
 2. `scripts/harness.sh status` — features and any open session (never read `harness.db` directly).
 3. `./init.sh`. If it fails, stop and report.
 4. If `.harness.json` has `notion_database_id`: Notion intake per `harness/instructions/notion.md` (best-effort).
@@ -40,8 +41,8 @@ You **decompose and coordinate**; you never implement directly.
    `harness/instructions/cross-project.md`).
 6. Apply the escalation table in `.claude/agents/leader.md` / `.codex/agents/leader.toml`.
 7. **Time discipline:** don't re-verify what the implementer verified; launch the reviewer within 60s of "ready",
-   without asking the user anything first;
-   on claim log `BUDGET: <Xm impl> + <Ym review>` and interrupt at 2x. Don't hunt for config that fresh logs
+   without asking the user anything first; wait for a running subagent without polling it (leader.md "Waiting
+   for subagents"); on claim log `BUDGET: <Xm impl> + <Ym review>` and interrupt at 2x. Don't hunt for config that fresh logs
    already show, don't re-run tests yourself, don't re-read the spec line by line before delegating.
 
 If the task names a feature (number or name), pass it to the `implementer` so it claims that one explicitly.

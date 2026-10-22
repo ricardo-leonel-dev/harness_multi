@@ -11,7 +11,8 @@
 #      supersede delete it, and the quick gate also finds a handoff named by
 #      feature number or in the older flat progress/quick_<x>.md form.
 #   4. log-out's DIFF says tests=n/a when the project keeps tests/ out of git.
-#   5. link-worktree shares the harness with a git worktree but keeps
+#   5. A Notion push that fails on the network names notion-push, which retries it.
+#   6. link-worktree shares the harness with a git worktree but keeps
 #      progress/ local, replacing an existing progress/ symlink.
 #
 # Usage: bash tests/feature_flow_test.sh   (exits non-zero on the first failure)
@@ -75,6 +76,12 @@ H drop-sdd clear_one "one field, nothing to decide" >/dev/null || die "drop-sdd 
 [ "$(q "SELECT sdd FROM features WHERE name='clear_one';")" = 0 ] || die "drop-sdd must set sdd=0"
 [ "$(q "SELECT entry FROM feature_notes n JOIN features f ON f.id=n.feature_id WHERE f.name='clear_one';")" = "SDD dropped: one field, nothing to decide" ] || die "drop-sdd must keep the reason"
 pass "drop-sdd turns a pending feature without a spec into sdd=0 and keeps the reason"
+H add-sdd clear_one "el usuario pidió spec" >/dev/null || die "add-sdd clear_one"
+[ "$(q "SELECT sdd || size FROM features WHERE name='clear_one';")" = 1normal ] || die "add-sdd must set sdd=1 and size normal"
+[ "$(q "SELECT count(*) FROM feature_notes n JOIN features f ON f.id=n.feature_id WHERE f.name='clear_one' AND entry='SDD added: el usuario pidió spec';")" = 1 ] || die "add-sdd must keep the reason"
+out=$(H add-sdd clear_one "again") && die "add-sdd must refuse a feature that is already sdd=1"
+[ "$(q "SELECT count(*) FROM features WHERE name='clear_one';")" = 1 ] || die "add-sdd must not re-create the feature"
+pass "add-sdd turns a pending sdd=0 feature into sdd=1 in place and keeps the reason"
 
 echo "3. work folder"
 g init -q && mkdir -p "$P/tests"
@@ -117,7 +124,23 @@ out=$(H log-out --changes src/app.ts tests/app.test.ts --verification v --closur
 grep -q 'tests=n/a (tests/ is ignored by git)' <<<"$out" || die "DIFF should say tests are not visible: $out"
 pass "DIFF reports tests=n/a when tests/ is ignored by git"
 
-echo "5. link-worktree"
+echo "5. Notion push failure"
+mkdir -p "$WORK/bin" && printf '#!/bin/sh\necho "curl: (6) Could not resolve host" >&2\nexit 6\n' > "$WORK/bin/curl" && chmod +x "$WORK/bin/curl"
+jq '. + {notion_database_id:"db1", notion_token_env:"T_NOTION"}' "$P/.harness.json" > "$WORK/hj" && cp "$WORK/hj" "$P/.harness.json"
+H add-feature --name carded --title Carded >/dev/null && H link-notion carded page1 >/dev/null || die "link-notion"
+num=$(q "SELECT feature_number FROM features WHERE name='carded';")
+out=$(PATH="$WORK/bin:$PATH" T_NOTION=x H claim carded) || die "claim must not fail when Notion is unreachable: $out"
+grep -q "still shows its previous status — retry with network: scripts/harness.sh notion-push $num" <<<"$out" || die "claim should name the retry command: $out"
+out=$(PATH="$WORK/bin:$PATH" T_NOTION=x H notion-push carded) || die "notion-push must not fail: $out"
+grep -q "notion-push $num" <<<"$out" || die "notion-push should warn again while offline: $out"
+out=$(T_NOTION= H notion-push carded) || die "notion-push without a token: $out"
+grep -q "retry with network" <<<"$out" && die "a missing token is not a network failure: $out"
+sid=$(q "SELECT max(id) FROM session_log;")
+H cancel-session --force "$sid" "test cleanup" >/dev/null || die "cancel-session"
+jq 'del(.notion_database_id, .notion_token_env)' "$P/.harness.json" > "$WORK/hj" && cp "$WORK/hj" "$P/.harness.json"
+pass "an unreachable Notion leaves a warning that names notion-push, and notion-push retries it"
+
+echo "6. link-worktree"
 g add -A && g commit -qm wt >/dev/null
 g worktree add -q "$WORK/wt" 2>/dev/null || die "git worktree add"
 W="$WORK/wt/app"
