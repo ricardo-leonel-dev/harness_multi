@@ -1506,6 +1506,16 @@ tree_fingerprint() {
   # though it staged everything else, so its status is not checked.
   GIT_INDEX_FILE="$tmp/index" GIT_OBJECT_DIRECTORY="$tmp/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects" \
     git add -A -- . ":(exclude)progress" ":(exclude)$SNAPSHOT_PATH" ":(exclude)$DB_PATH*" >/dev/null 2>&1
+  # Some projects keep their tests out of git on purpose (.git/info/exclude),
+  # yet they are part of what init and the reviewer checked: force them into
+  # this throwaway index only, so a test changed after the approval is caught.
+  local d
+  for d in tests test spec __tests__; do
+    if [ -d "$d" ] && git check-ignore -q -- "$d/" 2>/dev/null; then
+      GIT_INDEX_FILE="$tmp/index" GIT_OBJECT_DIRECTORY="$tmp/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects" \
+        git add -f -A -- "$d" >/dev/null 2>&1
+    fi
+  done
   tree=$(GIT_INDEX_FILE="$tmp/index" GIT_OBJECT_DIRECTORY="$tmp/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects" \
     git write-tree ${prefix:+--prefix="$prefix"} 2>/dev/null)
   rm -rf "$tmp"

@@ -9,6 +9,7 @@
 #      applies to normal features and never bypasses requested changes. A
 #      normal close needs the approval and ./init.sh green on the exact tree it
 #      closes (contents, so a commit doesn't invalidate either).
+#      Tests kept out of git (.git/info/exclude) count toward that tree too.
 #   3. hold keeps the slot: claim and log-out refuse until unhold.
 #   4. learn caps notes at 300 characters; recall returns at most 5 ranked
 #      matches; forget hides a note.
@@ -102,6 +103,19 @@ grep -q "fp=$(g rev-parse HEAD^{tree})" <<<"$fp_ro" && die "a read-only .git mus
 out=$(H log-out --changes src/other.ts src/sandboxed.ts --verification v --closure c) \
   || die "init and approval recorded with a read-only .git must stay valid with a writable one: $out"
 pass "fingerprints are the same with a read-only .git (Codex sandbox)"
+
+mkdir -p "$P/tests" && printf 'one\n' > "$P/tests/app.test.ts" && printf '/tests/\n' >> "$P/.git/info/exclude"
+H add-feature --name hidden_tests --title Hidden >/dev/null && H claim hidden_tests >/dev/null || die "claim hidden_tests"
+printf 'hidden\n' >> "$P/src/other.ts"
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
+printf 'two\n' > "$P/tests/app.test.ts"
+out=$(H log-out --changes src/other.ts --verification v --closure c) && die "a git-ignored test changed after the approval must not close"
+grep -q 'files changed after the reviewer approved them' <<<"$out" || die "stale-review reason for an ignored test: $out"
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
+H log-out --changes src/other.ts --verification v --closure c >/dev/null || die "re-approved hidden_tests should close"
+[ -z "$(g status --porcelain -- tests)" ] || die "the fingerprint must not make ignored tests visible to git"
+g add -A && g commit -qm hidden >/dev/null
+pass "a git-ignored test changed after the approval invalidates it, and stays out of git"
 
 printf 'pre\n' > "$P/src/pre.ts"; printf 'x\nlocal\n' > "$P/src/other.ts"   # uncommitted before the claim
 H claim tiny >/dev/null || die "claim tiny"
