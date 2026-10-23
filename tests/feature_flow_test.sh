@@ -12,7 +12,8 @@
 #      feature number or in the older flat progress/quick_<x>.md form.
 #   4. log-out's DIFF says tests=n/a when the project keeps tests/ out of git.
 #   5. A Notion push that fails on the network names notion-push, which retries it.
-#   6. link-worktree shares the harness with a git worktree but keeps
+#   6. tick-tasks ticks several tasks.md checkboxes at once and logs them.
+#   7. link-worktree shares the harness with a git worktree but keeps
 #      progress/ local, replacing an existing progress/ symlink.
 #
 # Usage: bash tests/feature_flow_test.sh   (exits non-zero on the first failure)
@@ -140,7 +141,23 @@ H cancel-session --force "$sid" "test cleanup" >/dev/null || die "cancel-session
 jq 'del(.notion_database_id, .notion_token_env)' "$P/.harness.json" > "$WORK/hj" && cp "$WORK/hj" "$P/.harness.json"
 pass "an unreachable Notion leaves a warning that names notion-push, and notion-push retries it"
 
-echo "6. link-worktree"
+echo "6. tick-tasks"
+# carded is still in_progress after section 5, so claim resumes it with a new session.
+out=$(H claim carded) || die "resume carded: $out"
+mkdir -p "$P/specs/carded"
+printf '# Tasks\n\n- [ ] T1 first\n- [ ] T2 second\n- [ ] T10 tenth\n- [x] T11 done\n' > "$P/specs/carded/tasks.md"
+cp "$P/specs/carded/tasks.md" "$WORK/tasks.before"
+out=$(H tick-tasks T1 T9) && die "an unknown task id must be refused: $out"
+cmp -s "$WORK/tasks.before" "$P/specs/carded/tasks.md" || die "a refused tick must leave tasks.md unchanged"
+out=$(H tick-tasks T1 T10 T11) || die "tick-tasks: $out"
+[ "$(grep -c '^- \[x\]' "$P/specs/carded/tasks.md")" = 3 ] && grep -qxF -- '- [ ] T2 second' "$P/specs/carded/tasks.md" \
+  || die "only T1 and T10 should be newly ticked: $(cat "$P/specs/carded/tasks.md")"
+sid=$(q "SELECT max(id) FROM session_log;")
+[ "$(q "SELECT count(*) FROM session_log_entries WHERE session_id=$sid AND entry='[harness] TICKED: T1 T10 T11';")" = 1 ] || die "tick-tasks must log the ids"
+H cancel-session --force "$sid" "test cleanup" >/dev/null || die "cancel-session"
+pass "tick-tasks ticks several tasks in one call, refuses unknown ids and logs them"
+
+echo "7. link-worktree"
 g add -A && g commit -qm wt >/dev/null
 g worktree add -q "$WORK/wt" 2>/dev/null || die "git worktree add"
 W="$WORK/wt/app"

@@ -110,6 +110,8 @@
 #                                              --feature TARGET writes a feature-level note instead (no open
 #                                              session needed); snapshot lists them under the feature's Notes.
 #   set-plan <item> [item...]                 replace the current open session's plan
+#   tick-tasks T<n> [T<n>...]                 mark those tasks [x] in the open session's specs/<name>/tasks.md
+#                                              in one step (sdd=1), and log which ones
 #   set-next-step <item> [item...]            replace the current open session's next_step
 #   record-review <approved|changes-requested> [--by human:NAME] [--reviewer-model MODEL] [--notes TEXT]
 #                                              record the reviewer's verdict on the current open session
@@ -1206,6 +1208,27 @@ VALUES ($(jq -r '.[0].id' <<<"$frow"), '$(sql_escape "[$attribution] $entry")', 
 
   db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$prefixed_entry")', '$(now_iso)');"
   ok "appended log entry to session $sid (by: $attribution)"
+}
+
+# tick-tasks T<n>... — ticks several tasks.md checkboxes in one call, so an
+# implementer doesn't spend one model call (and the whole context) per Edit.
+# Every id is checked before the file is written: a typo changes nothing.
+cmd_tick_tasks() {
+  [ $# -gt 0 ] || { fail "usage: tick-tasks T<n> [T<n>...]"; exit 1; }
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || { fail "no open session — run 'claim' first"; exit 1; }
+  local name file t expr=""
+  name=$(db "SELECT f.name FROM session_log s JOIN features f ON f.id = s.feature_id WHERE s.id=$sid;")
+  file="specs/$name/tasks.md"
+  [ -f "$file" ] || { fail "no $file — tick-tasks is for sdd=1 features"; exit 1; }
+  for t in "$@"; do
+    [[ "$t" =~ ^T[0-9]+$ ]] || { fail "not a task id: $t (expected T<n>)"; exit 1; }
+    grep -qE "^- \[[ xX]\] $t( |$)" "$file" || { fail "$file has no task $t"; exit 1; }
+    expr="$expr s/^- \[ \] $t( |\$)/- [x] $t\1/;"
+  done
+  sed -E "$expr" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] TICKED: $*")', '$(now_iso)');"
+  ok "ticked $* in $file"
 }
 
 cmd_set_array_field() {
@@ -2488,6 +2511,7 @@ main() {
     record-review) cmd_record_review "$@" ;;
     append-log) cmd_append_log "$@" ;;
     set-plan) cmd_set_array_field plan "$@" ;;
+    tick-tasks) cmd_tick_tasks "$@" ;;
     set-next-step) cmd_set_array_field next_step "$@" ;;
     log-out) cmd_log_out "$@" ;;
     delete-feature) cmd_delete_feature "$@" ;;

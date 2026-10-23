@@ -14,6 +14,8 @@
 # docs/specs.md are refreshed; --profile postgres explicitly adds shared SQL tools
 # on each install. Harness-owned files and the state/ snapshot are listed in the
 # repository's .git/info/exclude so they never reach the project's history.
+# .claude/settings.local.json gets allow rules for ./init.sh and the routine
+# harness.sh subcommands (Claude Code only), merged into any existing rules.
 
 set -u
 TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -238,6 +240,33 @@ if [ -f "$SETTINGS" ] && jq -e . "$SETTINGS" >/dev/null 2>&1; then
   fi
 fi
 
+# Claude Code's auto mode classifier sometimes denies the harness's own commands
+# (record-review taken for an "external system write", init.sh for an unseen
+# script), which stalls a feature until the human runs them by hand. Allow rules
+# skip the classifier for init.sh and the routine subcommands agents run; the
+# human gate (approve-spec) and the commands that cancel, delete or supersede
+# keep going through it. They go in the project's .claude/settings.local.json
+# (never global, never committed) and are merged into what is there; Codex CLI
+# does not read this file.
+LOCAL_SETTINGS="$TARGET_DIR/.claude/settings.local.json"
+HARNESS_ALLOW='["Bash(./init.sh:*)"'
+for sub in status recall check-blockers claim claim-spec set-plan append-log tick-tasks test record-init record-review mark-spec-ready log-out; do
+  HARNESS_ALLOW="$HARNESS_ALLOW,\"Bash(scripts/harness.sh $sub:*)\""
+done
+HARNESS_ALLOW="$HARNESS_ALLOW]"
+if [ -f "$LOCAL_SETTINGS" ] && ! jq -e . "$LOCAL_SETTINGS" >/dev/null 2>&1; then
+  warn ".claude/settings.local.json is not valid JSON — not adding the harness allow rules $HARNESS_ALLOW"
+else
+  [ -f "$LOCAL_SETTINGS" ] || printf '{}\n' > "$LOCAL_SETTINGS"
+  MERGED="$(jq --argjson add "$HARNESS_ALLOW" \
+    '.permissions.allow = reduce $add[] as $r ((.permissions.allow // []); if any(.[]; . == $r) then . else . + [$r] end)' \
+    "$LOCAL_SETTINGS")"
+  if [ "$MERGED" != "$(jq . "$LOCAL_SETTINGS")" ]; then
+    printf '%s\n' "$MERGED" > "$LOCAL_SETTINGS"
+    ok "allowed ./init.sh and the routine scripts/harness.sh subcommands in .claude/settings.local.json (Claude Code only)"
+  fi
+fi
+
 # specs/ holds git-tracked spec content for sdd=1 features (see docs/specs.md) —
 # deliberately NOT in the .git/info/exclude block below, unlike harness.db.
 if [ -d "$TARGET_DIR/specs" ]; then
@@ -364,7 +393,7 @@ exclude_harness_files() {
   snapshot="$(jq -r '.snapshot_path // "state"' "$TARGET_DIR/.harness.json")"
   snapshot="${snapshot%/}"
 
-  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ docs/specs.md $snapshot/ mock-data/"
+  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ docs/specs.md $snapshot/ mock-data/ .claude/settings.local.json"
   for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do entries="$entries .claude/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do entries="$entries .codex/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/scripts/*.sh; do entries="$entries scripts/${name##*/}"; done

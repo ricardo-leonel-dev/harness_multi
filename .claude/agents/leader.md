@@ -99,6 +99,8 @@ For each received task:
 1. Identify whether it requires **one** or **multiple** features (`scripts/harness.sh status` lists them).
 2. If the task names a specific feature, pass that reference (number or name) through to the `implementer` so it can
    `scripts/harness.sh claim <target>` explicitly instead of defaulting to the lowest-numbered pending one.
+   Estimate the budget yourself and give it with numbers (`BUDGET: 25m impl + 10m review`), never the
+   `<Xm impl>` template: no file holds the values, so the implementer would go looking for them.
 3. **Default: 1 `implementer` subagent, no research subagent.** If the task or feature description already gives
    exact file paths to use as reference or context — whether inside this project or in another project explicitly
    cited by path (e.g. "use `/Users/.../other-project/src/x.js` as a pattern") — do not spawn a research subagent to

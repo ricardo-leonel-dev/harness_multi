@@ -98,6 +98,25 @@ install_into "$B"
 jq -e '.permissions.allow == ["Bash(ls)"] and (.hooks.Stop | length) == 1 and .hooks.Stop[0].hooks[0].command == "echo mine" and (.hooks | has("SubagentStop") | not)' "$B/.claude/settings.json" >/dev/null
 pass 'reinstall removes the old harness hooks and keeps everything else'
 
+# Claude Code allow rules: the routine commands only, merged into the project's own, never duplicated.
+L="$A/.claude/settings.local.json"
+jq -e '.permissions.allow | index("Bash(./init.sh:*)") and index("Bash(scripts/harness.sh record-review:*)") and index("Bash(scripts/harness.sh log-out:*)")' "$L" >/dev/null
+if jq -e '.permissions.allow[] | select(test("approve-spec|cancel-session|supersede|harness\\.sh:\\*"))' "$L" >/dev/null; then
+  echo 'allow rules cover a gated harness command' >&2; exit 1
+fi
+printf '{"model":"x","permissions":{"allow":["Bash(ls)"],"deny":["Bash(rm:*)"]}}\n' > "$L"
+install_into "$A"
+cp "$L" "$WORK/local.before"
+install_into "$A"
+cmp "$WORK/local.before" "$L"
+jq -e '.model == "x" and .permissions.deny == ["Bash(rm:*)"] and .permissions.allow[0] == "Bash(ls)" and (.permissions.allow | length) == 15' "$L" >/dev/null
+if untracked | grep -q 'settings.local.json'; then echo 'settings.local.json visible to git' >&2; exit 1; fi
+printf 'not json' > "$L"
+install_into "$A"
+grep -q 'settings.local.json is not valid JSON' "$WORK/install.log"
+[ "$(cat "$L")" = 'not json' ]
+pass 'reinstall merges the Claude Code allow rules into settings.local.json and hides it from git'
+
 N="$WORK/not a repo"; mkdir -p "$N"
 install_into "$N"
 grep -q 'not inside a git repository' "$WORK/install.log"

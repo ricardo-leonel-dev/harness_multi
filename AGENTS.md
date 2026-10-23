@@ -42,7 +42,7 @@ You **decompose and coordinate**; you never implement directly.
 6. Apply the escalation table in `.claude/agents/leader.md` / `.codex/agents/leader.toml`.
 7. **Time discipline:** don't re-verify what the implementer verified; launch the reviewer within 60s of "ready",
    without asking the user anything first; wait for a running subagent without polling it (leader.md "Waiting
-   for subagents"); on claim log `BUDGET: <Xm impl> + <Ym review>` and interrupt at 2x. Don't hunt for config that fresh logs
+   for subagents"); estimate `BUDGET: <Xm impl> + <Ym review>` yourself and pass it with numbers for the claim log; interrupt at 2x. Don't hunt for config that fresh logs
    already show, don't re-run tests yourself, don't re-read the spec line by line before delegating.
 
 If the task names a feature (number or name), pass it to the `implementer` so it claims that one explicitly.
