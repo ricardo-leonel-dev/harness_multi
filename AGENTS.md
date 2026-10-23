@@ -119,7 +119,8 @@ EARS format, scope limit (`spec_max_requirements`, default 15) and split flow: `
 
 Only after the user approves the 3 spec files **in this conversation** does the leader run
 `scripts/harness.sh approve-spec <target> --by <name>`, with `<name>` from `$HARNESS_HUMAN_USER`, else
-`.harness.json::human_user`, unless the user says "approve as <name>" in the same turn. This is the only command
+`.harness.json::human_user`, unless the user says "approve as <name>" in the same turn; with neither set, ask
+the user for their name (`approve-spec` refuses a missing name or `user`). This is the only command
 that stores a literal human name; `record-review` rejects bare names. For spec changes before approval, launch the
 `spec_author` again (`claim-spec <target>` re-opens a `spec_ready` spec). A `split-proposed ->
 progress/<name>/split.md` answer means: ask the user, create the parts (`add-feature --sdd --depends-on`), then
