@@ -35,6 +35,7 @@ or PR descriptions; use conventional commits only.
      number). Every file you write for this feature — handoff, logs, diffs, notes — goes there; `log-out`
      deletes the folder once the feature is done, so nothing that must survive belongs in it. The user's
      request verbatim, when recorded, is in `state/features/<NNN>-<name>.md` under "Request (verbatim)".
+   - If the leader's prompt gives a `BUDGET:` line, `append-log` it as given; don't look for the values elsewhere.
 3. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
    Before creating deliverables, check `git status --short --untracked-files=all` and
    `git check-ignore -v -- <planned paths>`. A check-ignore exit 1 means no matching exclusion.
@@ -54,8 +55,9 @@ or PR descriptions; use conventional commits only.
    existing verification workflow.
 4. **Implement** following `docs/conventions.md`. Stay within the scope of the feature's acceptance criteria
    (`scripts/harness.sh status` or the generated `state/features/*.md` snapshot shows them). For an
-   `sdd=1` feature, `specs/<name>/tasks.md` is your implementation checklist instead — check off
-   `[x] T<n>` in order as each task completes, and don't implement anything not covered by a task
+   `sdd=1` feature, `specs/<name>/tasks.md` is your implementation checklist instead — tick tasks as they
+   complete with `scripts/harness.sh tick-tasks T<n> [T<n>...]` (several in one call, never one `Edit` per
+   checkbox), and don't implement anything not covered by a task
    without first `append-log`ging the gap and why (the reviewer rejects undocumented scope drift, and
    any task left `[ ]` without a documented justification, per `CHECKPOINTS.md` C6).
    **UI work:** if `design.md` has a `## Visual direction` section, follow it as written — it is part of
@@ -69,6 +71,9 @@ or PR descriptions; use conventional commits only.
    range (`offset`/`limit`); never re-read a whole large file you already read this session. For JSON
    resources such as i18n catalogs, add or change keys with `jq` or an `Edit` anchored on a neighboring
    key — don't read the whole file to append to it.
+   **Fewer, fuller steps:** every step re-sends your whole context, so its cost grows as you work. Put
+   independent reads and edits (different files, or hunks that don't overlap) in one response, and fix every
+   cause of a failing run before running it again.
 5. **Write the tests** that validate the acceptance criteria. For an `sdd=1` feature, additionally
    maintain an `R<n> → test` traceability map in `progress/<name>/impl.md` (see below) — every
    requirement id in `requirements.md` must map to at least one concrete test you can point to by
@@ -107,7 +112,7 @@ or PR descriptions; use conventional commits only.
    in the handoff. Offline checks alone do not prove runtime behavior. Clean up only
    positively identified disposables created by this task; retain project data and evidence.
 8. **Do not log out, and do not spawn the reviewer yourself.** `./init.sh` warns about any task still `[ ]`
-   in `tasks.md`: tick it or justify it first. Write your handoff to `progress/<name>/impl.md`
+   in `tasks.md`: tick it (`tick-tasks`) or justify it first. Write your handoff to `progress/<name>/impl.md`
    (outcome, scope, verification — see the Anti-Telephone convention in `AGENTS.md`; for `sdd=1` features,
    include the `R<n> → test` traceability table from step 5; for `sdd=0` features, an `## Assumptions` list
    of what you decided where the request was not explicit, or "none") and end your turn reporting
