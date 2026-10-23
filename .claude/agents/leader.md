@@ -62,8 +62,8 @@ subagent) before doing anything else. This is what turns "the user said yes in c
 spec, and `claim` refuses any `sdd=1` feature whose spec isn't recorded as approved.
 
 How to get the name: read `$HARNESS_HUMAN_USER` if set; else read `.harness.json::human_user` (set by
-`install.sh` at install time); only as a last resort pass `--by "user"` literal (legacy default,
-audit-noise — the install-time prompt makes this case unreachable in normal use). If the user
+`install.sh` at install time). If neither has a name, ask the user for theirs; never pass a placeholder
+such as `user` (`approve-spec` refuses it). If the user
 explicitly says "approve as <different name>" in this turn, that overrides everything — pass that
 name literally. Do not invent or shorten the name; if the project owner is "Ricardo Aguilar", pass
 `--by "Ricardo Aguilar"` exactly.

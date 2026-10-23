@@ -60,8 +60,8 @@ subagent) before doing anything else. This is what turns "the user said yes in c
 spec, and `claim` refuses any `sdd=1` feature whose spec isn't recorded as approved.
 
 How to get the name: read `$HARNESS_HUMAN_USER` if set; else read `.harness.json::human_user` (set by
-`install.sh` at install time); only as a last resort pass `--by "user"` literal (legacy default,
-audit-noise — the install-time prompt makes this case unreachable in normal use). If the user
+`install.sh` at install time). If neither has a name, ask the user for theirs; never pass a placeholder
+such as `user` (`approve-spec` refuses it). If the user
 explicitly says "approve as <different name>" in this turn, that overrides everything — pass that
 name literally. Do not invent or shorten the name; if the project owner is "Ricardo Aguilar", pass
 `--by "Ricardo Aguilar"` exactly.
@@ -155,9 +155,9 @@ Wait in one call until the subagent answers and act only on its reply line:
 
 <!--claude-only-->- Claude Code: a foreground `Agent` call already returns with the reply. For a background agent, end your
 <!--claude-only-->  turn and let its completion notification wake you; never loop on `sleep`, `Bash` or status checks.
-<!--codex-only-->- Codex CLI: `wait_agent` with the longest `timeout_ms` the tool accepts (it returns as soon as a message
-<!--codex-only-->  arrives, so a long timeout costs no time); when it times out, call it again the same way. Never wait
-<!--codex-only-->  with `sleep` or short timeouts.
+<!--codex-only-->- Codex CLI: `wait_agent` with `timeout_ms: 3600000`, the maximum (it returns as soon as a message arrives,
+<!--codex-only-->  so a long timeout costs no time; 60000 or less only adds wake-ups). If it times out, call it again the
+<!--codex-only-->  same way, with no message to the user in between. Never wait with `sleep` or short timeouts.
 - Meanwhile, don't read the diff, `progress/` files, `state/` or the spec to follow its progress, and don't send
   the user progress messages: report once, when the reply arrives. Interrupting at 2x the `BUDGET` is the only
   reason to act before it.

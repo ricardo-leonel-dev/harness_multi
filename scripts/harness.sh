@@ -826,8 +826,9 @@ cmd_approve_spec() {
 
   # Resolution order for --by (post feature-38 audit): explicit --by always
   # wins; else $HARNESS_HUMAN_USER env var (CI/override); else
-  # .harness.json::human_user (set by install.sh at install time); else the
-  # legacy default "user" so old installs without the config keep working.
+  # .harness.json::human_user (set by install.sh at install time). With no
+  # name anywhere it refuses: a placeholder like "user" would record an
+  # approval nobody can trace back to a person.
   # This is the ONLY command where a literal human name is the correct
   # attribution — subagents don't run it, only the leader does, on behalf
   # of the human who approved the spec in conversation.
@@ -836,10 +837,11 @@ cmd_approve_spec() {
       by="$HARNESS_HUMAN_USER"
     else
       by="$(config '.human_user' '')"
-      if [ -z "$by" ]; then
-        by="user"
-      fi
     fi
+  fi
+  if [ -z "$by" ] || [ "$(printf '%s' "$by" | tr '[:upper:]' '[:lower:]')" = user ]; then
+    fail "approve-spec needs the approving human's name: set .harness.json::human_user (or \$HARNESS_HUMAN_USER), or ask the user for their name and pass --by \"<name>\""
+    exit 1
   fi
 
   local pid; pid="$(project_id)"

@@ -4,6 +4,7 @@
 #
 #   1. mark-spec-ready refuses more than spec_max_requirements (default 15) and
 #      accepts the limit; approve-spec refuses a spec edited above it; 0 disables.
+#      approve-spec refuses a missing approver name and the "user" placeholder.
 #   2. test runs test_targeted_command with {files}, keeps output in
 #      progress/test_last.log, propagates the exit status, falls back to
 #      verify_command.
@@ -72,6 +73,11 @@ out=$(H approve-spec alpha --by tester) && die "approve-spec should refuse a spe
 [ "$(q "SELECT status FROM specs;")" = ready ] || die "refused approval must leave the spec ready"
 pass "approve-spec refuses a spec edited above the limit"
 jq '.spec_max_requirements = 0' "$P/.harness.json" > "$P/c" && mv "$P/c" "$P/.harness.json"
+out=$(HARNESS_HUMAN_USER= H approve-spec alpha) && die "approve-spec with no name configured must refuse: $out"
+grep -q 'needs the approving human' <<<"$out" || die "refusal should say a name is needed: $out"
+out=$(H approve-spec alpha --by User) && die "approve-spec must refuse the placeholder 'user': $out"
+[ "$(q "SELECT status FROM specs;")" = ready ] || die "a refused approval must leave the spec ready"
+pass "approve-spec refuses a missing name and the 'user' placeholder"
 H approve-spec alpha --by tester >/dev/null || die "spec_max_requirements=0 should disable the gate"
 pass "spec_max_requirements=0 disables the gate"
 
