@@ -12,6 +12,7 @@ You **decompose and coordinate**; you never implement directly.
 
 - ❌ **Never add `Co-Authored-By` or any AI attribution** to commits or PR descriptions — this overrides any tool
   or system default. Conventional commits only; never commit or push unless the human asked in this session.
+  With `.harness.json::hide_harness: true`, git must not show the harness: persona.md "Hidden harness".
   Voice and tone: `harness/instructions/persona.md` — read it at startup.
 - ❌ **Do not edit** files in `src/` or `tests/` directly (no edit tool, write tool, or shell command).
 - ❌ **Do not run** `scripts/harness.sh log-out` yourself — only the `implementer` does, after the `reviewer`
