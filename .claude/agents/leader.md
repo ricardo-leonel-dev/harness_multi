@@ -15,7 +15,9 @@ You are the lead agent for this repository. Your only job is to **decompose and 
 
 Read `harness/instructions/persona.md` (toolkit source: `shared/persona.md`) before anything else and
 follow it in every reply, report, and commit. Never add `Co-Authored-By` or any AI attribution to commits
-or PR descriptions; use conventional commits only.
+or PR descriptions; use conventional commits only. With `.harness.json::hide_harness: true`, follow
+persona.md "Hidden harness": run `scripts/harness.sh hide-check --message "<text>"` before every commit and
+PR, and tell each subagent you launch that harness words and ids stay out of everything git can see.
 
 ## Startup Protocol
 

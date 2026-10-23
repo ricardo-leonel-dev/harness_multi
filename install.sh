@@ -26,6 +26,7 @@ warn() { printf '[WARN]  %s\n' "$1"; }
 fail() { printf '[FAIL]  %s\n' "$1" >&2; }
 
 PROJECT_SLUG=""
+HIDE_HARNESS=0
 DESCRIPTION=""
 VERIFY_COMMAND=""
 SUPABASE_URL_ENV="SUPABASE_URL"
@@ -68,6 +69,10 @@ Usage: install.sh --slug SLUG [options]
                                 --by when the leader doesn't pass an explicit name. On first install, install.sh
                                 prompts interactively if --human-user is not passed. Skipping the prompt is
                                 only possible in CI by passing --human-user "...".
+  --hide-harness               set .harness.json::hide_harness (also on an existing install): the project's git
+                                must not show the harness — its project-owned files (.harness.json, CHECKPOINTS.md,
+                                docs/{architecture,conventions,verification}.md, specs/, untracked test folders)
+                                are excluded too, and agents check commits/PRs with harness.sh hide-check.
 EOF
 }
 
@@ -87,6 +92,7 @@ while [ $# -gt 0 ]; do
     --notion-status-done) NOTION_STATUS_DONE="$2"; shift 2 ;;
     --notion-status-spec-ready) NOTION_STATUS_SPEC_READY="$2"; shift 2 ;;
     --human-user) HUMAN_USER="$2"; shift 2 ;;
+    --hide-harness) HIDE_HARNESS=1; shift ;;
     --postgres-schemas) POSTGRES_SCHEMAS="${2:-}"; POSTGRES_SCHEMAS_SET=1; shift 2 ;;
     --postgres-database) POSTGRES_DATABASE="${2:-}"; POSTGRES_DATABASE_SET=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -374,6 +380,11 @@ jq -n \
   > "$TARGET_DIR/.harness.json"
 ok "wrote .harness.json"
 fi
+if [ "$HIDE_HARNESS" -eq 1 ] && [ "$(jq -r '.hide_harness // false' "$TARGET_DIR/.harness.json")" != true ]; then
+  jq '.hide_harness = true' "$TARGET_DIR/.harness.json" > "$TARGET_DIR/.harness.json.tmp" \
+    && mv "$TARGET_DIR/.harness.json.tmp" "$TARGET_DIR/.harness.json"
+  ok "set hide_harness in .harness.json"
+fi
 
 # Everything install.sh owns (copied, refreshed or generated) stays out of git:
 # the rules go to .git/info/exclude — local, never committed — so a project's
@@ -393,10 +404,21 @@ exclude_harness_files() {
   snapshot="$(jq -r '.snapshot_path // "state"' "$TARGET_DIR/.harness.json")"
   snapshot="${snapshot%/}"
 
-  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ docs/specs.md $snapshot/ mock-data/ .claude/settings.local.json"
+  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ docs/specs.md $snapshot/ progress/ mock-data/ .claude/settings.local.json"
   for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do entries="$entries .claude/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do entries="$entries .codex/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/scripts/*.sh; do entries="$entries scripts/${name##*/}"; done
+  # hide_harness: the files the harness scaffolds for the project would give it
+  # away too, and so would test folders git tracks nothing in (tests the agents
+  # wrote). A test folder with tracked files belongs to the project: left alone.
+  if [ "$(jq -r '.hide_harness // false' "$TARGET_DIR/.harness.json")" = true ]; then
+    entries="$entries .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md docs/verification.md specs/"
+    for name in tests test spec __tests__; do
+      if [ -d "$TARGET_DIR/$name" ] && [ -z "$(cd "$TARGET_DIR" && git ls-files -- "$name" | head -1)" ]; then
+        entries="$entries $name/"
+      fi
+    done
+  fi
   # harness/ (above) already covers harness/test_helpers/; project-owned Tier 2
   # helpers live outside it (test_helpers.project_specific_dir) so git sees them.
   entries="$entries scripts/mock_data.py scripts/time_phase.py scripts/agent_usage.py scripts/assemble_migration.py scripts/build_traceability.sh scripts/templates/acceptance_test_prologue.sql"

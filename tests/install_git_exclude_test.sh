@@ -21,6 +21,7 @@ install_into "$B"
 for project in "$A" "$B"; do
   mkdir -p "$project/mock-data/manifests"
   printf '{"version":"initial"}\n' > "$project/mock-data/manifests/initial.json"
+  mkdir -p "$project/progress/some_feature" && printf 'handoff\n' > "$project/progress/some_feature/impl.md"
 done
 cp "$A/mock-data/manifests/initial.json" "$WORK/dataset.before"
 git -C "$REPO" check-ignore -q "$A/mock-data/manifests/initial.json"
@@ -33,7 +34,7 @@ for f in .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md \
   grep -qxF "service-a/$f" "$WORK/visible"
   grep -qxF "svc [b]/$f" "$WORK/visible"
 done
-if grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|init\.sh|harness\.db|docs/specs\.md)$|/(harness|state|scripts|mock-data)/|/\.(claude|codex)/agents/' "$WORK/visible"; then
+if grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|init\.sh|harness\.db|docs/specs\.md)$|/(harness|state|scripts|mock-data|progress)/|/\.(claude|codex)/agents/' "$WORK/visible"; then
   echo 'harness-owned file visible to git' >&2; exit 1
 fi
 [ -d "$A/state" ]

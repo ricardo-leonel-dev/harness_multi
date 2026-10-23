@@ -57,6 +57,9 @@ or PR descriptions; use conventional commits only.
      query text is a `CHANGES_REQUESTED` reason. This holds even when a requirement names a configuration
      value (an index, a URL, a flag per environment): the test checks that the code uses the value it is
      given, not the value itself.
+   - With `.harness.json::hide_harness: true`, a harness word or id in what git can see (a test named
+     after `R3`, a comment citing the spec) is a `CHANGES_REQUESTED` reason: run
+     `scripts/harness.sh hide-check` and quote what it lists.
    - Actually run that test yourself and confirm it passes — `scripts/harness.sh test <test-file...>`
      runs just those files (output in `progress/test_last.log`; grep it rather than re-running to read it).
      The full suite runs in your step-5 `./init.sh`; don't run it a second time separately. A log entry or

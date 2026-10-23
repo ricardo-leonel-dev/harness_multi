@@ -110,6 +110,8 @@
 #                                              --feature TARGET writes a feature-level note instead (no open
 #                                              session needed); snapshot lists them under the feature's Notes.
 #   set-plan <item> [item...]                 replace the current open session's plan
+#   hide-check [--message TEXT]              with .harness.json::hide_harness, fail when git (or the commit/PR
+#                                              text) would show the harness: files, words or ids (F12, R3, T4)
 #   tick-tasks T<n> [T<n>...]                 mark those tasks [x] in the open session's specs/<name>/tasks.md
 #                                              in one step (sdd=1), and log which ones
 #   set-next-step <item> [item...]            replace the current open session's next_step
@@ -1434,6 +1436,63 @@ session_diff_base() {
   printf '%s\t%s\n' "$base" "$scope"
 }
 
+# .harness.json::hide_harness — the project's git must not show the harness to
+# anyone reading it: no harness files and no harness words or ids (F12, R3, T4)
+# in the changes, the commit message or the PR text.
+hide_harness_on() { [ "$(config '.hide_harness' 'false')" = true ]; }
+HIDE_PATHS_RE='^((AGENTS|CLAUDE|CHECKPOINTS)\.md|init\.sh|\.harness\.json|harness\.db.*|docs/(architecture|conventions|verification|specs)\.md)$|^(harness|progress|specs|state|mock-data|\.claude|\.codex)/'
+HIDE_WORDS_RE='harness|spec_author|quick_implementer|progress/|specs/|tasks\.md|checkpoints'
+HIDE_IDS_RE='(^|[^A-Za-z0-9_])[FRPT][0-9]+([^A-Za-z0-9_]|$)'
+
+# hide_text_findings — reads text on stdin, prints its lines (at most 5) that
+# carry a harness word (any case) or id. Lines over 300 characters are minified
+# or generated output, where short ids match by chance: skipped.
+hide_text_findings() {
+  awk -v w="$HIDE_WORDS_RE" -v i="$HIDE_IDS_RE" 'length($0) <= 300 && (tolower($0) ~ w || $0 ~ i)' | head -5
+}
+
+# hide_findings [path...] — one line per harness trace git can see under the
+# paths (default .): a harness file among the changes, or a harness word or id
+# in a line the changes add (tracked files) or in the whole file (untracked).
+hide_findings() {
+  [ $# -gt 0 ] || set -- .
+  local f line
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if grep -qE "$HIDE_PATHS_RE" <<<"$f"; then echo "harness file visible to git: $f"; continue; fi
+    [ -f "$f" ] && grep -Iq . -- "$f" 2>/dev/null || continue  # gone, empty or binary
+    while IFS= read -r line; do
+      echo "$f: $(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
+    done < <(if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+               git diff -U0 HEAD -- "$f" 2>/dev/null | sed -n 's/^+\([^+]\)/\1/p; s/^+$//p'
+             else cat -- "$f"; fi | hide_text_findings)
+  done < <({ git diff --name-only --relative HEAD -- "$@"; git ls-files --others --exclude-standard -- "$@"; } 2>/dev/null | sort -u)
+}
+
+# hide-check [--message TEXT] — with hide_harness on, refuses (exit 1) when git
+# would show the harness: run it before every commit and PR, passing their text.
+cmd_hide_check() {
+  local message=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --message) message="${2-}"; shift 2 ;;
+      *) fail "usage: hide-check [--message <commit or PR text>]"; exit 1 ;;
+    esac
+  done
+  hide_harness_on || { ok "hide_harness is off in .harness.json — nothing to check"; return 0; }
+  git rev-parse --git-dir >/dev/null 2>&1 || { warn "not inside a git repository — nothing to check"; return 0; }
+  local found msg_found=""
+  found=$(hide_findings .)
+  [ -z "$message" ] || msg_found=$(printf '%s\n' "$message" | hide_text_findings | sed 's/^/message: /')
+  found=$(printf '%s\n%s' "$found" "$msg_found" | sed '/^$/d')
+  if [ -n "$found" ]; then
+    fail "hide_harness: git (or the message) would show the harness — reword or move these, then run hide-check again:"
+    printf '%s\n' "$found" | sed 's/^/          /' >&2
+    exit 1
+  fi
+  ok "hide_harness: no harness trace in what git can see${message:+ or in the message}"
+}
+
 # record_diff_size <session_id> <path...> — advisory review budget: counts
 # the lines this session changed (session_file_lines) in the paths log-out was
 # given, split into production code and tests,
@@ -1712,6 +1771,13 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[
   # trips `set -u` on bash 3.2.
   local changes_json; changes_json=$(json_array "${changes[@]+"${changes[@]}"}")
   record_diff_size "$sid" "${changes[@]+"${changes[@]}"}"
+  if hide_harness_on && [ ${#changes[@]} -gt 0 ] && git rev-parse --git-dir >/dev/null 2>&1; then
+    local hidden; hidden=$(hide_findings "${changes[@]}")
+    if [ -n "$hidden" ]; then
+      warn "hide_harness: these changes show the harness to git — reword them before any commit (scripts/harness.sh hide-check):"
+      printf '%s\n' "$hidden" | sed 's/^/          /'
+    fi
+  fi
   local now; now="$(now_iso)"
 
   sqlite3 "$DB_PATH" <<SQL
@@ -2524,6 +2590,7 @@ main() {
     append-log) cmd_append_log "$@" ;;
     set-plan) cmd_set_array_field plan "$@" ;;
     tick-tasks) cmd_tick_tasks "$@" ;;
+    hide-check) cmd_hide_check "$@" ;;
     set-next-step) cmd_set_array_field next_step "$@" ;;
     log-out) cmd_log_out "$@" ;;
     delete-feature) cmd_delete_feature "$@" ;;
