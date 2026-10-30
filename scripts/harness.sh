@@ -159,6 +159,9 @@
 #                                              excluded) and warns, never blocks, when code exceeds
 #                                              .harness.json::review_budget_lines (default 400, 0 disables).
 #                                              On success it deletes the feature's work folder progress/<name>/
+#                                              and syncs the Postgres mirror (every log-out path; best-effort,
+#                                              silent with no mirror configured, a failing one only warns), as record-review,
+#                                              approve-plan and approve-spec also do
 #   log-out --quick --changes <item...> --verification <text> --closure <text>
 #                                              small features only: close without a reviewer when the quick gate
 #                                              passes — diff <= quick_max_diff_lines (80) and <= quick_max_files (4)
@@ -606,6 +609,16 @@ push_notion_status() {
   esac
   bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$value" ||
     warn "Notion card of feature $fnum still shows its previous status — retry with network: scripts/harness.sh notion-push $fnum"
+}
+
+# sync_mirror — best-effort Postgres mirror sync after a lifecycle step the
+# dashboard shows, so it doesn't wait for the next ./init.sh. Silent when no
+# mirror is configured (no supabase_url_env/supabase_key_env); a configured
+# mirror that fails warns, never changes the command's exit code.
+sync_mirror() {
+  HARNESS_SYNC_QUIET_UNCONFIGURED=1 bash "$SCRIPT_DIR/sync_postgres.sh" ||
+    warn "mirror sync failed — the dashboard shows the previous state until 'scripts/harness.sh sync' or the next ./init.sh"
+  return 0
 }
 
 # notion-push <TARGET> — retry the Notion status push for one feature.
@@ -1073,6 +1086,7 @@ RETURNING feature_number || ' ' || name;")
     fail "not approvable: feature $target changed meanwhile — run status and try again"; exit 1
   fi
   ok "approved plan for feature $updated (mode $mode, by: $by$note)"
+  sync_mirror
 }
 
 cmd_approve_spec() {
@@ -1141,6 +1155,7 @@ RETURNING id, feature_id;" 2>&1)
     exit 1
   fi
   ok "approved spec for feature $target (by: $by${counts_note:+, $counts_note})"
+  sync_mirror
 }
 
 cmd_claim() {
@@ -1560,6 +1575,7 @@ cmd_record_review() {
     db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "REVIEW ($verdict_raw): $notes")', '$now');"
   fi
   ok "recorded review verdict '$verdict_raw' on session $sid (by: $by)"
+  sync_mirror
 }
 
 # is_review_excluded <path> — lockfiles, generated/build output and prose are
@@ -2172,6 +2188,7 @@ SQL
   clean_feature_dir "$(db "SELECT name FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")"
 
   push_notion_status "$(db "SELECT feature_id FROM session_log WHERE id=$sid;")"
+  sync_mirror
 }
 
 cmd_block() {

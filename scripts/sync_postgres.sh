@@ -13,6 +13,9 @@ URL_ENV="$(config '.supabase_url_env')"
 KEY_ENV="$(config '.supabase_key_env')"
 
 if [ -z "$URL_ENV" ] || [ -z "$KEY_ENV" ]; then
+  # Lifecycle commands (record-review, approve-plan, approve-spec, log-out) sync after each
+  # step; in a project without a mirror they stay quiet. init.sh and `sync` still warn.
+  [ -n "${HARNESS_SYNC_QUIET_UNCONFIGURED:-}" ] && exit 0
   warn "no supabase_url_env/supabase_key_env configured in $HARNESS_CONFIG — skipping mirror sync"
   exit 0
 fi

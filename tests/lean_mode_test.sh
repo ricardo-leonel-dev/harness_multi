@@ -53,6 +53,10 @@ printf 'hello\n' > "$P/src/app.txt"
 printf '  assert grep -q hello src/app.txt\n  assert test -f run_tests.sh\n' > "$P/tests/app_test.sh"
 printf 'progress/\nharness.db\nscripts/\nstate/\n.harness.json\nlean/\n' > "$P/.gitignore"
 
+# Mirror sync stub: counts calls (log-out syncs after every close).
+SYNCS="$WORK/syncs"; : > "$SYNCS"
+printf '#!/usr/bin/env bash\necho sync >> "%s"\n' "$SYNCS" > "$P/scripts/sync_postgres.sh"
+syncs() { wc -l < "$SYNCS" | tr -d ' '; }
 CACHE="$WORK/home/.cache/harness/t"
 H() { (cd "$P" && HOME="$WORK/home" HARNESS_AGENT=implementer ANTHROPIC_MODEL= HARNESS_HUMAN_USER= bash scripts/harness.sh "$@") 2>&1; }
 q() { sqlite3 "$P/harness.db" "$1"; }
@@ -166,6 +170,7 @@ pass "approve-plan refuses what it can't approve; risk freezes the acceptance te
 echo "4. log-out --lean, normal mode"
 H claim n2 >/dev/null || die "an approved normal --approval feature should claim"
 printf 'hello world\n' > "$P/src/app.txt"
+refused_from=$(syncs)   # every close refused below (plain, --quick, --lean) must not sync
 out=$(H log-out --changes src/app.txt --verification v --closure c) && die "a mode feature must refuse the reviewer path"
 grep -q "close it with 'log-out --lean'" <<<"$out" || die "plain refusal: $out"
 out=$(H log-out --quick --changes src/app.txt --verification v --closure c) && die "a mode feature must refuse --quick"
@@ -187,8 +192,11 @@ refused 'ASSERTION LINES REMOVED FROM tests/app_test.sh' "removed assertion not 
 doc n2 src/app.txt tests/app_test.sh -- tests/app_test.sh
 out=$(lean_out) && die "closing without ./init.sh in the session"
 grep -q 'lean gate passed' <<<"$out" && grep -q 'init.sh has not run' <<<"$out" || die "gate pass then init refusal expected: $out"
+[ "$(syncs)" = "$refused_from" ] || die "a refused close (plain, --quick, --lean) must not sync the mirror"
 H record-init pass >/dev/null
+before=$(syncs)
 out=$(lean_out) || die "a clean change with the removed assertion listed should close: $out"
+[ "$(syncs)" = $((before + 1)) ] || die "log-out --lean should sync the mirror once"
 [ "$(q "SELECT review_status || '|' || reviewed_by FROM session_log WHERE feature_id=(SELECT id FROM features WHERE name='n2');")" = "lean|harness (lean gate)" ] \
   || die "review_status should be lean"
 grep -q 'LEAN: passed (mode normal) — ALL CHECKS PASS' <<<"$(q "SELECT entry FROM session_log_entries;")" || die "the pass and the gate's last line must be logged"

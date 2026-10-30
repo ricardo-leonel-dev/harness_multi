@@ -50,6 +50,25 @@ temp dir, no network except localhost and `lean.allowed_domains`, no reads of pr
 projects or the frozen manifests. A plain `claude-mini` started by hand is **not** sandboxed; the gate
 still catches a changed frozen test, because the manifest lives outside the project.
 
+- **Symlinks and git worktrees.** The resolved target of each symlink at the project's top level (a
+  worktree's `harness.db`, `scripts/`, `migrations/`… pointing into the main worktree) and the project's
+  git directories (`.git` file or dir, `git rev-parse --git-dir`, `--git-common-dir`) are readable, so
+  a worktree or a project in a repository's subfolder can read its links and run `git status`/`git diff`.
+  Read only: writes stay in the project and the temp dir, and a link into a private folder, the frozen
+  manifests (`~/.cache/harness`) or another project's transcripts stays denied (`sandbox.sh` names it on
+  stderr). Only links git knows are read through: committed at `HEAD` and unchanged, or ignored or
+  excluded (`link-worktree` excludes its links). An untracked, non-ignored link, which a session could
+  have planted for the next one, stays unreadable and is named on stderr.
+- **Session environment.** `RUSTC_WRAPPER` and `CARGO_BUILD_RUSTC_WRAPPER` are empty, so cargo runs
+  `rustc` directly: `sccache` can't reach its server from the sandbox ("Operation not permitted"), and
+  builds are slower without its cache. `GIT_OPTIONAL_LOCKS=0`, so `git status`/`git diff` don't write
+  the index (in a worktree it lives outside the project). Sessions never commit.
+- **Paths in the plan** are relative to the project directory, even when it is a subfolder of its
+  repository. A path starting with the project's folder in the repository is read from the repository
+  root only when nothing is at it inside the project (rule in `lean/instructions/planning.md`). Any
+  changed or untracked, non-ignored file outside the project directory fails the gate, named by its
+  repository-root path.
+
 ## Configuration (`.harness.json::lean`, all optional)
 
 | Key | Default | Meaning |
