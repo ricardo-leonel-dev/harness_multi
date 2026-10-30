@@ -34,10 +34,20 @@ for f in .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md \
   grep -qxF "service-a/$f" "$WORK/visible"
   grep -qxF "svc [b]/$f" "$WORK/visible"
 done
-if grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|init\.sh|harness\.db|docs/specs\.md)$|/(harness|state|scripts|mock-data|progress)/|/\.(claude|codex)/agents/' "$WORK/visible"; then
+if grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|init\.sh|harness\.db|docs/specs\.md)$|/(harness|lean|state|scripts|mock-data|progress)/|/\.(claude|codex)/agents/' "$WORK/visible"; then
   echo 'harness-owned file visible to git' >&2; exit 1
 fi
 [ -d "$A/state" ]
+# lean/ lands at the project root (harness.sh finds the gate at <scripts>/../lean/gate.sh), scripts executable.
+for f in gate.sh run.sh sandbox.sh adapters/claude.sh; do [ -x "$A/lean/$f" ]; done
+[ -f "$A/lean/instructions/planning.md" ]
+git -C "$REPO" check-ignore -q "$A/lean/gate.sh"
+# Without hide_harness the lean flow's plans and acceptance tests are the project's to commit.
+mkdir -p "$A/docs/features" "$A/acceptance"
+printf 'plan\n' > "$A/docs/features/x.md"; printf 'test\n' > "$A/acceptance/x.test.js"
+untracked | grep -qxF 'service-a/docs/features/x.md'
+untracked | grep -qxF 'service-a/acceptance/x.test.js'
+rm -rf "$A/docs/features" "$A/acceptance"
 pass 'monorepo installs hide every harness-owned file and keep project-owned ones visible'
 
 grep -qxF '/local-notes.txt' "$EXCLUDE"

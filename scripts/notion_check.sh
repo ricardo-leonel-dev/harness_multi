@@ -2,11 +2,14 @@
 # notion_check.sh — best-effort, token-efficient check for new tasks in a Notion
 # database. Queries the Notion API directly via curl+jq so
 # the raw, verbose Notion JSON never enters the model's context — only the
-# filtered/trimmed {source_id, name, title, description, acceptance, sdd} array does.
-# That output is already exactly the shape scripts/harness.sh notion-diff/notion-import
-# expects. sdd reads an optional checkbox property named "SDD" (see docs/specs.md) —
-# a database without that property simply yields sdd:false for every row, same
-# graceful-degradation shape as every other optional property here.
+# filtered/trimmed {source_id, name, title, description, acceptance, sdd, mode,
+# plan_approval} array does. That output is already exactly the shape
+# scripts/harness.sh notion-diff/notion-import expects. sdd reads an optional checkbox
+# property named "SDD" (see docs/specs.md) — a database without that property simply
+# yields sdd:false for every row, same graceful-degradation shape as every other
+# optional property here. Likewise for the lean flow (lean/README.md): mode reads an
+# optional select "Mode" ("Normal"/"Risk", any case; anything else or no property ->
+# null, no lean flow) and plan_approval an optional checkbox "Plan approval".
 #
 # Every failure here is a [WARN] + `[]` on stdout, never a [FAIL]: the harness must
 # keep working with zero Notion connectivity. Requires curl; skips cleanly without it.
@@ -111,6 +114,8 @@ echo "$body" | jq -c '
     | ($p | propval("description")) as $descp
     | ($p | propval("acceptancecriteria")) as $accp
     | ($p | propval("sdd")) as $sddp
+    | ($p | propval("mode")) as $modep
+    | ($p | propval("planapproval")) as $approvalp
     | select((($status.select.name // $status.status.name // "")) == "Ready")
     | {
         source_id: .id,
@@ -122,6 +127,9 @@ echo "$body" | jq -c '
         description: (($descp.rich_text // []) | map(.plain_text) | join("")),
         acceptance: ((($accp.rich_text // []) | map(.plain_text) | join(""))
                      | split("\n") | map(select(length > 0))),
-        sdd: (($sddp.checkbox // false))
+        sdd: (($sddp.checkbox // false)),
+        mode: (($modep.select.name // "") | ascii_downcase | gsub("^\\s+|\\s+$"; "")
+               | if . == "normal" or . == "risk" then . else null end),
+        plan_approval: (($approvalp.checkbox // false) == true)
       }
   ]' 2>/dev/null || { warn "failed to parse Notion response — skipping"; echo '[]'; }

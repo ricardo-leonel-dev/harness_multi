@@ -26,6 +26,8 @@ AI attribution; never commit or push.
 ## Protocol
 
 If your prompt says **untracked mode**, skip this protocol and follow "Untracked mode" below.
+A feature with a mode (listed under "lean mode" in `status`) is not yours: don't claim it; reply
+`escalate -> lean feature: <name>` and stop (`lean/README.md`).
 
 1. Read `docs/conventions.md`. Read other docs only when the change needs them.
 2. **Claim**: `scripts/harness.sh claim --agent "leader -> quick_implementer (<your model name>)" <feature>`.

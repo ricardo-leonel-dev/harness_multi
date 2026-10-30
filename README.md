@@ -140,6 +140,14 @@ everything from the current, already-updated `db/schema.postgres.sql`.
 `db/rpc/upsert_agent_run.sql`. Until both are applied, `sync` only `[WARN]`s on
 the agent-runs step; everything else keeps syncing.
 
+**Mirror deployed before lean mode existed?** Run
+`db/migrations/0005_lean_mode.sql` once (feature `mode`/plan approval, session
+review fields), then re-apply `db/rpc/upsert_feature.sql` and
+`db/rpc/upsert_session.sql` (each drops its previous signature first). The new
+parameters are defaulted, so an older `sync_postgres.sh` keeps working; a newer
+one against a mirror without them syncs every row without the lean fields and
+`[WARN]`s once.
+
 **Mirror deployed before specs/sessions were resolved by feature local id?**
 Re-apply `db/rpc/upsert_spec.sql` and `db/rpc/upsert_session.sql` (each drops
 its previous signature first, then reloads PostgREST's schema cache). Before
