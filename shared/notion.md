@@ -12,12 +12,19 @@ The token lives in the env var named by `notion_token_env` (default `NOTION_API_
 
 1. `scripts/harness.sh notion-check` queries the database for pages whose `Project` matches this project's
    `project_slug` and whose `Status` is `Ready`, and prints them already mapped to
-   `{source_id, name, title, description, acceptance}`. It never puts Notion's raw API response into your
-   context — keep it that way.
+   `{source_id, name, title, description, acceptance, sdd, mode, plan_approval}`. It never puts Notion's raw
+   API response into your context — keep it that way. Optional properties: an "SDD" checkbox (`sdd`), a "Mode"
+   select with `Normal`/`Risk` (`mode`, any case; any other value or no property means no lean flow) and a
+   "Plan approval" checkbox (`plan_approval`, the lean `normal` mode's `--approval`).
 2. Pipe that through `scripts/harness.sh notion-diff` to drop anything already imported.
 3. If any remain, ask the user (Claude Code: `AskUserQuestion`, multi-select) which ones to add.
 4. Write the chosen ones to a temp file and run `scripts/harness.sh notion-import <file>`. This only inserts them
-   as `pending`; **never claim or work on them in the same turn**.
+   as `pending`; **never claim or work on them in the same turn**. `mode`/`plan_approval` get the same checks as
+   `add-feature --mode/--approval`, for every entry before any is inserted: on a refusal nothing is imported —
+   tell the user which card to fix (e.g. "Plan approval" ticked on a card without a `Normal` mode). Two pairings
+   import with a `[WARN]` naming the card instead: "Plan approval" ticked on a `Risk` card is imported as `risk`
+   (which always requires approval; the checkbox is ignored), and a card with both SDD and a mode is imported with
+   sdd and no mode.
 
 ## Status push-back (automatic)
 
@@ -34,14 +41,19 @@ When a task arrives directly and no `pending` feature matches it, propose a Noti
 action. This applies only to the feature being created now, never retroactively. On confirmation:
 
 ```
-scripts/harness.sh add-feature --name <slug> --title "<title>" --description "<description>" --acceptance "<item...>" [--sdd]
+scripts/harness.sh add-feature --name <slug> --title "<title>" --description "<description>" --acceptance "<item...>" \
+  [--sdd | --mode normal|risk [--approval]]
 scripts/harness.sh notion-create-feature --project-path . --title "<title>" \
-  --description "<description>" --acceptance "<acceptance>" --status Ready [--sdd]
+  --description "<description>" --acceptance "<acceptance>" --status Ready [--sdd | --mode normal|risk [--approval]]
 scripts/harness.sh link-notion <slug> <page_id-from-the-previous-command's-output>
 ```
 
 Pass `--sdd` to both commands or to neither: `add-feature --sdd` is what gates `claim`; the Notion flag only
-ticks the card's optional "SDD" checkbox so the board matches. `link-notion` stamps `source_id`, so push-back
+ticks the card's optional "SDD" checkbox so the board matches. The same goes for `--mode` (and `--approval`):
+pass them to both commands or to neither; `add-feature` is what gates `claim` and the close, the Notion flags
+only set the card's optional "Mode" select and "Plan approval" checkbox, and are skipped when the database
+lacks them. `--approval` belongs with `normal` only: with `risk` both commands warn that risk always requires approval
+and ignore it (`add-feature` stores plain `risk`; `notion-create-feature` leaves the checkbox unticked). `link-notion` stamps `source_id`, so push-back
 applies from the next `claim`. A feature created without `--sdd` that the user later wants with a spec gets
 `scripts/harness.sh add-sdd <N> "<reason>"`; its card's "SDD" checkbox, if any, stays as it was. If the user declines the card, create the local feature anyway (`add-feature`
 alone) — this never blocks the work.

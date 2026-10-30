@@ -14,7 +14,7 @@ mkdir -p "$SNAPSHOT_PATH/features" "$SNAPSHOT_PATH/sessions"
 pid=$(db "SELECT id FROM projects WHERE slug='$(sql_escape "$PROJECT_SLUG")' AND deleted_at IS NULL LIMIT 1;")
 
 sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, request, acceptance, status,
-  superseded_by, created_at, updated_at FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL
+  superseded_by, mode, plan_approval, plan_approved_by, plan_approved_at, created_at, updated_at FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL
   ORDER BY feature_number;" | jq -c '.[]' | while IFS= read -r row; do
   number=$(jq -r '.feature_number' <<<"$row")
   name=$(jq -r '.name' <<<"$row")
@@ -36,6 +36,15 @@ sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, r
     echo "title: $title"
     echo "status: $status"
     [ -n "$superseded_by" ] && echo "superseded_by: $superseded_by"
+    mode=$(jq -r '.mode // ""' <<<"$row")
+    if [ -n "$mode" ]; then
+      echo "mode: $mode"
+      if [ -n "$(jq -r '.plan_approved_at // ""' <<<"$row")" ]; then
+        echo "plan: approved by $(jq -r '.plan_approved_by' <<<"$row") at $(jq -r '.plan_approved_at' <<<"$row")"
+      elif [ "$mode" = risk ] || [ "$(jq -r '.plan_approval' <<<"$row")" = 1 ]; then
+        echo "plan: approval pending"
+      fi
+    fi
     echo "created_at: $created"
     echo "updated_at: $updated"
     echo "---"

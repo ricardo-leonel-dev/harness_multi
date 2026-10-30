@@ -31,6 +31,10 @@ create table features (
   description text,
   acceptance text[] not null default '{}',
   sdd boolean not null default false,   -- opt-in: does this feature require an approved spec first?
+  mode text check (mode in ('normal', 'risk')),   -- lean flow (lean/README.md); NULL = none
+  plan_approval boolean not null default false,  -- the plan needs approve-plan before claim (always true for risk)
+  plan_approved_by text,
+  plan_approved_at timestamptz,
   status feature_status not null default 'pending',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -56,6 +60,9 @@ create table session_log (
   changes text[],
   verification text,
   closure text,
+  review_status text,         -- 'approved', 'changes_requested', 'quick' or 'lean' (validated in bash, as in SQLite)
+  reviewed_by text,
+  reviewed_at timestamptz,
   started_at timestamptz not null default now(),
   closed_at timestamptz,
   paused_at timestamptz,      -- set while the session's feature is blocked; see schema.sqlite.sql

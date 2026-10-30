@@ -3,9 +3,11 @@
 #
 #   1. install.sh --hide-harness sets the flag and excludes the project-owned
 #      harness files, specs/ and a test folder git tracks nothing in; a test
-#      folder with tracked files stays the project's.
+#      folder with tracked files stays the project's. The lean flow's
+#      docs/features/ and acceptance folder follow the same rule.
 #   2. hide-check passes on clean changes, lists a harness file, word or id
-#      (in a change or in --message), and is a no-op with the flag off.
+#      (in a change or in --message), a lean review report and a lean folder
+#      the project doesn't own, and is a no-op with the flag off.
 #   3. log-out warns about harness traces in its --changes.
 #
 # Usage: bash tests/hide_harness_test.sh   (exits non-zero on the first failure)
@@ -29,7 +31,8 @@ echo "1. install --hide-harness"
 g init -q
 printf 'export const a = 1;\n' > "$P/src/app.js"
 printf 'kept\n' > "$P/test/own.test.js"
-g add src test && g commit -qm base || die "git setup"
+mkdir -p "$P/docs/features" && printf 'Project notes\n' > "$P/docs/features/old.md"
+g add src test docs && g commit -qm base || die "git setup"
 printf 'agent test\n' > "$P/tests/app.test.js"
 (cd "$P" && bash "$TOOLKIT_DIR/install.sh" --slug hide --human-user Tester --verify-command true --hide-harness) > "$WORK/install.log" 2>&1 \
   || die "install: $(tail -5 "$WORK/install.log")"
@@ -41,7 +44,22 @@ done
 printf 'more\n' >> "$P/test/own.test.js"
 visible | grep -qxF test/own.test.js || die "a test folder git tracks stays visible"
 g checkout -q -- test
-pass "install hides the project-owned harness files, specs/ and an untracked test folder"
+mkdir -p "$P/acceptance" && printf 'check\n' > "$P/acceptance/totals.test.js"
+printf 'Plan\n' > "$P/docs/features/totals.md"
+out=$(visible)
+grep -qxF acceptance/totals.test.js <<<"$out" && die "an acceptance folder git tracks nothing in must be hidden: $out"
+grep -qxF docs/features/totals.md <<<"$out" || die "a docs/features/ the project commits to stays visible: $out"
+rm -f "$P/docs/features/totals.md"
+jq '.lean = {acceptance_dir: "qa/accept/"}' "$P/.harness.json" > "$WORK/hj" && cp "$WORK/hj" "$P/.harness.json"
+(cd "$P" && bash "$TOOLKIT_DIR/install.sh" --slug hide --human-user Tester --verify-command true) > "$WORK/install.log" 2>&1 \
+  || die "reinstall: $(tail -5 "$WORK/install.log")"
+mkdir -p "$P/qa/accept" && printf 'check\n' > "$P/qa/accept/totals.test.js"
+visible | grep -q '^qa/' && die "the configured acceptance folder must be hidden: $(visible)"
+grep -qxF '/acceptance/' "$P/.git/info/exclude" && die "the old acceptance folder should leave the block: $(cat "$P/.git/info/exclude")"
+rm -rf "$P/qa" "$P/acceptance"
+jq 'del(.lean)' "$P/.harness.json" > "$WORK/hj" && cp "$WORK/hj" "$P/.harness.json"
+(cd "$P" && bash "$TOOLKIT_DIR/install.sh" --slug hide --human-user Tester --verify-command true) > "$WORK/install.log" 2>&1 || die "reinstall"
+pass "install hides the project-owned harness files, specs/ and untracked test and lean folders"
 
 echo "2. hide-check"
 H hide-check >/dev/null || die "clean tree should pass: $(H hide-check)"
@@ -64,6 +82,17 @@ printf 'leak\n' > "$P/progress.txt"; g add -f -- "$P/.harness.json" 2>/dev/null
 out=$(H hide-check) && die "a force-added harness file must fail"
 grep -q 'harness file visible to git: .harness.json' <<<"$out" || die "should name the visible harness file: $out"
 g rm -q --cached .harness.json && rm -f "$P/progress.txt"
+printf 'VERDICT: approve\n' > "$P/docs/features/totals.review.md"
+out=$(H hide-check) && die "a lean review report must fail even in a project-owned docs/features/"
+grep -q 'harness file visible to git: docs/features/totals.review.md' <<<"$out" || die "should name the review report: $out"
+rm -f "$P/docs/features/totals.review.md"
+mkdir -p "$P/acceptance" && printf 'check\n' > "$P/acceptance/totals.test.js" && g add -f acceptance
+out=$(H hide-check) && die "a force-added acceptance test must fail"
+grep -q 'harness file visible to git: acceptance/totals.test.js' <<<"$out" || die "should name the acceptance test: $out"
+g rm -rq --cached acceptance && rm -rf "$P/acceptance"
+printf 'Plan\n' > "$P/docs/features/totals.md"
+H hide-check >/dev/null || die "a plan in a project-owned docs/features/ must pass: $(H hide-check)"
+rm -f "$P/docs/features/totals.md"
 jq '.hide_harness = false' "$P/.harness.json" > "$WORK/hj" && cp "$WORK/hj" "$P/.harness.json"
 printf '// R9\n' >> "$P/src/app.js"
 out=$(H hide-check) || die "with the flag off hide-check is a no-op: $out"

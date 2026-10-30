@@ -35,6 +35,11 @@ CREATE TABLE features (
   superseded_from TEXT,                       -- status before supersede, restored by unsupersede
   size TEXT NOT NULL DEFAULT 'normal',        -- 'normal' or 'small' (validated in bash); small may close via log-out --quick
   request TEXT,                               -- the user's request verbatim (add-feature --request, Notion card text)
+  mode TEXT,                                  -- lean flow (lean/README.md): NULL (none), 'normal' or 'risk' (validated in bash)
+  plan_approval INTEGER NOT NULL DEFAULT 0,   -- 1 = the plan needs approve-plan before claim (always 1 for risk)
+  plan_approved_by TEXT,                      -- human who approved docs/features/<name>.md (approve-plan --by)
+  plan_approved_at TEXT,
+  plan_frozen TEXT,                           -- risk mode: shasum -a 256 manifest of the acceptance tests, frozen at approve-plan
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   deleted_at TEXT

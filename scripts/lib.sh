@@ -329,6 +329,18 @@ fi
 if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|request|'; then
   sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN request TEXT;"
 fi
+# Adds the lean-flow columns (lean/README.md): features.mode ('normal' or
+# 'risk', NULL = no lean flow; validated in bash like size), plan_approval (a
+# normal feature whose plan needs approve-plan before claim; risk always
+# does), who/when approved it, and plan_frozen, the acceptance-test manifest
+# frozen by approve-plan in risk mode. Plain ADD COLUMNs, each probed on its
+# own. Keep in sync with db/schema.sqlite.sql.
+for lean_col in "mode TEXT" "plan_approval INTEGER NOT NULL DEFAULT 0" "plan_approved_by TEXT" "plan_approved_at TEXT" "plan_frozen TEXT"; do
+  if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q "|${lean_col%% *}|"; then
+    sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN $lean_col;"
+  fi
+done
+unset lean_col
 if [ -z "$(sqlite3 "$DB_PATH" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='learnings';")" ]; then
   sqlite3 "$DB_PATH" <<'SQL'
 .bail on

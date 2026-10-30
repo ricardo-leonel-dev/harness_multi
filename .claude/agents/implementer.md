@@ -154,6 +154,8 @@ but it must still surface in your final report (see below), not be silently swal
 
 ## Hard Rules
 
+- A feature with a mode (listed under "lean mode" in `status`) is not yours: the lean flow implements it
+  (`lean/README.md`). Don't claim it; reply `escalate -> lean feature: <name>` and stop.
 - Only one feature per session. If you discover that your change affects another feature, stop and report it as a
   blocking feature.
 - Every code entry is accompanied by a test before moving on to the next change.

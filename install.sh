@@ -7,7 +7,7 @@
 #     --verify-command "npm test"
 #
 # Harness-core files (AGENTS.md + a CLAUDE.md symlink to it, .claude/agents/*.md,
-# .codex/agents/*.toml, init.sh, scripts/*.sh) are copied/relinked unconditionally
+# .codex/agents/*.toml, init.sh, scripts/*.sh, lean/) are copied/relinked unconditionally
 # — re-running install.sh refreshes them. docs/{architecture,conventions,verification}.md,
 # CHECKPOINTS.md, specs/, and .harness.json are created
 # only if absent — never clobbers project-owned content. Shared instructions and
@@ -71,7 +71,8 @@ Usage: install.sh --slug SLUG [options]
                                 only possible in CI by passing --human-user "...".
   --hide-harness               set .harness.json::hide_harness (also on an existing install): the project's git
                                 must not show the harness — its project-owned files (.harness.json, CHECKPOINTS.md,
-                                docs/{architecture,conventions,verification}.md, specs/, untracked test folders)
+                                docs/{architecture,conventions,verification}.md, specs/, and test folders, the lean
+                                flow's docs/features/ and acceptance dir when git tracks nothing in them)
                                 are excluded too, and agents check commits/PRs with harness.sh hide-check.
 EOF
 }
@@ -191,6 +192,14 @@ cp "$TOOLKIT_DIR/scripts/time_phase.py" "$TARGET_DIR/scripts/time_phase.py"
 cp "$TOOLKIT_DIR/scripts/agent_usage.py" "$TARGET_DIR/scripts/agent_usage.py"
 chmod +x "$TARGET_DIR/init.sh" "$TARGET_DIR"/scripts/*.sh
 ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*.toml, init.sh, scripts/*.sh, scripts/{time_phase,agent_usage}.py"
+
+# lean/ (the lean flow: gate, runner, sandbox, adapters, instructions) sits at the
+# project root, where harness.sh looks for the gate (<scripts>/../lean/gate.sh).
+# Harness-owned: refreshed on every install and excluded from git below.
+mkdir -p "$TARGET_DIR/lean"
+cp -R "$TOOLKIT_DIR/lean/." "$TARGET_DIR/lean/"
+find "$TARGET_DIR/lean" -type f -name '*.sh' -exec chmod +x {} +
+ok "copied lean/ (gate, runner, adapters, instructions)"
 
 # Shared instructions are harness-owned and refreshed even in existing projects.
 mkdir -p "$TARGET_DIR/harness/instructions"
@@ -397,24 +406,35 @@ exclude_harness_files() {
     warn "not inside a git repository — skipping .git/info/exclude"
     return 0
   fi
-  local prefix exclude_rel exclude_file snapshot begin end name entries tracked
+  local prefix exclude_rel exclude_file snapshot begin end name entries tracked acceptance
   prefix="$(git -C "$TARGET_DIR" rev-parse --show-prefix)"
   exclude_rel="$(cd "$TARGET_DIR" && git rev-parse --git-path info/exclude)"
   case "$exclude_rel" in /*) exclude_file="$exclude_rel" ;; *) exclude_file="$TARGET_DIR/$exclude_rel" ;; esac
   snapshot="$(jq -r '.snapshot_path // "state"' "$TARGET_DIR/.harness.json")"
   snapshot="${snapshot%/}"
 
-  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ docs/specs.md $snapshot/ progress/ mock-data/ .claude/settings.local.json"
+  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ lean/ docs/specs.md $snapshot/ progress/ mock-data/ .claude/settings.local.json"
   for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do entries="$entries .claude/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do entries="$entries .codex/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/scripts/*.sh; do entries="$entries scripts/${name##*/}"; done
   # hide_harness: the files the harness scaffolds for the project would give it
   # away too, and so would test folders git tracks nothing in (tests the agents
   # wrote). A test folder with tracked files belongs to the project: left alone.
+  # The lean flow's plans (docs/features/) and acceptance tests
+  # (lean.acceptance_dir) follow the same rule, but are excluded before they
+  # exist: agents create them later, and git would show them from the start.
   if [ "$(jq -r '.hide_harness // false' "$TARGET_DIR/.harness.json")" = true ]; then
     entries="$entries .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md docs/verification.md specs/"
     for name in tests test spec __tests__; do
       if [ -d "$TARGET_DIR/$name" ] && [ -z "$(cd "$TARGET_DIR" && git ls-files -- "$name" | head -1)" ]; then
+        entries="$entries $name/"
+      fi
+    done
+    acceptance="$(jq -r '.lean.acceptance_dir // "acceptance"' "$TARGET_DIR/.harness.json")"
+    acceptance="${acceptance#./}"; acceptance="${acceptance%/}"
+    for name in docs/features "$acceptance"; do
+      case "$name" in ""|.|/*|*..*|*" "*) continue ;; esac
+      if [ -z "$(cd "$TARGET_DIR" && git ls-files -- "$name" | head -1)" ]; then
         entries="$entries $name/"
       fi
     done

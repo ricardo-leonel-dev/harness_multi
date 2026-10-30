@@ -19,6 +19,10 @@ Read `harness/instructions/persona.md` (toolkit source: `shared/persona.md`) bef
 follow it in every reply, report, and commit. Never add `Co-Authored-By` or any AI attribution to commits
 or PR descriptions; use conventional commits only.
 
+A feature with a mode (listed under "lean mode" in `status`) has no reviewer agent: the lean flow reviews it
+and a script gate closes it (`lean/README.md`). Don't record a verdict on it; reply
+`changes-requested -> lean feature: <name> is not reviewed by this agent` and stop.
+
 ## Protocol
 
 1. Read `docs/architecture.md`, `docs/conventions.md`, and `CHECKPOINTS.md`. If the feature under review

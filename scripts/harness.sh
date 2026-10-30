@@ -12,14 +12,30 @@
 #                                              optional "depends_on": [name...] gates claim on those LOCAL
 #                                              features — same project — being 'done' first)
 #   add-feature --name <slug> --title <t> [--description <d>] [--request <text>] [--acceptance <item...>]
-#               [--sdd] [--depends-on <name...>] [--size small|normal]
+#               [--sdd] [--depends-on <name...>] [--size small|normal] [--mode normal|risk] [--approval]
 #                                              create a single pending feature directly (no seed file) — for
 #                                              ad-hoc tasks the leader creates on the spot, no matching pending
 #                                              feature existed; --sdd requires an approved spec before claim;
 #                                              --depends-on names other LOCAL features (same project, must
 #                                              already exist) that must be 'done' before this one is claimable;
 #                                              --size small lets it close through log-out --quick (default normal);
-#                                              --request keeps the user's request verbatim (the spec quotes it)
+#                                              --request keeps the user's request verbatim (the spec quotes it);
+#                                              --mode puts it on the lean flow (lean/README.md): it closes only
+#                                              through log-out --lean; --approval (normal only; risk always needs
+#                                              it, so with risk it only warns) makes claim wait for approve-plan.
+#                                              --mode is not combinable with --sdd
+#   set-mode <feature_number|name> <normal|risk|none> [--approval]
+#                                              set or clear (none) a feature's lean mode; refused on done/superseded
+#                                              features and once its plan is approved (that would void the approval)
+#                                              ; risk or --approval only on a pending feature (approve-plan needs pending)
+#   approve-plan <TARGET> [--by NAME]         record the human's approval of a lean feature's plan,
+#                                              docs/features/<name>.md (leader-only, right after the user approves it
+#                                              in conversation; --by resolved as for approve-spec). Only for a pending
+#                                              risk feature, or a normal one with --approval; claim refuses those until
+#                                              it ran. Risk mode also freezes <lean.acceptance_dir>/<name>.* (default
+#                                              acceptance/) with shasum -a 256 into the feature and into
+#                                              ~/.cache/harness/<slug>/frozen/<name>.sha (what lean/run.sh reads);
+#                                              refuses with no acceptance tests
 #   set-request <feature_number|name> <text>  store/replace a feature's verbatim user request
 #   drop-sdd <feature_number|name> <reason>   turn a pending sdd=1 feature into sdd=0 before any spec exists
 #                                              (only after the user accepted it in this conversation); the
@@ -44,6 +60,8 @@
 #   notion-diff                               (stdin: JSON array of {source_id,...}) prints only entries not yet imported
 #   notion-import <file.json>                 import entries as pending features, auto-numbered, source_id stored
 #                                              (optional "sdd" checkbox property carried through if present;
+#                                              optional "mode"/"plan_approval" get add-feature --mode/--approval's
+#                                              checks first, nothing imported on a bad one; sdd + mode -> sdd, warned;
 #                                              optional "depends_on": [name...] also carried through — see
 #                                              import-features above)
 #   claim-spec [--agent NAME] [--agent-model MODEL] [TARGET]
@@ -149,6 +167,15 @@
 #                                              there, and the last ./init.sh green on the current tree. Otherwise
 #                                              refuses with the reasons (logged): launch the reviewer. A reviewer's
 #                                              approval wins; requested changes are never bypassed
+#   log-out --lean --changes <item...> --verification <text> --closure <text>
+#                                              features with a lean mode only (they refuse the reviewer path and
+#                                              --quick): runs lean/gate.sh against the session base — suite green, no
+#                                              assertion removed unless listed under **Changed tests**, every changed
+#                                              file under **Files**; risk mode: the acceptance tests match the manifest
+#                                              frozen at approve-plan (refused when the ~/.cache copy was rewritten),
+#                                              docs/features/<name>.review.md has a VERDICT line and the reviewer
+#                                              changed no files. A refusal is logged (LEAN: refused) and means "fix";
+#                                              a pass records review_status 'lean', then the ./init.sh check applies
 #   hold <reason...>                          stop the active session (rejected escalation): it keeps the slot,
 #                                              so claim refuses other features and log-out refuses this one
 #   unhold [reason...]                        the user releases a held session (block also releases it)
@@ -167,6 +194,7 @@
 #   sync                                       best-effort push to the Postgres mirror
 #   notion-check                               best-effort curl+jq query for new Notion tasks (prints notion-diff-ready JSON)
 #   notion-create-feature --project <slug> --title <t> --description <d> [--acceptance <a>] [--status <s>] [--sdd]
+#                         [--mode normal|risk] [--approval]   (set the card's optional "Mode"/"Plan approval")
 #                                              create a new Notion page (feature card) in a project — for cross-
 #                                              project dependency requests; fails loudly (not a [WARN]) since the
 #                                              caller must not proceed to block a feature on a card that wasn't
@@ -309,10 +337,12 @@ VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape 
 }
 
 cmd_add_feature() {
-  local name="" title="" desc="" request="" accept_items=() sdd=0 depends_items=() size=normal
+  local name="" title="" desc="" request="" accept_items=() sdd=0 depends_items=() size=normal mode="" approval=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
+      --mode) mode="$2"; shift 2 ;;
+      --approval) approval=1; shift ;;
       --request) request="$2"; shift 2 ;;
       --size) size="$2"; shift 2 ;;
       --title) title="$2"; shift 2 ;;
@@ -334,10 +364,12 @@ cmd_add_feature() {
     esac
   done
   if [ -z "$name" ] || [ -z "$title" ]; then
-    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--request <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>] [--size small|normal]"
+    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--request <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>] [--size small|normal] [--mode normal|risk] [--approval]"
     exit 1
   fi
   case "$size" in small|normal) ;; *) fail "--size must be 'small' or 'normal', got: $size"; exit 1 ;; esac
+  local mode_sql plan_approval
+  IFS=' ' read -r mode_sql plan_approval < <(lean_mode_values "$mode" "$approval" "$sdd") || exit 1
 
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
@@ -371,12 +403,108 @@ cmd_add_feature() {
   local now; now="$(now_iso)"
 
   local request_sql=NULL; [ -n "$request" ] && request_sql="'$(sql_escape "$request")'"
-  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, size, request, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$size', $request_sql, '$now', '$now');"
+  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, size, request, mode, plan_approval, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$size', $request_sql, $mode_sql, $plan_approval, '$now', '$now');"
   local sdd_note=""; [ "$sdd" = "1" ] && sdd_note=", sdd"
   [ "$size" = "small" ] && sdd_note="$sdd_note, small"
+  [ -n "$mode" ] && sdd_note="$sdd_note, mode $mode$([ "$plan_approval" = 1 ] && echo ' (plan approval required)')"
   local deps_note=""; [ "$depends_on" != "[]" ] && deps_note=", depends on: $depends_on"
   ok "added feature $next_number: $name (pending$sdd_note$deps_note)"
+}
+
+# lean_mode_values <mode> <approval 0|1> <sdd 0|1> — validates a lean mode
+# (lean/README.md) and prints "<mode as SQL> <plan_approval>": '' or none ->
+# "NULL 0"; normal -> "'normal' <approval>"; risk -> "'risk' 1" (a risk plan
+# always needs approval, so --approval with risk only warns that it's ignored;
+# without a mode it's refused). The lean flow replaces the spec flow, so an
+# sdd=1 feature can't take a mode. Warnings go to stderr, like fail's.
+lean_mode_values() {
+  local mode="$1" approval="$2" sdd="$3"
+  case "$mode" in
+    ""|none)
+      [ "$approval" = 0 ] || { fail "--approval only applies with mode normal (risk always needs approval)"; return 1; }
+      echo "NULL 0" ;;
+    normal|risk)
+      [ "$sdd" = 0 ] || { fail "an sdd feature can't take a lean mode: the spec flow and the lean flow are alternatives (drop-sdd first if the user accepted it)"; return 1; }
+      if [ "$mode" = risk ]; then
+        [ "$approval" = 0 ] || warn "--approval with mode risk: risk always requires approval; --approval ignored"
+        echo "'risk' 1"
+      else echo "'normal' $approval"; fi ;;
+    *) fail "mode must be 'normal' or 'risk'${4:+ or 'none'}, got: $mode"; return 1 ;;
+  esac
+}
+
+# set-mode <TARGET> <normal|risk|none> [--approval] — set or clear a feature's
+# lean mode. Refused once the plan is approved (a mode change would void that
+# approval) and on done/superseded features. 'none' puts the feature back on
+# the reviewer path.
+cmd_set_mode() {
+  local target="" mode="" approval=0 positional=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --approval) approval=1; shift ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  target="${positional[0]:-}"; mode="${positional[1]:-}"
+  if [ -z "$target" ] || [ -z "$mode" ] || [ "${#positional[@]}" -ne 2 ]; then
+    fail "usage: set-mode <feature_number|name> <normal|risk|none> [--approval]"; exit 1
+  fi
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local row
+  row=$(db "SELECT sdd, status, COALESCE(plan_approved_at, '') FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
+  [ -n "$row" ] || { fail "no matching feature: $target"; exit 1; }
+  local sdd status approved_at
+  IFS='|' read -r sdd status approved_at <<<"$row"
+  case "$status" in done|superseded) fail "feature $target is $status: its mode is final"; exit 1 ;; esac
+  [ -z "$approved_at" ] || { fail "feature $target's plan was already approved ($approved_at): changing its mode would void that approval"; exit 1; }
+  # The mode decides which close path applies. Once a reviewer has recorded a
+  # verdict on the feature's open session, or the session is on hold, switching
+  # paths would step around that verdict or that hold.
+  local open_sid open_review open_held
+  IFS='|' read -r open_sid open_review open_held < <(db "SELECT sl.id, COALESCE(sl.review_status, ''), COALESCE(sl.held_at, '') FROM session_log sl JOIN features f ON f.id=sl.feature_id
+WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.$where AND sl.closed_at IS NULL AND sl.deleted_at IS NULL LIMIT 1;")
+  [ -z "$open_held" ] || { fail "feature $target's session $open_sid is on hold: only the user can release it ('unhold') before its mode changes"; exit 1; }
+  case "$open_review" in
+    approved|changes_requested)
+      fail "a reviewer already recorded '$open_review' on feature $target's session $open_sid: its mode can't change now (the reviewer's verdict stands — finish on the reviewer path)"; exit 1 ;;
+  esac
+  local mode_sql plan_approval
+  IFS=' ' read -r mode_sql plan_approval < <(lean_mode_values "$mode" "$approval" "$sdd" with-none) || exit 1
+  # A mode that needs plan approval (risk, or normal --approval) can only be
+  # set while the feature is pending: approve-plan takes pending features only,
+  # so after the claim that approval could never be given.
+  local needs_pending=0
+  { [ "$mode" = risk ] || [ "$plan_approval" = 1 ]; } && needs_pending=1
+  if [ "$needs_pending" = 1 ] && [ "$status" != pending ]; then
+    fail "feature $target is $status: mode $mode$([ "$plan_approval" = 1 ] && [ "$mode" != risk ] && echo ' --approval') needs a plan approved before the claim, so it can only be set on a pending feature"; exit 1
+  fi
+  local updated
+  updated=$(db "UPDATE features SET mode=$mode_sql, plan_approval=$plan_approval, updated_at='$(now_iso)'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status NOT IN ('done','superseded') AND plan_approved_at IS NULL AND $where
+  AND ($needs_pending = 0 OR status = 'pending')
+  AND NOT EXISTS (SELECT 1 FROM session_log sl WHERE sl.feature_id=features.id AND sl.closed_at IS NULL AND sl.deleted_at IS NULL
+    AND (sl.held_at IS NOT NULL OR sl.review_status IN ('approved','changes_requested')))
+RETURNING feature_number || ' ' || name;")
+  [ -n "$updated" ] || { fail "feature $target changed meanwhile: run status and try again"; exit 1; }
+  # A quick or lean pass was earned on the other close path: it no longer applies.
+  if [ -n "$open_sid" ]; then
+    local cleared
+    cleared=$(db "UPDATE session_log SET review_status=NULL, reviewed_by=NULL, reviewed_at=NULL WHERE id=$open_sid AND review_status IN ('quick','lean') RETURNING review_status;")
+    [ -z "$cleared" ] || db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($open_sid, '[harness] set-mode $(sql_escape "$mode"): cleared the earlier gate pass (it belonged to the other close path)', '$(now_iso)');"
+  fi
+  if [ "$mode" = none ]; then
+    ok "feature $updated has no lean mode (reviewer path)"
+  else
+    ok "feature $updated is now mode $mode$([ "$plan_approval" = 1 ] && echo ', plan approval required')"
+  fi
 }
 
 # set-size <TARGET> <small|normal> — a small feature may close through
@@ -633,6 +761,13 @@ cmd_notion_diff() {
     '[.[] | select((.source_id as $s | $existing | index($s)) == null)]' <<<"$input"
 }
 
+# notion-import <file.json> — entries from notion-check (or the same shape) as
+# pending features. mode/plan_approval (the card's optional "Mode" select and
+# "Plan approval" checkbox) get add-feature --mode/--approval's validation,
+# checked for every entry before any is inserted; an entry with both sdd and a
+# mode is imported as sdd without the mode, with a warning, and a risk entry
+# with plan approval ticked is imported as risk (which always needs approval),
+# with a warning that the checkbox is ignored.
 cmd_notion_import() {
   local seed_file="${1:?usage: notion-import <file.json>}"
   local pid; pid="$(project_id)"
@@ -640,8 +775,32 @@ cmd_notion_import() {
   local next_number
   next_number=$(db "SELECT COALESCE(MAX(feature_number), 0) + 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL;")
 
-  jq -c '.[]' "$seed_file" | while IFS= read -r item; do
-    local name title desc accept sdd depends_on source_id now source_id_sql
+  local rows=() item name sdd mode approval lean_values=() mode_sql plan_approval
+  while IFS= read -r item; do rows+=("$item"); done < <(jq -c '.[]' "$seed_file")
+  for item in "${rows[@]+"${rows[@]}"}"; do
+    name=$(jq -r '.name' <<<"$item")
+    sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
+    mode=$(jq -r '.mode // ""' <<<"$item")
+    approval=$(jq -r 'if (.plan_approval == true or .plan_approval == 1) then 1 else 0 end' <<<"$item")
+    if [ "$sdd" = 1 ] && { [ -n "$mode" ] || [ "$approval" = 1 ]; }; then
+      warn "notion-import: $name has both SDD and a lean mode/plan approval — imported as sdd without the mode (the spec flow and the lean flow are alternatives)"
+      mode="" approval=0
+    fi
+    # Handled here rather than by lean_mode_values's own warning: its stderr
+    # is captured below as the failure reason, and this one names the card.
+    if [ "$mode" = risk ] && [ "$approval" = 1 ]; then
+      warn "notion-import: $name is a Risk card with \"Plan approval\" ticked — risk always requires approval; checkbox ignored"
+      approval=0
+    fi
+    mode_sql=$(lean_mode_values "$mode" "$approval" "$sdd" 2>&1) \
+      || { fail "notion-import: $name: $(sed 's/^\[FAIL\] *//' <<<"$mode_sql") — nothing imported"; exit 1; }
+    lean_values+=("$mode_sql")
+  done
+
+  local i=0
+  for item in "${rows[@]+"${rows[@]}"}"; do
+    local title desc accept depends_on source_id now source_id_sql
+    IFS=' ' read -r mode_sql plan_approval <<<"${lean_values[$i]}"; i=$((i + 1))
     name=$(jq -r '.name' <<<"$item")
     title=$(jq -r '.title' <<<"$item")
     desc=$(jq -r '.description // ""' <<<"$item")
@@ -656,8 +815,8 @@ cmd_notion_import() {
       source_id_sql="NULL"
     fi
     # The card's text is the user's own request: keep it verbatim too.
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, source_id, request, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', $source_id_sql, NULLIF('$(sql_escape "$desc")', ''), '$now', '$now');"
+    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, source_id, request, mode, plan_approval, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', $source_id_sql, NULLIF('$(sql_escape "$desc")', ''), $mode_sql, $plan_approval, '$now', '$now');"
     next_number=$((next_number + 1))
   done
   ok "imported notion tasks from $seed_file"
@@ -816,6 +975,106 @@ SQL
   push_notion_status "$fid"
 }
 
+# resolve_approver <command> <--by value> — prints the approving human's name.
+# Resolution order for --by (post feature-38 audit): explicit --by always
+# wins; else $HARNESS_HUMAN_USER env var (CI/override); else
+# .harness.json::human_user (set by install.sh at install time). With no
+# name anywhere it refuses: a placeholder like "user" would record an
+# approval nobody can trace back to a person.
+# approve-spec and approve-plan are the ONLY commands where a literal human
+# name is the correct attribution — subagents don't run them, only the
+# leader does, on behalf of the human who approved in conversation.
+resolve_approver() {
+  local cmd="$1" by="${2:-}"
+  if [ -z "$by" ]; then
+    if [ -n "${HARNESS_HUMAN_USER:-}" ]; then
+      by="$HARNESS_HUMAN_USER"
+    else
+      by="$(config '.human_user' '')"
+    fi
+  fi
+  if [ -z "$by" ] || [ "$(printf '%s' "$by" | tr '[:upper:]' '[:lower:]')" = user ]; then
+    fail "$cmd needs the approving human's name: set .harness.json::human_user (or \$HARNESS_HUMAN_USER), or ask the user for their name and pass --by \"<name>\""
+    return 1
+  fi
+  printf '%s' "$by"
+}
+
+# lean_state_dir — ~/.cache/harness/<slug>, where lean/run.sh keeps the frozen
+# manifests and run results: outside the project, so a sandboxed session can't
+# read or change them. Same slug rule as lean/run.sh.
+lean_state_dir() {
+  printf '%s/.cache/harness/%s' "$HOME" "${PROJECT_SLUG:-$(basename "$(pwd)")}"
+}
+
+# approve-plan <TARGET> [--by NAME] — record the human's approval of a lean
+# feature's plan (docs/features/<name>.md). Leader-only, right after the user
+# approves it in conversation; claim refuses a risk feature, or a normal one
+# with plan_approval, until this ran. Risk mode also freezes the acceptance
+# tests (<acceptance_dir>/<name>.*) into features.plan_frozen and into
+# <lean_state_dir>/frozen/<name>.sha, the manifest lean/run.sh reads.
+cmd_approve_plan() {
+  local target="" by=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by) by="$2"; shift 2 ;;
+      *) target="$1"; shift ;;
+    esac
+  done
+  [ -n "$target" ] || { fail "usage: approve-plan <feature_number|name> [--by <name>]"; exit 1; }
+  by="$(resolve_approver approve-plan "$by")" || exit 1
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local row
+  row=$(db "SELECT id, name, COALESCE(mode, ''), plan_approval, status, COALESCE(plan_approved_at, '') FROM features
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
+  [ -n "$row" ] || { fail "not approvable: no matching feature $target"; exit 1; }
+  local fid name mode needs status approved_at
+  IFS='|' read -r fid name mode needs status approved_at <<<"$row"
+  [ -n "$mode" ] || { fail "not approvable: feature $name has no lean mode (set-mode $name normal|risk first)"; exit 1; }
+  if [ "$mode" = normal ] && [ "$needs" != 1 ]; then
+    fail "not approvable: feature $name is mode normal without plan approval — it claims without one (set-mode $name normal --approval if the user wants to approve the plan)"; exit 1
+  fi
+  [ -z "$approved_at" ] || { fail "not approvable: feature $name's plan was already approved ($approved_at)"; exit 1; }
+  [ "$status" = pending ] || { fail "not approvable: feature $name is $status (a plan is approved before the feature is claimed)"; exit 1; }
+  local doc="docs/features/$name.md"
+  [ -f "$doc" ] || { fail "not approvable: $doc is missing (the planner writes it first: lean/instructions/planning.md)"; exit 1; }
+
+  local manifest="" frozen_sql=NULL frozen_file="" note=""
+  if [ "$mode" = risk ]; then
+    local acc_dir files=() f
+    acc_dir="$(config '.lean.acceptance_dir' 'acceptance')"; acc_dir="${acc_dir%/}"
+    while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(find "$acc_dir" -type f -name "$name.*" 2>/dev/null | sort)
+    [ "${#files[@]}" -gt 0 ] || { fail "not approvable: no acceptance tests for $name in $acc_dir/ (risk mode freezes them at approval)"; exit 1; }
+    manifest=$(shasum -a 256 "${files[@]}") || { fail "not approvable: could not hash the acceptance tests"; exit 1; }
+    frozen_sql="'$(sql_escape "$manifest")'"
+    frozen_file="$(lean_state_dir)/frozen/$name.sha"
+    if [ -f "$frozen_file" ] && [ "$(cat "$frozen_file")" != "$manifest" ]; then
+      warn "replacing $frozen_file: it differs from the acceptance tests being approved"
+    fi
+    mkdir -p "$(dirname "$frozen_file")" && printf '%s\n' "$manifest" > "$frozen_file" \
+      || { fail "not approvable: could not write $frozen_file"; exit 1; }
+    note=", froze ${#files[@]} acceptance file(s) into $frozen_file"
+  fi
+
+  local now updated; now="$(now_iso)"
+  updated=$(db "UPDATE features SET plan_approved_by='$(sql_escape "$by")', plan_approved_at='$now', plan_frozen=$frozen_sql, updated_at='$now'
+WHERE id=$fid AND status='pending' AND plan_approved_at IS NULL AND mode IS NOT NULL AND (mode='risk' OR plan_approval=1)
+RETURNING feature_number || ' ' || name;")
+  if [ -z "$updated" ]; then
+    [ -z "$frozen_file" ] || rm -f "$frozen_file"
+    fail "not approvable: feature $target changed meanwhile — run status and try again"; exit 1
+  fi
+  ok "approved plan for feature $updated (mode $mode, by: $by$note)"
+}
+
 cmd_approve_spec() {
   local target="" by=""
   while [ $# -gt 0 ]; do
@@ -825,26 +1084,7 @@ cmd_approve_spec() {
     esac
   done
   [ -n "$target" ] || { fail "usage: approve-spec <feature_number|name> [--by <name>]"; exit 1; }
-
-  # Resolution order for --by (post feature-38 audit): explicit --by always
-  # wins; else $HARNESS_HUMAN_USER env var (CI/override); else
-  # .harness.json::human_user (set by install.sh at install time). With no
-  # name anywhere it refuses: a placeholder like "user" would record an
-  # approval nobody can trace back to a person.
-  # This is the ONLY command where a literal human name is the correct
-  # attribution — subagents don't run it, only the leader does, on behalf
-  # of the human who approved the spec in conversation.
-  if [ -z "$by" ]; then
-    if [ -n "${HARNESS_HUMAN_USER:-}" ]; then
-      by="$HARNESS_HUMAN_USER"
-    else
-      by="$(config '.human_user' '')"
-    fi
-  fi
-  if [ -z "$by" ] || [ "$(printf '%s' "$by" | tr '[:upper:]' '[:lower:]')" = user ]; then
-    fail "approve-spec needs the approving human's name: set .harness.json::human_user (or \$HARNESS_HUMAN_USER), or ask the user for their name and pass --by \"<name>\""
-    exit 1
-  fi
+  by="$(resolve_approver approve-spec "$by")" || exit 1
 
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
@@ -936,7 +1176,8 @@ cmd_claim() {
   fi
 
   local check_row
-  check_row=$(sqlite3 -json "$DB_PATH" "SELECT f.id, f.name, f.sdd, f.status, f.depends_on, s.status AS spec_status
+  check_row=$(sqlite3 -json "$DB_PATH" "SELECT f.id, f.name, f.sdd, f.status, f.depends_on, s.status AS spec_status,
+  f.mode, f.plan_approval, f.plan_approved_at
 FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
 WHERE $target_where;")
 
@@ -977,6 +1218,16 @@ WHERE $target_where;")
       exit 1
     fi
 
+    # Lean flow: a risk plan, or a normal one marked --approval, needs the
+    # user's approval (approve-plan) before work starts. Enforced by plan_gate
+    # in the UPDATE below; this only gives the message.
+    local mode_now; mode_now=$(jq -r '.[0].mode // ""' <<<"$check_row")
+    if [ -n "$mode_now" ] && [ "$(jq -r '.[0].plan_approved_at // ""' <<<"$check_row")" = "" ] \
+      && { [ "$mode_now" = risk ] || [ "$(jq -r '.[0].plan_approval' <<<"$check_row")" = 1 ]; }; then
+      fail "feature $name_now (mode $mode_now) needs its plan approved first — after the user approves docs/features/$name_now.md, run 'scripts/harness.sh approve-plan $name_now --by <name>', then claim (see lean/README.md)"
+      exit 1
+    fi
+
     if [ "$sdd_flag" = "1" ]; then
       if [ "$status_now" = "pending" ] || [ "$status_now" = "spec_drafting" ]; then
         fail "feature $name_now requires an approved spec first (status=$status_now) — run 'claim-spec' then 'mark-spec-ready', get human approval, then 'approve-spec', then 'claim' (see docs/specs.md)"
@@ -1006,6 +1257,11 @@ WHERE $target_where;")
   # in the function. depends_on defaults to '[]', so json_each yields no
   # rows and the NOT EXISTS is vacuously true for features with no
   # dependencies declared.
+  # Lean flow, same posture: a risk feature, or a normal one with
+  # plan_approval, is claimable only once approve-plan stamped it. Vacuously
+  # true for features without a mode.
+  local plan_gate="f.mode IS NULL OR (f.mode = 'normal' AND f.plan_approval = 0) OR f.plan_approved_at IS NOT NULL"
+
   local deps_gate="NOT EXISTS (SELECT 1 FROM json_each(f.depends_on) dep WHERE dep.value NOT IN (SELECT name FROM features d2 WHERE d2.project_id = f.project_id AND d2.status = 'done' AND d2.deleted_at IS NULL))"
 
   # Checked before the feature UPDATE: otherwise a claim while another session
@@ -1025,14 +1281,14 @@ WHERE $target_where;")
   if [ -n "$target" ]; then
     if [[ "$target" =~ ^[0-9]+$ ]]; then
       update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.feature_number=$target AND ($sdd_gate) AND ($deps_gate))"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.feature_number=$target AND ($sdd_gate) AND ($deps_gate) AND ($plan_gate))"
     else
       update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.name='$(sql_escape "$target")' AND ($sdd_gate) AND ($deps_gate))"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.name='$(sql_escape "$target")' AND ($sdd_gate) AND ($deps_gate) AND ($plan_gate))"
     fi
   else
     update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND ($sdd_gate) AND ($deps_gate) ORDER BY f.feature_number LIMIT 1)"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND ($sdd_gate) AND ($deps_gate) AND ($plan_gate) ORDER BY f.feature_number LIMIT 1)"
   fi
 
   # SQLite has no RAISE()/control flow outside triggers, so "claim exactly
@@ -1045,7 +1301,7 @@ WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")
     exit 1
   fi
   if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
-    fail "not claimable: no matching pending feature (or an sdd=1 feature awaiting an approved spec — see the message above)"
+    fail "not claimable: no matching pending feature (or an sdd=1 feature awaiting an approved spec, or a lean plan awaiting approve-plan — see the message above)"
     exit 1
   fi
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
@@ -1440,7 +1696,22 @@ session_diff_base() {
 # anyone reading it: no harness files and no harness words or ids (F12, R3, T4)
 # in the changes, the commit message or the PR text.
 hide_harness_on() { [ "$(config '.hide_harness' 'false')" = true ]; }
-HIDE_PATHS_RE='^((AGENTS|CLAUDE|CHECKPOINTS)\.md|init\.sh|\.harness\.json|harness\.db.*|docs/(architecture|conventions|verification|specs)\.md)$|^(harness|progress|specs|state|mock-data|\.claude|\.codex)/'
+HIDE_PATHS_RE='^((AGENTS|CLAUDE|CHECKPOINTS)\.md|init\.sh|\.harness\.json|harness\.db.*|docs/(architecture|conventions|verification|specs)\.md|docs/features/[^/]+\.review\.md)$|^(harness|lean|progress|specs|state|mock-data|\.claude|\.codex)/'
+
+# hide_lean_dirs_re — the lean flow's plan folder (docs/features/) and
+# acceptance folder (lean.acceptance_dir, default acceptance) as a path regex,
+# each only when HEAD tracks nothing in it: a folder the project already
+# commits to is the project's own (install.sh applies the same rule).
+hide_lean_dirs_re() {
+  local acc dir re=""
+  acc="$(config '.lean.acceptance_dir' 'acceptance')"; acc="${acc#./}"; acc="${acc%/}"
+  for dir in docs/features "$acc"; do
+    case "$dir" in ""|.|/*|*..*) continue ;; esac
+    [ -z "$(git ls-tree -r --name-only HEAD -- "$dir" 2>/dev/null | head -1)" ] || continue
+    re="$re${re:+|}$(printf '%s' "$dir" | sed 's/[][\\.*^$+?(){}|]/\\&/g')/"
+  done
+  [ -z "$re" ] || printf '^(%s)\n' "$re"
+}
 HIDE_WORDS_RE='harness|spec_author|quick_implementer|progress/|specs/|tasks\.md|checkpoints'
 HIDE_IDS_RE='(^|[^A-Za-z0-9_])[FRPT][0-9]+([^A-Za-z0-9_]|$)'
 
@@ -1456,10 +1727,12 @@ hide_text_findings() {
 # in a line the changes add (tracked files) or in the whole file (untracked).
 hide_findings() {
   [ $# -gt 0 ] || set -- .
-  local f line
+  local f line paths_re lean_re
+  paths_re="$HIDE_PATHS_RE"; lean_re="$(hide_lean_dirs_re)"
+  [ -z "$lean_re" ] || paths_re="$paths_re|$lean_re"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    if grep -qE "$HIDE_PATHS_RE" <<<"$f"; then echo "harness file visible to git: $f"; continue; fi
+    if grep -qE "$paths_re" <<<"$f"; then echo "harness file visible to git: $f"; continue; fi
     [ -f "$f" ] && grep -Iq . -- "$f" 2>/dev/null || continue  # gone, empty or binary
     while IFS= read -r line; do
       echo "$f: $(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
@@ -1682,14 +1955,62 @@ quick_gate() {
   esac
 }
 
+# lean_gate <session_id> <feature_name> <mode> — the checks log-out --lean
+# runs itself: lean/gate.sh (found next to this script's directory) against
+# the session base, with the manifest frozen at approve-plan in risk mode, plus
+# the risk-mode review file and the reviewer-changed-files record lean/run.sh
+# writes. Fills LEAN_REASONS (empty = pass) and LEAN_REPORT (the gate's output).
+lean_gate() {
+  local sid="$1" name="$2" mode="$3" gate state frozen_tmp="" base scope
+  LEAN_REASONS=(); LEAN_REPORT=""
+  gate="$(cd "$SCRIPT_DIR/.." && pwd)/lean/gate.sh"
+  if [ ! -f "$gate" ]; then
+    LEAN_REASONS+=("the lean gate is missing: $gate (install lean/ next to scripts/)"); return
+  fi
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    LEAN_REASONS+=("not a git repository: the gate can't measure the change"); return
+  fi
+  IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
+  state="$(lean_state_dir)"
+  local args=(--base "$base")
+  if [ "$mode" = risk ]; then
+    local frozen cached="$state/frozen/$name.sha"
+    frozen=$(db "SELECT COALESCE(plan_frozen, '') FROM features WHERE name='$(sql_escape "$name")' AND deleted_at IS NULL AND id=(SELECT feature_id FROM session_log WHERE id=$sid);")
+    if [ -z "$frozen" ]; then
+      LEAN_REASONS+=("no frozen acceptance manifest recorded for $name (approve-plan freezes it)")
+    else
+      if [ -f "$cached" ] && [ "$(cat "$cached")" != "$frozen" ]; then
+        LEAN_REASONS+=("$cached differs from the manifest recorded at approve-plan: someone rewrote it")
+      fi
+      frozen_tmp=$(mktemp) && printf '%s\n' "$frozen" > "$frozen_tmp"
+      args+=(--frozen "$frozen_tmp")
+    fi
+    local review_file="docs/features/$name.review.md"
+    if [ ! -f "$review_file" ]; then
+      LEAN_REASONS+=("risk mode needs the review report $review_file (lean/run.sh review $name)")
+    elif ! grep -Eq '^VERDICT: (approve|changes)([^[:alnum:]_]|$)' "$review_file"; then
+      LEAN_REASONS+=("$review_file has no 'VERDICT: approve|changes' line")
+    fi
+    local review_json="$state/lean/$name.review.json"
+    if [ -f "$review_json" ] && [ "$(jq -r '.reviewer_changed_files' "$review_json" 2>/dev/null)" = true ]; then
+      LEAN_REASONS+=("the risk-mode reviewer changed files ($review_json): it must only report — undo its changes and review again")
+    fi
+  fi
+  local status=0
+  LEAN_REPORT=$(bash "$gate" "$(pwd)" "$name" "${args[@]}" 2>&1) || status=$?
+  [ -z "$frozen_tmp" ] || rm -f "$frozen_tmp"
+  [ "$status" = 0 ] || LEAN_REASONS+=("lean/gate.sh failed (exit $status)${scope:+ — note$scope}")
+}
+
 cmd_log_out() {
-  local changes=() verification="" closure="" quick=0
+  local changes=() verification="" closure="" quick=0 lean=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --quick) quick=1; shift ;;
+      --lean) lean=1; shift ;;
       --changes)
         shift
-        while [ $# -gt 0 ] && [ "$1" != "--verification" ] && [ "$1" != "--closure" ] && [ "$1" != "--quick" ]; do
+        while [ $# -gt 0 ] && [ "$1" != "--verification" ] && [ "$1" != "--closure" ] && [ "$1" != "--quick" ] && [ "$1" != "--lean" ]; do
           changes+=("$1"); shift
         done
         ;;
@@ -1711,6 +2032,55 @@ cmd_log_out() {
     exit 1
   fi
   local review_status; review_status=$(db "SELECT review_status FROM session_log WHERE id=$sid;")
+  [ "$quick$lean" != 11 ] || { fail "log-out takes --quick or --lean, not both"; exit 1; }
+
+  # Lean flow: a feature with a mode closes only through its gate, and only
+  # such a feature may use it. A refusal is logged and means "fix", never
+  # "work around it". The gate runs on every --lean log-out (an earlier pass
+  # or a reviewer approval doesn't carry over).
+  local lname lmode lnum lapproved lplan_approval
+  IFS='|' read -r lname lmode lnum lapproved lplan_approval < <(db "SELECT f.name, COALESCE(f.mode, ''), f.feature_number, COALESCE(f.plan_approved_at, ''), COALESCE(f.plan_approval, 0) FROM features f JOIN session_log sl ON sl.feature_id=f.id WHERE sl.id=$sid;")
+  if [ "$lean" = 1 ] && [ -z "$lmode" ]; then
+    fail "log-out --lean is only for features with a lean mode (feature $lname has none) — use the reviewer path, or --quick for a small feature"
+    exit 1
+  fi
+  if [ "$lean" = 0 ] && [ -n "$lmode" ]; then
+    local hint=""
+    [ -n "$lapproved" ] || hint=", or run 'scripts/harness.sh set-mode $lname none' first if the user wants the reviewer path"
+    fail "feature $lname has lean mode $lmode: close it with 'log-out --lean' (the lean gate)$hint"
+    exit 1
+  fi
+  if [ "$lean" = 1 ] && [ -z "$lapproved" ] && { [ "$lmode" = risk ] || [ "$lplan_approval" = 1 ]; }; then
+    fail "log-out --lean refused: feature $lname (mode $lmode) needs an approved plan and has none — it can't close on the lean path (set-mode $lname none for the reviewer path)"
+    exit 1
+  fi
+  if [ "$lean" = 1 ] && [ "$review_status" = "changes_requested" ]; then
+    fail "log-out --lean refused: a reviewer already requested changes on session $sid — it needs their approval"
+    exit 1
+  fi
+  if [ "$lean" = 0 ] && [ "$review_status" = "lean" ]; then
+    fail "cannot log out session $sid: its 'lean' pass doesn't apply to feature $lname, which has no lean mode — use the reviewer path"
+    exit 1
+  fi
+  if [ "$lean" = 1 ]; then
+    lean_gate "$sid" "$lname" "$lmode"
+    if [ "${#LEAN_REASONS[@]}" -gt 0 ]; then
+      local joined; joined=$(printf '%s; ' "${LEAN_REASONS[@]}"); joined="${joined%; }"
+      # A pass from an earlier --lean run no longer describes this tree.
+      db_exec "UPDATE session_log SET review_status=NULL, reviewed_by=NULL, reviewed_at=NULL WHERE id=$sid AND review_status='lean';
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] LEAN: refused — $joined${LEAN_REPORT:+
+$LEAN_REPORT}")', '$(now_iso)');"
+      fail "log-out --lean refused — fix these, then log out again:"
+      printf '  - %s\n' "${LEAN_REASONS[@]}" >&2
+      [ -z "$LEAN_REPORT" ] || { echo "  gate report:" >&2; printf '%s\n' "$LEAN_REPORT" | sed 's/^/    /' >&2; }
+      exit 1
+    fi
+    local last_line; last_line=$(printf '%s\n' "$LEAN_REPORT" | sed '/^[[:space:]]*$/d' | tail -n 1)
+    db_exec "UPDATE session_log SET review_status='lean', reviewed_by='harness (lean gate)', reviewed_at='$(now_iso)' WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] LEAN: passed (mode $lmode) — $last_line")', '$(now_iso)');"
+    ok "lean gate passed (mode $lmode): $last_line"
+    review_status=lean
+  fi
 
   # --quick: a small feature closes without a reviewer only when every signal
   # in quick_gate is clean. A refusal is logged and means "launch the
@@ -1741,7 +2111,7 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[
     review_status=quick
   fi
 
-  if [ "$review_status" != "approved" ] && [ "$review_status" != "quick" ]; then
+  if [ "$review_status" != "approved" ] && [ "$review_status" != "quick" ] && [ "$review_status" != "lean" ]; then
     fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved' first (do NOT pass --by; the harness auto-attributes from \$ANTHROPIC_MODEL); only the implementer runs log-out, and only after that approval is recorded"
     exit 1
   fi
@@ -1784,7 +2154,10 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[
 .bail on
 BEGIN;
 UPDATE session_log SET changes='$(sql_escape "$changes_json")', verification='$(sql_escape "$verification")',
-  closure='$(sql_escape "$closure")', closed_at='$now' WHERE id=$sid AND review_status IN ('approved','quick') AND held_at IS NULL;
+  closure='$(sql_escape "$closure")', closed_at='$now' WHERE id=$sid AND review_status IN ('approved','quick','lean') AND held_at IS NULL
+  AND (review_status='lean') = EXISTS (SELECT 1 FROM features f WHERE f.id=session_log.feature_id AND f.mode IS NOT NULL)
+  AND NOT (review_status='lean' AND EXISTS (SELECT 1 FROM features f WHERE f.id=session_log.feature_id
+    AND (f.mode='risk' OR f.plan_approval=1) AND f.plan_approved_at IS NULL));
 UPDATE features SET status='done', updated_at='$now'
   WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid AND closed_at='$now');
 COMMIT;
@@ -2316,6 +2689,16 @@ cmd_status() {
   f.size, f.superseded_by
 FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
 WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL ORDER BY f.feature_number;"
+  local lean_rows
+  lean_rows=$(db -header -column "SELECT feature_number, name, mode,
+  CASE WHEN plan_approved_at IS NOT NULL THEN 'plan approved by ' || plan_approved_by
+       WHEN mode = 'risk' OR plan_approval = 1 THEN 'plan approval pending'
+       ELSE 'no plan approval needed' END AS plan
+FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND mode IS NOT NULL ORDER BY feature_number;")
+  if [ -n "$lean_rows" ]; then
+    echo "--- lean mode (close with log-out --lean; lean/README.md) ---"
+    echo "$lean_rows"
+  fi
   echo "--- open session ---"
   db -header -column "SELECT id, agent, started_at, review_status, reviewed_by, held_at FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;"
   local paused
@@ -2585,6 +2968,8 @@ main() {
     claim-spec) cmd_claim_spec "$@" ;;
     mark-spec-ready) cmd_mark_spec_ready ;;
     approve-spec) cmd_approve_spec "$@" ;;
+    approve-plan) cmd_approve_plan "$@" ;;
+    set-mode) cmd_set_mode "$@" ;;
     claim) cmd_claim "$@" ;;
     record-review) cmd_record_review "$@" ;;
     append-log) cmd_append_log "$@" ;;

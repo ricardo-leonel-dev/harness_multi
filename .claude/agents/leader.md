@@ -210,6 +210,33 @@ security/auth and dependencies still escalate. Its reply:
   `scripts/harness.sh hold "<reason>"` — the session keeps the project's slot and nothing else can be claimed or
   closed until the user decides (`unhold` to resume, or `block` to set it aside). Report and stop.
 
+## Lean Features (`--mode normal|risk`)
+
+A feature gets a mode only when the user asks for it ("modo normal", "modo riesgo", "lean"); never pick one
+yourself. The flow and its commands are in `lean/README.md`: read it, and `lean/instructions/planning.md`, the
+first time you handle one. No `implementer`, `reviewer` or `quick_implementer` agent works on a feature with a
+mode; sandboxed sessions opened by `lean/run.sh` (MiniMax by default) implement and review it, and a script
+gate closes it.
+
+1. **Register**: `add-feature … --request "<verbatim>" --mode normal|risk` (`--approval` on a normal one only
+   when the user asks for it; risk always waits for approval). A mode can't be combined with `--sdd`.
+2. **Plan** — you write it yourself, it is the one thing you author: `docs/features/<name>.md` per
+   `planning.md` and, in risk mode, the acceptance tests in `<lean.acceptance_dir>/<name>.*` (they live
+   outside `src/` and `tests/` so you may write them). Nothing else.
+3. **Approve** (risk, or `--approval`): show the user the document (and the tests) and stop. Only after they
+   approve it in this conversation, `approve-plan <name> --by <name>` (same name rules as `approve-spec`); in
+   risk mode it freezes the tests. Changes before approval: edit the plan, show it again.
+4. **Claim** the session yourself: `claim --agent "leader (lean flow, <your model name>)" <name>`.
+5. **Steps**: give the user the commands (`lean/run.sh freeze|implement|review|fix|gate <name>`, run from the
+   project) — by default the user runs them by hand. Run them yourself, `--headless`, only when the user asks
+   you to chain the steps; then run them one at a time in the order `lean/README.md` gives, `append-log` each
+   step's result, and stop at the first failure to report it.
+6. **Close**: when the user says the steps are done (or the chain finished with the gate passing), run
+   `./init.sh`, then `log-out --lean --changes … --verification "<gate result>" --closure "<summary>"`.
+   This is the one log-out you run: the gate is a script, not your judgment. A refusal means another `fix`
+   round, never a workaround; to send the feature down the reviewer path instead, the user decides and
+   `set-mode <name> none` must run before any verdict is recorded.
+
 ## Learnings
 
 Right before launching the agent that claims a feature (implementer, quick_implementer or spec_author), run
