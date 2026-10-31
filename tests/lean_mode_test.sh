@@ -7,14 +7,22 @@
 #      is refused once the plan is approved.
 #   2. claim refuses a risk feature, or a normal one with --approval, until
 #      approve-plan; a normal one without it claims at once; a feature without a
-#      mode claims and closes exactly as before (and refuses log-out --lean).
+#      mode claims and closes exactly as before (and refuses log-out --lean). A paused
+#      lean session keeps ./init.sh and harness.sh test (with or without files) under the
+#      sessions' sandbox rules (sandbox-exec), or warning (LEAN_GATE_UNSANDBOXED=1, no
+#      lean/lib.sh).
 #   3. approve-plan refuses what it can't approve and, in risk mode, freezes the
-#      acceptance tests into the feature and into ~/.cache/harness/<slug>/frozen.
-#   4. log-out --lean closes a normal feature only when lean/gate.sh passes,
-#      logging each refusal; a feature with a mode refuses the plain and --quick
-#      log-out.
+#      acceptance tests into the feature and into the lean state's frozen/ (keyed by the
+#      project's path, lean/lib.sh).
+#   4. claim pins the trusted hashes. log-out --lean closes a normal
+#      feature only when lean/gate.sh passes and HEAD is still the session base
+#      (lean/run.sh gate defaults to that base: session-base), logging each refusal; it
+#      refuses a changed lean/gate.sh, and its suite runs sandboxed; a feature with a mode
+#      refuses the plain and --quick log-out.
 #   5. Risk mode also needs the review report, a reviewer that changed nothing,
-#      the frozen acceptance tests untouched and the ~/.cache manifest unchanged.
+#      the frozen acceptance tests untouched and the ~/.cache manifest unchanged; claim
+#      writes the risk manifest again; ./init.sh runs the suite sandboxed while the feature
+#      is open; log-out --lean shows sandbox.sh's [WARN] about lean.allowed_domains.
 #   6. The close path follows the mode: --quick is refused for a small feature
 #      with a mode; set-mode is refused after a reviewer verdict or on hold and
 #      clears a quick/lean pass; --lean refuses requested changes; a lean pass
@@ -42,6 +50,8 @@ sqlite3 "$P/harness.db" "INSERT INTO projects (id, slug) VALUES ('p1','t');"
 # A tiny suite the gate can run: every tests/*_test.sh, or the files given.
 cat > "$P/run_tests.sh" <<'SH'
 assert() { "$@" >/dev/null 2>&1 || { echo "FAIL: $*"; exit 1; }; }
+# LEAN_PROBE=<file>: the suite fails unless it can read <file> (tells a sandboxed run).
+if [ -n "${LEAN_PROBE:-}" ]; then cat "$LEAN_PROBE" >/dev/null 2>&1 || { echo "FAIL: probe $LEAN_PROBE unreadable"; exit 1; }; fi
 [ $# -gt 0 ] || set -- tests/*_test.sh
 rc=0
 for f in "$@"; do ( . "./$f" ) || rc=1; done
@@ -52,12 +62,23 @@ printf 'hello\n' > "$P/src/app.txt"
 # Indented: lean/gate.sh's removed-assertion pattern needs a character before the keyword.
 printf '  assert grep -q hello src/app.txt\n  assert test -f run_tests.sh\n' > "$P/tests/app_test.sh"
 printf 'progress/\nharness.db\nscripts/\nstate/\n.harness.json\nlean/\n' > "$P/.gitignore"
+# What ./init.sh needs to run its verification step.
+cp "$TOOLKIT_DIR/init.sh" "$P/init.sh"
+for f in docs/architecture.md docs/conventions.md docs/verification.md CHECKPOINTS.md; do printf '# x\n' > "$P/$f"; done
+mkdir -p "$WORK/home/.ssh" && printf 'key\n' > "$WORK/home/.ssh/id"
+# Nothing under the real home is run or looked up through PATH, and Claude Code's real temp
+# folder is never consulted (a fake, missing one stands in).
+PATH=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vF "$HOME/" | paste -sd: -)
+export LEAN_CLAUDE_TMP="$WORK/no-claude-tmp"
+have_sbx=0
+command -v sandbox-exec >/dev/null 2>&1 && sandbox-exec -p '(version 1)(allow default)' true 2>/dev/null && have_sbx=1
 
 # Mirror sync stub: counts calls (log-out syncs after every close).
 SYNCS="$WORK/syncs"; : > "$SYNCS"
 printf '#!/usr/bin/env bash\necho sync >> "%s"\n' "$SYNCS" > "$P/scripts/sync_postgres.sh"
 syncs() { wc -l < "$SYNCS" | tr -d ' '; }
-CACHE="$WORK/home/.cache/harness/t"
+# The lean state is keyed by the project's resolved path (lean/lib.sh), not by the slug.
+CACHE=$(HOME="$WORK/home" bash -c '. "$1/lean/lib.sh"; lean_state_dir "$2"' _ "$TOOLKIT_DIR" "$P")
 H() { (cd "$P" && HOME="$WORK/home" HARNESS_AGENT=implementer ANTHROPIC_MODEL= HARNESS_HUMAN_USER= bash scripts/harness.sh "$@") 2>&1; }
 q() { sqlite3 "$P/harness.db" "$1"; }
 g() { (cd "$P" && git -c user.email=t@t -c user.name=t "$@"); }
@@ -130,6 +151,27 @@ H log-out --changes src/app.txt --verification v --closure c >/dev/null || die "
 H claim n1 >/dev/null || die "a normal feature without --approval should claim at once"
 H block n1 parked by the test >/dev/null || die "block n1"
 pass "claim waits for approve-plan on risk and normal --approval; others claim as before"
+# n1's session is paused, but the code its sessions wrote may still be in the tree: ./init.sh
+# and harness.sh test run the suite under its sandbox rules all the same.
+if [ "$have_sbx" = 1 ]; then
+  out=$(cd "$P" && LEAN_PROBE="$WORK/home/.ssh/id" HOME="$WORK/home" bash init.sh 2>&1) && die "init.sh with a paused lean session must run sandboxed: $out"
+  grep -q "lean feature n1 is open: the verification command runs under its sessions' sandbox rules" <<<"$out" \
+    && grep -q 'probe .* unreadable' "$P/progress/test_last.log" || die "init.sh with a paused lean session: $out"
+  out=$(LEAN_PROBE="$WORK/home/.ssh/id" H test) && die "harness.sh test with a lean session open must run sandboxed: $out"
+  grep -q "lean feature n1 has an open session: the tests run under its sessions' sandbox rules" <<<"$out" \
+    && grep -q 'probe .* unreadable' "$P/progress/test_last.log" || die "harness.sh test with a paused lean session: $out"
+  out=$(LEAN_PROBE="$WORK/home/.ssh/id" H test tests/app_test.sh) && die "harness.sh test <file> must run sandboxed too: $out"
+fi
+out=$(LEAN_GATE_UNSANDBOXED=1 H test) || die "harness.sh test unsandboxed on request: $out"
+grep -q '^\[WARN\].*lean feature n1 has an open session, but the tests run UNSANDBOXED' <<<"$out" || die "harness.sh test must warn when unsandboxed: $out"
+# Without lean/lib.sh neither can sandbox: both say so instead of running quietly.
+mv "$P/lean/lib.sh" "$WORK/lib.sh.aside"
+out=$(cd "$P" && HOME="$WORK/home" bash init.sh 2>&1)
+grep -q 'WARN.*lean feature n1 is open, but lean/lib.sh is missing' <<<"$out" || { mv "$WORK/lib.sh.aside" "$P/lean/lib.sh"; die "init.sh without lean/lib.sh must warn: $out"; }
+out=$(H test)
+grep -q '^\[WARN\].*lean feature n1 has an open session, but lean/lib.sh is missing' <<<"$out" || { mv "$WORK/lib.sh.aside" "$P/lean/lib.sh"; die "harness.sh test without lean/lib.sh must warn: $out"; }
+mv "$WORK/lib.sh.aside" "$P/lean/lib.sh"
+pass "a paused lean session keeps ./init.sh and harness.sh test sandboxed (or warning, also without lean/lib.sh)"
 
 echo "3. approve-plan"
 out=$(H approve-plan m --by Tester) && die "approve-plan on a feature without a mode"
@@ -169,6 +211,9 @@ pass "approve-plan refuses what it can't approve; risk freezes the acceptance te
 
 echo "4. log-out --lean, normal mode"
 H claim n2 >/dev/null || die "an approved normal --approval feature should claim"
+[ -s "$CACHE/lean/n2/trusted.sha" ] || die "claim should pin the trusted hashes"
+grep -q '  lean/gate.sh$' "$CACHE/lean/n2/trusted.sha" && grep -q '  scripts/harness.sh$' "$CACHE/lean/n2/trusted.sha" \
+  || die "trusted hashes at claim: $(cat "$CACHE/lean/n2/trusted.sha")"
 printf 'hello world\n' > "$P/src/app.txt"
 refused_from=$(syncs)   # every close refused below (plain, --quick, --lean) must not sync
 out=$(H log-out --changes src/app.txt --verification v --closure c) && die "a mode feature must refuse the reviewer path"
@@ -178,18 +223,37 @@ grep -q "close it with 'log-out --lean'" <<<"$out" || die "--quick refusal: $out
 mv "$P/lean/gate.sh" "$P/lean/gate.sh.off"
 refused 'the lean gate is missing' "no gate"
 mv "$P/lean/gate.sh.off" "$P/lean/gate.sh"
+printf '# changed\n' >> "$P/lean/gate.sh"
+refused 'harness-owned files changed since feature n2 was pinned' "a changed lean/gate.sh"
+refused 'lean/gate.sh' "the changed file is named"
+cp "$TOOLKIT_DIR/lean/gate.sh" "$P/lean/gate.sh"
 mv "$P/docs/features/n2.md" "$WORK/n2.md"
 refused 'MISSING: docs/features/n2.md' "missing doc"
 mv "$WORK/n2.md" "$P/docs/features/n2.md"
 grep -q 'LEAN: refused' <<<"$(q "SELECT entry FROM session_log_entries;")" || die "a refusal must be logged"
 printf 'bye\n' > "$P/src/app.txt"
 refused 'SUITE FAILS' "failing suite"
+printf 'hello world\n' > "$P/src/app.txt"
+if [ "$have_sbx" = 1 ]; then   # the gate log-out --lean runs reads under the sessions' rules
+  out=$(LEAN_PROBE="$WORK/home/.ssh/id" lean_out) && die "log-out --lean's suite must not read ~/.ssh: $out"
+  grep -q 'probe .* unreadable' <<<"$out" || die "sandboxed suite in log-out --lean: $out"
+fi
 printf 'hello world\n' > "$P/src/app.txt"; printf 'x\n' > "$P/src/extra.txt"
 refused 'src/extra.txt' "file outside **Files**"
 rm "$P/src/extra.txt"
 printf '  assert grep -q hello src/app.txt\n' > "$P/tests/app_test.sh"
 refused 'ASSERTION LINES REMOVED FROM tests/app_test.sh' "removed assertion not listed"
 doc n2 src/app.txt tests/app_test.sh -- tests/app_test.sh
+g commit -q --allow-empty -m moved || die "empty commit"
+refused 'HEAD moved: it is .*base commit is' "a commit since the session base"
+# lean/run.sh gate defaults to the same base (session-base), so it sees the moved HEAD too.
+[ "$(H session-base n2)" = "$(q "SELECT substr(entry, 17) FROM session_log_entries WHERE entry LIKE '[harness] BASE: %' AND session_id=(SELECT id FROM session_log WHERE closed_at IS NULL AND feature_id=(SELECT id FROM features WHERE name='n2'));")" ] \
+  && [ -n "$(H session-base n2)" ] && [ -z "$(H session-base n1)" ] || die "session-base: '$(H session-base n2)'"
+RUN() { (cd "$P" && HOME="$WORK/home" bash lean/run.sh "$@") 2>&1; }
+out=$(RUN gate n2) && die "run.sh gate should fail on a moved HEAD: $out"
+grep -q 'HEAD MOVED' <<<"$out" || die "run.sh gate moved-HEAD message: $out"
+g reset -q --soft HEAD~1
+out=$(RUN gate n2) || die "run.sh gate on the base should pass: $out"
 out=$(lean_out) && die "closing without ./init.sh in the session"
 grep -q 'lean gate passed' <<<"$out" && grep -q 'init.sh has not run' <<<"$out" || die "gate pass then init refusal expected: $out"
 [ "$(syncs)" = "$refused_from" ] || die "a refused close (plain, --quick, --lean) must not sync the mirror"
@@ -205,7 +269,19 @@ g add -A && g commit -qm n2 >/dev/null
 pass "log-out --lean refuses each failing check (logged) and closes once the gate and ./init.sh pass"
 
 echo "5. log-out --lean, risk mode"
+rm "$CACHE/frozen/r1.sha"   # lost (or the project moved): claim writes it again from the database
+# allowed_domains opens the gate's network: log-out --lean must say so (sandbox.sh's [WARN]).
+jq '.lean.allowed_domains = ["registry.npmjs.org"]' "$P/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$P/.harness.json"
 H claim r1 >/dev/null || die "an approved risk feature should claim"
+[ "$(cat "$CACHE/frozen/r1.sha")" = "$expected" ] || die "claim should write the frozen manifest again"
+if [ "$have_sbx" = 1 ]; then   # ./init.sh runs the suite under the same rules while r1 is open
+  out=$(cd "$P" && LEAN_PROBE="$WORK/home/.ssh/id" HOME="$WORK/home" bash init.sh 2>&1) && die "init.sh's suite must not read ~/.ssh: $out"
+  grep -q "lean feature r1 is open: the verification command runs under its sessions' sandbox rules" <<<"$out" \
+    && grep -q 'probe .* unreadable' "$P/progress/test_last.log" || die "init.sh with a lean feature open: $out"
+  out=$(cd "$P" && LEAN_PROBE="$WORK/home/.ssh/id" LEAN_GATE_UNSANDBOXED=1 HOME="$WORK/home" bash init.sh 2>&1)
+  grep -q 'runs UNSANDBOXED (LEAN_GATE_UNSANDBOXED=1)' <<<"$out" && grep -q 'Verification command passed' <<<"$out" \
+    || die "init.sh unsandboxed on request: $out"
+fi
 printf 'hello risk\n' > "$P/src/app.txt"
 H record-init pass >/dev/null
 refused 'r1.review.md' "missing review report"
@@ -227,6 +303,11 @@ refused 'someone rewrote it' "rewritten ~/.cache manifest"
 H record-init pass >/dev/null
 out=$(lean_out) || die "risk mode with everything in order should close: $out"
 [ "$(q "SELECT status FROM features WHERE name='r1';")" = done ] || die "r1 should be done"
+if [ "$have_sbx" = 1 ]; then
+  grep -q '^\[WARN\].*lean gate: lean/sandbox.sh --seatbelt: lean.allowed_domains is set' <<<"$out" \
+    || die "log-out --lean must show sandbox.sh's [WARN] about allowed_domains: $out"
+fi
+jq 'del(.lean.allowed_domains)' "$P/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$P/.harness.json"
 pass "risk mode also needs the review report, an unchanged tree from the reviewer and the frozen tests intact"
 
 echo "6. close path tied to the mode"

@@ -27,13 +27,13 @@ think of.
 1. **Plan**: the planner follows `lean/instructions/planning.md`. When approval applies, the leader
    runs `scripts/harness.sh approve-plan <name> --by <name>` right after the user approves; `claim`
    refuses until then. In risk mode that also hashes the acceptance tests into
-   `~/.cache/harness/<slug>/frozen/<name>.sha` (and the database), outside the project.
+   `<lean state>/frozen/<name>.sha` (and the database), outside the project (see "Sandbox" > "State").
 2. **Freeze check** (risk mode): `lean/run.sh freeze <name>` shows the frozen tests fail before
    implementation (without the harness, it also writes the manifest).
 3. **Implement**: `lean/run.sh implement <name>`.
 4. **Review**: `lean/run.sh review <name>`.
 5. **Fix** (when the review asks for changes or the gate fails): `lean/run.sh fix <name>`.
-6. **Gate**: `lean/run.sh gate <name>`: suite green; no assertion removed from an existing test file
+6. **Gate**: `lean/run.sh gate <name>`: `HEAD` still the base commit; suite green; no assertion removed from an existing test file
    unless the document lists it under **Changed tests**; every changed file listed under **Files**;
    risk mode: the frozen tests unchanged and passing.
 
@@ -45,24 +45,33 @@ this way; `set-mode <name> none` before any review puts it back on the reviewer 
 
 ## Sandbox
 
-Every session `run.sh` opens is sandboxed (`lean/sandbox.sh`): Bash writes only in the project and the
-temp dir, no network except localhost and `lean.allowed_domains`, no reads of private folders, other
-projects or the frozen manifests. A plain `claude-mini` started by hand is **not** sandboxed; the gate
-still catches a changed frozen test, because the manifest lives outside the project.
+Threat model, details and known limits: [`SECURITY.md`](SECURITY.md). The sandbox guards against
+mistakes and secret leaks by a cooperative model, not against a model trying to escape.
 
-- **Symlinks and git worktrees.** The resolved target of each symlink at the project's top level (a
-  worktree's `harness.db`, `scripts/`, `migrations/`… pointing into the main worktree) and the project's
-  git directories (`.git` file or dir, `git rev-parse --git-dir`, `--git-common-dir`) are readable, so
-  a worktree or a project in a repository's subfolder can read its links and run `git status`/`git diff`.
-  Read only: writes stay in the project and the temp dir, and a link into a private folder, the frozen
-  manifests (`~/.cache/harness`) or another project's transcripts stays denied (`sandbox.sh` names it on
-  stderr). Only links git knows are read through: committed at `HEAD` and unchanged, or ignored or
-  excluded (`link-worktree` excludes its links). An untracked, non-ignored link, which a session could
-  have planted for the next one, stays unreadable and is named on stderr.
-- **Session environment.** `RUSTC_WRAPPER` and `CARGO_BUILD_RUSTC_WRAPPER` are empty, so cargo runs
-  `rustc` directly: `sccache` can't reach its server from the sandbox ("Operation not permitted"), and
-  builds are slower without its cache. `GIT_OPTIONAL_LOCKS=0`, so `git status`/`git diff` don't write
-  the index (in a worktree it lives outside the project). Sessions never commit.
+- **What runs sandboxed.** Every session `run.sh` opens (`lean/sandbox.sh`), and the code those
+  sessions leave when the harness runs it: the gate's suite, `run.sh freeze`, `./init.sh` and
+  `scripts/harness.sh test` while a lean feature is open (`sandbox-exec` on macOS; elsewhere, or with
+  `LEAN_GATE_UNSANDBOXED=1`, unsandboxed with a `[WARN]`; a `sandbox-exec` that can't apply the
+  profile fails the gate instead). A `claude-mini` started by hand, or a suite you start directly,
+  is not.
+- **Reads.** `$HOME` is denied but for the project, toolchains and package caches,
+  `lean.allowed_read`, the git directories and the targets of top-level links git tracks or ignores
+  (a worktree's `harness.db`, `scripts/`… pointing into the main worktree; an untracked, non-ignored
+  link stays unreadable and is named on stderr). Credentials never open.
+- **Writes.** Only in the project and the temp dir; the harness-owned files, the git state and
+  `CLAUDE.md` / `.claude/` anywhere are write-denied, and the harness-owned files' hashes are pinned
+  per feature (a changed one stops the next step: delete `<lean state>/lean/<name>/trusted.sha` to
+  accept a change you made yourself).
+- **Network.** Localhost and `lean.allowed_domains`; unix sockets only in the project and the local
+  database sockets.
+- **Environment.** Secret-looking variables are dropped (`lean.env_passthrough` keeps one);
+  `RUSTC_WRAPPER`/`CARGO_BUILD_RUSTC_WRAPPER` empty (sccache can't reach its server),
+  `GIT_OPTIONAL_LOCKS=0`, `GIT_CONFIG_GLOBAL=/dev/null` (a suite that commits sets its own identity).
+  Sessions keep Claude Code's own `ANTHROPIC_*` / `CLAUDE_*`.
+- **State.** `~/.cache/harness/projects/<folder>-<hash of the resolved path>` (`lean/lib.sh`): risk
+  mode's frozen manifests, the pinned hashes and run results. Moving the project starts a new folder;
+  `claim` writes the manifest and the pins again from the database. State kept under
+  `~/.cache/harness/<slug>` by an older version is copied over once.
 - **Paths in the plan** are relative to the project directory, even when it is a subfolder of its
   repository. A path starting with the project's folder in the repository is read from the repository
   root only when nothing is at it inside the project (rule in `lean/instructions/planning.md`). Any
@@ -78,6 +87,9 @@ still catches a changed frozen test, because the manifest lives outside the proj
 | `risk_questions` | `backend` | list in `lean/risk-questions/`; a project's own `docs/risk-questions.md` wins |
 | `acceptance_dir` | `acceptance` | where risk-mode acceptance tests live (outside `src/` and `tests/`, so the planner may write them) |
 | `allowed_domains` | `[]` | hosts the sandboxed sessions may reach besides localhost |
+| `allowed_read` | `[]` | paths (`~` expanded, `..` normalised, links resolved) the sessions and the gate may read in `$HOME` besides the toolchain list; an entry reaching credentials or the lean state is refused whole |
+| `allowed_mach` | `[]` | mach service names the gate's commands may look up besides `LEAN_MACH_ALLOW` in `sandbox.sh` (`LEAN_MACH_NEVER` is refused: LaunchServices, Apple Events, the pasteboard, securityd, `cfprefsd.agent`, …) |
+| `env_passthrough` | `[]` | secret-looking environment variables (`DATABASE_URL`, `NPM_TOKEN`, …) the sessions and the gate's commands keep |
 
 Tools: `claude[:<model>]`, `claude-mini` (the user's fish function, which holds the MiniMax
 credentials). `codex` is designed (design §10) but not built.

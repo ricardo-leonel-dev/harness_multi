@@ -34,7 +34,8 @@
 #                                              risk feature, or a normal one with --approval; claim refuses those until
 #                                              it ran. Risk mode also freezes <lean.acceptance_dir>/<name>.* (default
 #                                              acceptance/) with shasum -a 256 into the feature and into
-#                                              ~/.cache/harness/<slug>/frozen/<name>.sha (what lean/run.sh reads);
+#                                              <lean state>/frozen/<name>.sha (what lean/run.sh reads; the state is
+#                                              keyed by the project's resolved path, lean/lib.sh);
 #                                              refuses with no acceptance tests
 #   set-request <feature_number|name> <text>  store/replace a feature's verbatim user request
 #   drop-sdd <feature_number|name> <reason>   turn a pending sdd=1 feature into sdd=0 before any spec exists
@@ -109,6 +110,9 @@
 #                                              (GPT-5)") to take precedence.
 #                                              (best-effort: also pushes notion_status_in_progress to the
 #                                              feature's source Notion page, if it has a source_id)
+#                                              A feature with a lean mode also gets the harness-owned files'
+#                                              hashes pinned afresh, and in risk mode its
+#                                              approved manifest written again, in the lean state (lean/lib.sh)
 #                                              Prints the feature's work folder, progress/<name>/: every handoff
 #                                              (impl.md, quick.md, review.md, escalate.md, logs) goes there, and
 #                                              log-out deletes it once the feature is done
@@ -172,10 +176,13 @@
 #                                              approval wins; requested changes are never bypassed
 #   log-out --lean --changes <item...> --verification <text> --closure <text>
 #                                              features with a lean mode only (they refuse the reviewer path and
-#                                              --quick): runs lean/gate.sh against the session base — suite green, no
+#                                              --quick): refused when HEAD moved off the session base (a commit);
+#                                              runs lean/gate.sh against the session base — suite green, no
 #                                              assertion removed unless listed under **Changed tests**, every changed
 #                                              file under **Files**; risk mode: the acceptance tests match the manifest
 #                                              frozen at approve-plan (refused when the ~/.cache copy was rewritten),
+#                                              and the harness-owned files match the hashes pinned at claim;
+#                                              the suite runs under the sessions' sandbox rules (lean/gate.sh);
 #                                              docs/features/<name>.review.md has a VERDICT line and the reviewer
 #                                              changed no files. A refusal is logged (LEAN: refused) and means "fix";
 #                                              a pass records review_status 'lean', then the ./init.sh check applies
@@ -189,6 +196,8 @@
 #   delete-feature <TARGET>                   soft-delete a feature and its specs (sets deleted_at) — refuses
 #                                              while the feature has an open or paused session
 #   status                                     print current project/feature/session state
+#   session-base <name>                       print the BASE commit recorded on the open (not paused) session of
+#                                              feature <name> (nothing without one); lean/run.sh's default base
 #   mock-data-generate --version VERSION [--selection FILE] [--extends VERSION]
 #   mock-data-check --version VERSION [--offline] [--database DB]
 #   mock-data-load --version VERSION --target-database harness_mock_NAME
@@ -1013,11 +1022,40 @@ resolve_approver() {
   printf '%s' "$by"
 }
 
-# lean_state_dir — ~/.cache/harness/<slug>, where lean/run.sh keeps the frozen
-# manifests and run results: outside the project, so a sandboxed session can't
-# read or change them. Same slug rule as lean/run.sh.
-lean_state_dir() {
-  printf '%s/.cache/harness/%s' "$HOME" "${PROJECT_SLUG:-$(basename "$(pwd)")}"
+# The lean flow's shared helpers (lean/lib.sh, next to scripts/): lean_state_dir <project>
+# is where lean/run.sh keeps the frozen manifests and trusted-file hashes,
+# outside the project and keyed by its resolved path, so a sandboxed session can't read,
+# change or redirect them. Without lean/ the same folder is computed here.
+if [ -f "$SCRIPT_DIR/../lean/lib.sh" ]; then
+  # shellcheck source=../lean/lib.sh
+  . "$SCRIPT_DIR/../lean/lib.sh"
+else
+  lean_state_dir() {
+    local real; real=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+    printf '%s/.cache/harness/projects/%s-%s\n' "$HOME" "$(basename "$real")" "$(printf '%s' "$real" | shasum -a 256 | cut -c1-12)"
+  }
+fi
+
+# lean_claim_pin <feature_id> [keep] — for a feature with a lean mode, at claim: pins the
+# trusted files' hashes afresh (keep: only what isn't pinned yet, on
+# a resume), and in risk mode writes the manifest frozen at approve-plan to the lean state
+# again, so lean/run.sh finds risk mode even if the state folder was lost or the project
+# moved. Best-effort: a failure is a [WARN] (lean/run.sh pins before its first session).
+lean_claim_pin() {
+  local fid="$1" keep="${2:-}" row name mode frozen state
+  row=$(db "SELECT name, COALESCE(mode, ''), COALESCE(plan_frozen, '') FROM features WHERE id=$fid;")
+  IFS='|' read -r name mode frozen <<<"$row"
+  [ -n "$mode" ] || return 0
+  if ! declare -F lean_pin >/dev/null; then warn "lean/lib.sh is missing: hashes not pinned at claim"; return 0; fi
+  lean_adopt_legacy "$(pwd)"
+  state=$(lean_state_dir "$(pwd)") || return 0
+  if [ "$mode" = risk ] && [ -n "$frozen" ]; then
+    frozen=$(db "SELECT plan_frozen FROM features WHERE id=$fid;")
+    mkdir -p "$state/frozen" && printf '%s\n' "$frozen" > "$state/frozen/$name.sha" \
+      || warn "could not write $state/frozen/$name.sha"
+  fi
+  if [ -n "$keep" ]; then lean_pin "$(pwd)" "$name" || warn "could not pin feature $name's hashes in $state/lean/$name"
+  else lean_pin "$(pwd)" "$name" --again || warn "could not pin feature $name's hashes in $state/lean/$name"; fi
 }
 
 # approve-plan <TARGET> [--by NAME] — record the human's approval of a lean
@@ -1068,7 +1106,8 @@ WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
     [ "${#files[@]}" -gt 0 ] || { fail "not approvable: no acceptance tests for $name in $acc_dir/ (risk mode freezes them at approval)"; exit 1; }
     manifest=$(shasum -a 256 "${files[@]}") || { fail "not approvable: could not hash the acceptance tests"; exit 1; }
     frozen_sql="'$(sql_escape "$manifest")'"
-    frozen_file="$(lean_state_dir)/frozen/$name.sha"
+    ! declare -F lean_adopt_legacy >/dev/null || lean_adopt_legacy "$(pwd)"
+    frozen_file="$(lean_state_dir "$(pwd)")/frozen/$name.sha"
     if [ -f "$frozen_file" ] && [ "$(cat "$frozen_file")" != "$manifest" ]; then
       warn "replacing $frozen_file: it differs from the acceptance tests being approved"
     fi
@@ -1332,6 +1371,7 @@ WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
 VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")', '$now');"
   record_session_base "$(current_session_id)"
+  lean_claim_pin "$feature_id"
   ok "claimed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
   ok "work folder: $(feature_dir "$(jq -r '.[0].name' <<<"$updated")")/ (handoffs and logs; deleted at log-out)"
 
@@ -1415,6 +1455,7 @@ SQL
   fi
 
   record_session_base "$new_sid" "$prev_sid"
+  lean_claim_pin "$fid" keep
   local row
   row=$(sqlite3 -json "$DB_PATH" "SELECT feature_number, name, title, source_id FROM features WHERE id=$fid;")
   ok "resumed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$row") (new session $new_sid; ${resumed#RESUMED: })"
@@ -1987,7 +2028,22 @@ lean_gate() {
     LEAN_REASONS+=("not a git repository: the gate can't measure the change"); return
   fi
   IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
-  state="$(lean_state_dir)"
+  # The gate measures uncommitted work from the session's BASE: a commit made since
+  # (sessions never commit) would escape it, so HEAD must still be that commit.
+  local recorded head
+  recorded=$(db "SELECT substr(entry, 17) FROM session_log_entries WHERE session_id=$sid AND entry LIKE '[harness] BASE: %' ORDER BY id LIMIT 1;")
+  head=$(git rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ -n "$recorded" ] && [ "$head" != "$recorded" ]; then
+    LEAN_REASONS+=("HEAD moved: it is ${head:-unborn}, the feature's base commit is $recorded — sessions never commit; undo the commit(s) keeping the work uncommitted (git reset --soft $recorded) and log out again")
+  fi
+  ! declare -F lean_adopt_legacy >/dev/null || lean_adopt_legacy "$(pwd)"
+  state="$(lean_state_dir "$(pwd)")"
+  # The gate, the harness and their config are what decide this close: they must be the
+  # ones pinned at claim (sessions can't write them; this catches a change made anyway).
+  local changed
+  if declare -F lean_check_trusted >/dev/null && ! changed=$(lean_check_trusted "$(pwd)" "$name" 2>&1); then
+    LEAN_REASONS+=("$(printf '%s' "$changed" | tr '\n' ' ' | sed 's/  */ /g')")
+  fi
   local args=(--base "$base")
   if [ "$mode" = risk ]; then
     local frozen cached="$state/frozen/$name.sha"
@@ -2095,6 +2151,7 @@ $LEAN_REPORT}")', '$(now_iso)');"
     db_exec "UPDATE session_log SET review_status='lean', reviewed_by='harness (lean gate)', reviewed_at='$(now_iso)' WHERE id=$sid;
 INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] LEAN: passed (mode $lmode) — $last_line")', '$(now_iso)');"
     ok "lean gate passed (mode $lmode): $last_line"
+    printf '%s\n' "$LEAN_REPORT" | grep '^\[WARN\]' | sed 's/^\[WARN\] *//' | while IFS= read -r w; do warn "lean gate: $w"; done
     review_status=lean
   fi
 
@@ -2697,6 +2754,19 @@ cmd_forget() {
   ok "forgot #$id"
 }
 
+# session-base <name> — the BASE commit claim recorded on the feature's open
+# session, so lean/run.sh gates against the same commit log-out --lean does.
+cmd_session_base() {
+  local name="${1:-}" pid
+  [ -n "$name" ] || { fail "usage: session-base <feature_name>"; exit 1; }
+  pid="$(project_id)"
+  db "SELECT substr(e.entry, 17) FROM session_log_entries e
+  JOIN session_log s ON s.id = e.session_id JOIN features f ON f.id = s.feature_id
+  WHERE s.project_id='$(sql_escape "$pid")' AND s.closed_at IS NULL AND s.deleted_at IS NULL
+    AND s.paused_at IS NULL AND f.name='$(sql_escape "$name")' AND f.deleted_at IS NULL AND e.entry LIKE '[harness] BASE: %'
+  ORDER BY e.id LIMIT 1;"
+}
+
 cmd_status() {
   local pid; pid="$(project_id)"
   echo "project: $PROJECT_SLUG ($pid)"
@@ -2813,7 +2883,10 @@ FROM features f WHERE f.id = (SELECT feature_id FROM session_log
 # re-running. With files and .harness.json::test_targeted_command set, runs
 # only those (its {files} placeholder is replaced with the shell-quoted paths,
 # {files:FLAG} with "FLAG path" per file, or they're appended if it has
-# neither); otherwise runs verify_command.
+# neither); otherwise runs verify_command. While a feature with a lean mode has an open
+# session (paused or not), the tree may hold code its sandboxed sessions wrote: the command
+# runs under their rules, like ./init.sh and the gate (lean/lib.sh lean_sandboxed), or with a
+# [WARN] where the platform can't sandbox it.
 cmd_test() {
   local targeted verify cmd quoted="" f
   targeted="$(config '.test_targeted_command' '')"
@@ -2840,9 +2913,30 @@ cmd_test() {
     exit 1
   fi
 
-  local log="progress/test_last.log" rc
+  local log="progress/test_last.log" rc lean_feature runner=plain
   mkdir -p progress
-  { printf '$ %s\n' "$cmd"; bash -c "$cmd"; } > "$log" 2>&1
+  lean_feature=$(db "SELECT f.name FROM session_log s JOIN features f ON f.id = s.feature_id
+    WHERE s.project_id='$(sql_escape "$(project_id)")' AND s.closed_at IS NULL AND s.deleted_at IS NULL
+    AND f.mode IS NOT NULL AND f.deleted_at IS NULL ORDER BY s.paused_at IS NOT NULL, s.id DESC LIMIT 1;" 2>/dev/null || true)
+  if [ -n "$lean_feature" ]; then
+    if ! declare -F lean_sandbox_prepare >/dev/null; then
+      warn "lean feature $lean_feature has an open session, but lean/lib.sh is missing: the tests run UNSANDBOXED with your full permissions"
+    else
+      lean_sandbox_prepare "$(pwd)"
+      [ -z "$LEAN_SANDBOX_WARN" ] || while IFS= read -r w; do warn "${w#\[WARN\] }"; done <<<"$LEAN_SANDBOX_WARN"
+      case "$LEAN_SANDBOX" in
+        sandbox) ok "lean feature $lean_feature has an open session: the tests run under its sessions' sandbox rules"; runner=lean ;;
+        unsandboxed:*) warn "lean feature $lean_feature has an open session, but the tests run UNSANDBOXED (${LEAN_SANDBOX#unsandboxed: }): code its sessions wrote runs with your full permissions"; runner=lean ;;
+        *) fail "lean feature $lean_feature has an open session and its sandbox can't run here (${LEAN_SANDBOX#broken: }): run outside any sandbox, or set LEAN_GATE_UNSANDBOXED=1"
+           return 1 ;;
+      esac
+    fi
+  fi
+  if [ "$runner" = lean ]; then
+    { printf '$ %s\n' "$cmd"; lean_sandboxed "$(pwd)" "$cmd"; } > "$log" 2>&1
+  else
+    { printf '$ %s\n' "$cmd"; bash -c "$cmd"; } > "$log" 2>&1
+  fi
   rc=$?
   if [ "$rc" -eq 0 ]; then
     ok "tests passed: $cmd (log: $log)"
@@ -2997,6 +3091,7 @@ main() {
     log-out) cmd_log_out "$@" ;;
     delete-feature) cmd_delete_feature "$@" ;;
     status) cmd_status ;;
+    session-base) cmd_session_base "$@" ;;
     snapshot) cmd_snapshot ;;
     sync) cmd_sync ;;
     notion-check) cmd_notion_check ;;
