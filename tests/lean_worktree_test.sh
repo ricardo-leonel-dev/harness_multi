@@ -5,7 +5,7 @@
 #   1. lean/sandbox.sh lets the session read the resolved target of each top-level symlink
 #      git tracks or ignores (not one it neither tracks nor ignores, nor a re-pointed committed
 #      one) and the git directories (carved out of the denied siblings, added to allowRead,
-#      Edit denied), keeps private folders and the frozen manifests denied even through a
+#      given a Read allow rule, Edit denied), keeps private folders and the frozen manifests denied even through a
 #      symlink, and sets the session environment.
 #   2. With sandbox-exec (macOS), the same rules applied for real: cat through the
 #      symlinks and git status/diff in the worktree and in a plain repo's subfolder
@@ -16,8 +16,10 @@
 #      repository root) unless git ignores it, a prefixed path names the project's own
 #      file when one is there (p/p/x), the frozen manifest is read relative to the project,
 #      a moved HEAD fails, and a user's diff.relative=true changes nothing.
-#   4. lean/run.sh through a fake claude (it records the settings): an excluded link reads, an
-#      untracked one doesn't. The git state is write-denied: in sandbox-exec, git commit/add
+#   4. lean/run.sh through a fake claude (it records the settings and runs their SessionStart
+#      hooks): an excluded link reads, an untracked one doesn't; the session's TMPDIR is a fresh
+#      folder under the allowWrite temp dir, removed after a headless session, and a SessionStart
+#      hook already in the settings is kept. The git state is write-denied: in sandbox-exec, git commit/add
 #      and a write to .git/info/exclude fail, git init can't create the project's missing .git,
 #      status/diff/log/show work.
 #   5. The lean state (trusted hashes, frozen manifest) is keyed by the project's resolved
@@ -127,6 +129,21 @@ for t in "$MAIN/backend/harness.db" "$MAIN/backend/lean" "$MAIN/backend/migratio
 done
 grep -qxF "Edit(/$MAIN/backend/harness.db)" <<<"$rules" && grep -qxF "Edit(/$MAIN/backend/lean/**)" <<<"$rules" \
   || die "symlink targets should get Edit deny rules: $rules"
+# Read allow rules: Claude Code's Read tool asks before following a link out of the project
+# (a headless session can't answer), so each read-through target gets one; the Edit deny stays.
+allows=$(jq -r '.permissions.allow[]?' <<<"$S")
+for t in "$MAIN/backend/harness.db" "$WT/.git"; do
+  grep -qxF "Read(/$t)" <<<"$allows" || die "file target $t should get a Read allow rule: $allows"
+  grep -qxF "Edit(/$t)" <<<"$rules" || die "file target $t should keep its Edit deny rule: $rules"
+done
+for t in "$MAIN/backend/lean" "$MAIN/backend/migrations" "$DEV/shared" "$DEV/shared2" "$MAIN/.git" "$MAIN/.git/worktrees/mono-wt"; do
+  grep -qxF "Read(/$t/**)" <<<"$allows" || die "dir target $t should get a Read allow rule: $allows"
+  grep -qxF "Edit(/$t/**)" <<<"$rules" || die "dir target $t should keep its Edit deny rule: $rules"
+done
+for t in "$DEV/other" "$HOME/.ssh" "$HOME/.cache/harness" "$MAIN/backend/unlinked.txt"; do
+  grep -qF "Read(/$t" <<<"$allows" && die "$t must get no Read allow rule: $allows"
+done
+grep -vqE '^Read\(/' <<<"$allows" && die "permissions.allow should hold only Read rules: $allows"
 denied "$MAIN/backend/unlinked.txt" || die "the rest of the main worktree should stay denied"
 denied "$DEV/other/secret.txt" || die "a sibling project should stay denied"
 denied "$HOME/.cache/harness/t/frozen" && denied "$HOME/.ssh" || die "frozen manifests and ~/.ssh should stay denied"
@@ -139,10 +156,11 @@ grep -q "$P/planted .*neither tracks nor ignores" "$WORK/sandbox.err" || die "th
 rm "$P/tracked" && ln -s "$DEV/other" "$P/tracked"
 S3=$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$P" 2>/dev/null) || die "sandbox.sh with a re-pointed link"
 jq -r '.sandbox.filesystem.allowRead[]' <<<"$S3" | grep -qxF "$DEV/other" && die "a re-pointed committed link must not open its new target"
+jq -r '.permissions.allow[]?' <<<"$S3" | grep -qF "Read(/$DEV/other" && die "a re-pointed committed link must get no Read allow rule"
 rm "$P/tracked" && ln -s "$DEV/shared2" "$P/tracked"
 [ "$(jq -c .env <<<"$S")" = '{"RUSTC_WRAPPER":"","CARGO_BUILD_RUSTC_WRAPPER":"","GIT_OPTIONAL_LOCKS":"0","GIT_CONFIG_GLOBAL":"/dev/null","SSH_AUTH_SOCK":""}' ] \
   || die "session env: $(jq -c .env <<<"$S")"
-pass "known symlink targets and git dirs readable; untracked or re-pointed links, private and frozen stay denied; session env set"
+pass "known symlink targets and git dirs readable (sandbox and Read allow rules); untracked or re-pointed links, private and frozen stay denied; session env set"
 
 # A plain repository whose project is a subfolder: .git sits next to it.
 R="$DEV/plain"; Q="$R/sub"
@@ -152,6 +170,7 @@ S2=$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$Q" 2>/dev/null) || die "sandbox.sh on
 jq -r '.sandbox.filesystem.allowRead[]' <<<"$S2" | grep -qxF "$R/.git" || die "a subfolder project should read the repo's .git"
 deny=$(jq -r '.sandbox.filesystem.denyRead[]' <<<"$S2")
 denied "$R/.git" && die "the repo's .git should not be denied"
+jq -r '.permissions.allow[]?' <<<"$S2" | grep -qxF "Read(/$R/.git/**)" || die "a subfolder project should get a Read allow rule for the repo's .git"
 pass "a project in a repository's subfolder can read the repository's .git"
 
 echo "2. sandbox-exec"
@@ -313,6 +332,11 @@ cat > "$WORK/bin/claude" <<SH
 #!/usr/bin/env bash
 env > "$WORK/claude.env"
 while [ \$# -gt 0 ]; do [ "\$1" = --settings ] && printf '%s' "\$2" > "$WORK/settings.json"; shift; done
+# The SessionStart hooks, run as Claude Code would; the exported TMPDIR is kept if it exists.
+: > "$WORK/hook.env"; rm -f "$WORK/session_tmp"
+jq -r '.hooks.SessionStart[]?.hooks[]?.command' "$WORK/settings.json" | while IFS= read -r c; do
+  CLAUDE_ENV_FILE="$WORK/hook.env" sh -c "\$c"; done
+d=\$(sed -n 's/^export TMPDIR=//p' "$WORK/hook.env"); [ -n "\$d" ] && [ -d "\$d" ] && printf '%s' "\$d" > "$WORK/session_tmp"
 echo '{}'
 SH
 chmod +x "$WORK/bin/claude"
@@ -331,6 +355,33 @@ jq -r '.sandbox.filesystem.denyWrite[]' <<<"$S4" | grep -qxF "$R2/.git" || die "
 jq -r '.permissions.deny[]' <<<"$S4" | grep -qxF "Edit(/$R2/.git/**)" || die "the project's .git should get an Edit deny rule"
 jq -r '.sandbox.filesystem.denyWrite[]' <<<"$S2" | grep -qxF "$Q/.git" || die "a subfolder project's .git (absent) should be write-denied"
 pass "run.sh: known links read, untracked ones don't; the git state is write-denied"
+
+# Claude Code's own TMPDIR is denied: a SessionStart hook exports a fresh one, writable (under
+# the settings' allowWrite temp dir), removed once a headless session ends.
+[ "$(jq '[.hooks.SessionStart[]?.hooks[]?] | length' <<<"$S4")" = 1 ] || die "one SessionStart hook expected: $(jq -c .hooks <<<"$S4")"
+[ "$(grep -c '^export TMPDIR=' "$WORK/hook.env")" = 1 ] || die "the hook should export TMPDIR once: $(cat "$WORK/hook.env")"
+[ -s "$WORK/session_tmp" ] || die "the exported TMPDIR should exist during the session: $(cat "$WORK/hook.env")"
+st=$(cat "$WORK/session_tmp"); st=${st%/}
+case "$(basename "$st")" in lean-session.*) ;; *) die "unexpected session TMPDIR: $st" ;; esac
+under=0
+for w in $(jq -r '.sandbox.filesystem.allowWrite[]' <<<"$S4"); do
+  wr=$(cd "$w" 2>/dev/null && pwd -P) || continue
+  case "$st/" in "$wr"/*) [ "$wr" != "$R2" ] && under=1 ;; esac
+done
+[ "$under" = 1 ] || die "the session TMPDIR $st should be under the allowWrite temp dir: $(jq -c .sandbox.filesystem.allowWrite <<<"$S4")"
+[ ! -e "$st" ] || { rm -rf "$st"; die "the headless session's TMPDIR should be removed afterwards"; }
+# A SessionStart hook the settings already hold is kept (a stand-in sandbox.sh emits one).
+cp -R "$TOOLKIT_DIR/lean" "$WORK/lean-hook"
+printf '#!/usr/bin/env bash\necho %s\n' "'{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"true\"}]}]}}'" \
+  > "$WORK/lean-hook/sandbox.sh"
+printf 'sys\n' > "$WORK/sys.md"
+PATH="$WORK/bin:$PATH" bash "$WORK/lean-hook/adapters/claude.sh" "$R2" headless - "$WORK/sys.md" go "$WORK/hook.json" \
+  2>"$WORK/run.err" || die "adapter with a SessionStart hook: $(cat "$WORK/run.err")"
+SH4=$(cat "$WORK/settings.json")
+[ "$(jq -c '[.hooks.SessionStart[].hooks[].command][0]' <<<"$SH4")" = '"true"' ] && \
+  [ "$(jq '[.hooks.SessionStart[].hooks[]] | length' <<<"$SH4")" = 2 ] || die "the existing SessionStart hook should be kept first: $(jq -c .hooks <<<"$SH4")"
+[ -s "$WORK/session_tmp" ] || die "the TMPDIR hook should still run after an existing one"
+pass "sessions get a TMPDIR of their own (SessionStart hook, writable, removed after headless); existing hooks kept"
 
 if [ "$have_sbx" = 1 ]; then
   head2=$(git -C "$R2" rev-parse HEAD)

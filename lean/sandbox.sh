@@ -344,6 +344,7 @@ settings=$(to_json ${private[@]+"${private[@]}"} | jq -c \
   --arg project "$project" --argjson domains "$domains" \
   --argjson allow_read "$(to_json "${allow_read[@]}")" \
   --argjson edit_deny "$(to_json ${edit_deny[@]+"${edit_deny[@]}"})" \
+  --argjson targets "$(to_json ${targets[@]+"${targets[@]}"})" \
   --argjson deny_write "$(to_json "${write_deny[@]}")" \
   --argjson socks "$(to_json "${socks[@]}")" --argjson claude_tmps "$(to_json ${claude_tmps[@]+"${claude_tmps[@]}"})" \
   --arg tmp "$tmp" '
@@ -361,7 +362,10 @@ settings=$(to_json ${private[@]+"${private[@]}"} | jq -c \
       },
       env: { RUSTC_WRAPPER: "", CARGO_BUILD_RUSTC_WRAPPER: "", GIT_OPTIONAL_LOCKS: "0",
              GIT_CONFIG_GLOBAL: "/dev/null", SSH_AUTH_SOCK: "" },
-      permissions: { deny: ([ $private[] | select(. as $p | ($claude_tmps | any(.[]; . == $p)) | not) | "Read(/\(.)/**)", "Edit(/\(.)/**)" ] + $edit_deny) }
+      # The read-through targets lie outside the working directory: without an allow rule an
+      # interactive session asks before its Read tool follows a link there, at every link.
+      permissions: { allow: [ $targets[] | "Read(/\(.))", "Read(/\(.)/**)" ],
+                     deny: ([ $private[] | select(. as $p | ($claude_tmps | any(.[]; . == $p)) | not) | "Read(/\(.)/**)", "Edit(/\(.)/**)" ] + $edit_deny) }
     }')
 if [ "$seatbelt" = 0 ]; then printf '%s\n' "$settings"; exit 0; fi
 
