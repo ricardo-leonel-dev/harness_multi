@@ -52,7 +52,8 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
   `mysql.sock`, `redis*.sock`, `memcached*.sock` in `/private/tmp`) and the gate run's own `TMPDIR`:
   no Docker API, no ssh-agent.
 - **Writes.** Only in the project and the temp dir (the gate's commands: the project, `/private/tmp`,
-  `/dev` and a fresh `TMPDIR` of their own). Inside the project, the harness-owned paths are
+  `/dev` and a fresh `TMPDIR` of their own). A session's `TMPDIR` is a fresh folder in the user temp
+  dir (a SessionStart hook; Claude Code's own temp folder is denied), removed after a headless session. Inside the project, the harness-owned paths are
   write-denied by name (`lean/`, `scripts/`, `.harness.json`, the database and its journals,
   `init.sh`, `harness/`, `.claude/`, `.codex/`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`,
   `.mcp.json`) and their hashes are pinned per feature: a changed one stops the next `run.sh` step

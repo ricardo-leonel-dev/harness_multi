@@ -25,6 +25,18 @@ if [ "${LEAN_RUNNER:-}" = mini ]; then
   model_args=()
 fi
 settings="$("$LEAN_DIR/sandbox.sh" "$project")"
+# Claude Code points the sandboxed Bash's TMPDIR at its own temp folder, which the sandbox
+# denies (other sessions' scratchpads), so linkers and test runners fail there. A SessionStart
+# hook re-exports TMPDIR to a fresh folder of this session's in the user temp dir (writable),
+# added after any SessionStart hooks the settings already hold.
+tmp_root="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp)"; tmp_root="${tmp_root%/}"
+session_tmp=$(mktemp -d "$tmp_root/lean-session.XXXXXX") && session_tmp=$(cd "$session_tmp" && pwd -P) \
+  || { echo "lean: can't create the session temp folder in $tmp_root" >&2; exit 1; }
+# Removed when this script ends (headless, or a refusal before the session); an interactive
+# session replaces it (exec), so its folder stays for the OS to clear with the user temp dir.
+trap 'chmod -R u+w "$session_tmp" 2>/dev/null; rm -rf "$session_tmp"' EXIT
+settings=$(jq -c --arg c "printf 'export TMPDIR=%s/\\n' '$session_tmp' >> \"\$CLAUDE_ENV_FILE\"" \
+  '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{hooks: [{type: "command", command: $c}]}])' <<<"$settings")
 # shellcheck source=../lib.sh
 . "$LEAN_DIR/lib.sh"
 lean_env_args "$project" '^(ANTHROPIC_|CLAUDE_)' || exit 1

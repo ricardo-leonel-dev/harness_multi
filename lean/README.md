@@ -57,11 +57,13 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 - **Reads.** `$HOME` is denied but for the project, toolchains and package caches,
   `lean.allowed_read`, the git directories and the targets of top-level links git tracks or ignores
   (a worktree's `harness.db`, `scripts/`… pointing into the main worktree; an untracked, non-ignored
-  link stays unreadable and is named on stderr). Credentials never open.
+  link stays unreadable and is named on stderr). Those targets and git directories also get a
+  `Read` allow rule, so Claude Code's Read tool follows the links without asking. Credentials never open.
 - **Writes.** Only in the project and the temp dir; the harness-owned files, the git state and
   `CLAUDE.md` / `.claude/` anywhere are write-denied, and the harness-owned files' hashes are pinned
   per feature (a changed one stops the next step: delete `<lean state>/lean/<name>/trusted.sha` to
-  accept a change you made yourself).
+  accept a change you made yourself). Claude Code's own temp folder is denied, so each session gets
+  a fresh `TMPDIR` in the user temp dir (a SessionStart hook; removed after a headless session).
 - **Network.** Localhost and `lean.allowed_domains`; unix sockets only in the project and the local
   database sockets.
 - **Environment.** Secret-looking variables are dropped (`lean.env_passthrough` keeps one);
