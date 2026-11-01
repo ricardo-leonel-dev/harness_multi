@@ -17,7 +17,9 @@
 #      changed or untracked, non-ignored file there fails, named by its repository-root path);
 #   6. one pass over every path in the project, git-ignored ones included: no nested CLAUDE.md /
 #      CLAUDE.local.md (any case) and no file in a nested .claude/ folder is there unless git
-#      tracks it unchanged at <rev>; no path holds a newline; and every folder can be listed
+#      tracks it unchanged at <rev> or it was already there, with the same content, when the
+#      feature was first pinned (<lean state>/lean/<name>/nested.sha, lean/lib.sh lean_pin: an
+#      npm package that ships a .claude/ folder); no path holds a newline; and every folder can be listed
 #      (read and search permission, find without error).
 # File names stay NUL-separated from git and find to these checks (-z), so a name with a
 # newline or a non-ASCII one (core.quotePath) is never split or quoted.
@@ -223,7 +225,10 @@ fi
 #   ones into the next session, and the profile's write-deny matches only the name a file is
 #   written under (a folder renamed into place, or a session's Bash, gets past it). Refused
 #   unless git tracks it, unchanged (no filters applied), at the base revision, as a regular
-#   file. The top-level ones are hash-pinned (lean_check_trusted) and write-denied.
+#   file, or it is a regular file recorded with the same hash in the feature's nested.sha
+#   (lean_pin: what was there before the feature's first run; no such file, as for a feature
+#   pinned by an older version: only the git check). The top-level ones are hash-pinned
+#   (lean_check_trusted) and write-denied.
 # - a path with a newline in it: names are compared line by line elsewhere (the plan, git's
 #   name lists), where such a name could pose as another.
 # - folders the gate can't list (no read or search permission, or any find error): what they
@@ -237,6 +242,14 @@ tracked_unchanged() {
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
   blob=$(git rev-parse --verify --quiet "$base_sha:$prefix$1" 2>/dev/null) || return 1
   [ "$(git cat-file -t "$blob" 2>/dev/null)" = blob ] && [ "$(git hash-object --no-filters -- "$1" 2>/dev/null)" = "$blob" ]
+}
+# in_nested_baseline <path> — a regular file (not a link) recorded with the same hash in nested.sha.
+nested_base="$(lean_state_dir "$project")/lean/$name/nested.sha"
+in_nested_baseline() {
+  local line
+  [ -f "$nested_base" ] && [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  line=$(lean_nested_line "$1" 2>/dev/null) && [ -n "$line" ] || return 1
+  grep -qxF -- "$line" "$nested_base"
 }
 scan_list=$(mktemp "$gate_tmp/scan.XXXXXX") && scan_err=$(mktemp "$gate_tmp/scan-err.XXXXXX") \
   || { echo "can't create a temp file in $gate_tmp" >&2; exit 2; }
@@ -254,12 +267,12 @@ while IFS= read -r -d '' l; do
   case "/$l/" in
     /.claude/*) ;;   # the top-level one: hash-pinned and write-denied
     */.[Cc][Ll][Aa][Uu][Dd][Ee]/*)
-      if [ -L "$l" ] || { [ ! -d "$l" ] && ! tracked_unchanged "$l"; }; then memory_out="$memory_out$l$nl"; fi ;;
+      if [ -L "$l" ] || { [ ! -d "$l" ] && ! tracked_unchanged "$l" && ! in_nested_baseline "$l"; }; then memory_out="$memory_out$l$nl"; fi ;;
   esac
   case "${l##*/}" in
     [Cc][Ll][Aa][Uu][Dd][Ee].[Mm][Dd]|[Cc][Ll][Aa][Uu][Dd][Ee].[Ll][Oo][Cc][Aa][Ll].[Mm][Dd])
       if [ ! -d "$l" ] && ! { [ "$nested" = 0 ] && { [ "$l" -ef CLAUDE.md ] || [ "$l" -ef CLAUDE.local.md ]; }; } \
-         && ! tracked_unchanged "$l"; then
+         && ! tracked_unchanged "$l" && ! in_nested_baseline "$l"; then
         memory_out="$memory_out$l$nl"
       fi ;;
   esac
@@ -278,7 +291,7 @@ if [ -n "$unlisted_out" ] || [ "$find_rc" != 0 ] || [ -s "$scan_err" ]; then
 fi
 if [ -n "$memory_out" ]; then
   fail=1
-  echo "CLAUDE.md / CLAUDE.local.md OR NESTED .claude/ FILES NOT TRACKED AT THE BASE, OR CHANGED (Claude Code would load them; remove them, git-ignored or not):"
+  echo "CLAUDE.md / CLAUDE.local.md OR NESTED .claude/ FILES NOT TRACKED AT THE BASE, OR CHANGED (Claude Code would load them; remove them, git-ignored or not; ones already there when the feature was first pinned, unchanged, pass):"
   printf '%s' "$memory_out" | awk '!seen[$0]++'
 fi
 

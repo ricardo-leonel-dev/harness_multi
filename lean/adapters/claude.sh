@@ -35,7 +35,26 @@ session_tmp=$(mktemp -d "$tmp_root/lean-session.XXXXXX") && session_tmp=$(cd "$s
 # Removed when this script ends (headless, or a refusal before the session); an interactive
 # session replaces it (exec), so its folder stays for the OS to clear with the user temp dir.
 trap 'chmod -R u+w "$session_tmp" 2>/dev/null; rm -rf "$session_tmp"' EXIT
-settings=$(jq -c --arg c "printf 'export TMPDIR=%s/\\n' '$session_tmp' >> \"\$CLAUDE_ENV_FILE\"" \
+env_lines="'export TMPDIR=$session_tmp/'"
+# chrome-headless-shell (CHROME_BIN, else Puppeteer's copy in ~/.cache) can't register
+# Chromium's rendezvous service under Claude Code's sandbox; --single-process skips it. The
+# session gets CHROME_BIN pointing at a wrapper that adds the flag (the gate's own profile
+# allows the service, so the gate runs the browser as the project configures it). A path
+# holding a single quote is skipped (the wrapper quotes it in single quotes).
+chrome="${CHROME_BIN:-}"
+if [ -z "$chrome" ]; then
+  for f in "$HOME"/.cache/chrome-headless-shell/chrome-headless-shell/*/chrome-headless-shell-*/chrome-headless-shell; do
+    if [ -x "$f" ]; then chrome="$f"; fi
+  done
+fi
+case "$chrome" in *"'"*) chrome= ;; esac
+if [ -n "$chrome" ] && [ "$(basename "$chrome")" = chrome-headless-shell ] && [ -x "$chrome" ]; then
+  mkdir -p "$session_tmp/bin"
+  printf '#!/bin/sh\nexec %s --single-process "$@"\n' "'$chrome'" > "$session_tmp/bin/chrome-headless-shell"
+  chmod +x "$session_tmp/bin/chrome-headless-shell"
+  env_lines="$env_lines 'export CHROME_BIN=$session_tmp/bin/chrome-headless-shell'"
+fi
+settings=$(jq -c --arg c "printf '%s\\n' $env_lines >> \"\$CLAUDE_ENV_FILE\"" \
   '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{hooks: [{type: "command", command: $c}]}])' <<<"$settings")
 # shellcheck source=../lib.sh
 . "$LEAN_DIR/lib.sh"

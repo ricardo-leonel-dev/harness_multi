@@ -35,8 +35,12 @@ think of.
 5. **Fix** (when the review asks for changes or the gate fails): `lean/run.sh fix <name>`.
 6. **Gate**: `lean/run.sh gate <name>`: `HEAD` still the base commit; suite green; no assertion removed from an existing test file
    unless the document lists it under **Changed tests**; every changed file listed under **Files**;
-   risk mode: the frozen tests unchanged and passing.
+   no nested `CLAUDE.md` / `CLAUDE.local.md` or nested `.claude/` file (git-ignored ones included)
+   unless git tracks it unchanged at the base or it was already there, unchanged, when the feature
+   was first pinned (`<lean state>/lean/<name>/nested.sha`: e.g. an npm package that ships a
+   `.claude/` folder); risk mode: the frozen tests unchanged and passing.
 
+Every step refuses a name without `docs/features/<name>.md` before pinning anything.
 Steps 3–5 open an interactive session (`--headless` for `claude -p`). Close with
 `scripts/harness.sh log-out --lean --changes … --verification … --closure …`: it runs the gate
 itself against the commit the session started from (risk mode: with the manifest frozen at
@@ -90,8 +94,17 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 | `acceptance_dir` | `acceptance` | where risk-mode acceptance tests live (outside `src/` and `tests/`, so the planner may write them) |
 | `allowed_domains` | `[]` | hosts the sandboxed sessions may reach besides localhost |
 | `allowed_read` | `[]` | paths (`~` expanded, `..` normalised, links resolved) the sessions and the gate may read in `$HOME` besides the toolchain list; an entry reaching credentials or the lean state is refused whole |
-| `allowed_mach` | `[]` | mach service names the gate's commands may look up besides `LEAN_MACH_ALLOW` in `sandbox.sh` (`LEAN_MACH_NEVER` is refused: LaunchServices, Apple Events, the pasteboard, securityd, `cfprefsd.agent`, …) |
+| `allowed_mach` | `[]` | mach service names the gate's commands may look up besides `LEAN_MACH_ALLOW` in `sandbox.sh` (`LEAN_MACH_NEVER` is refused: LaunchServices, Apple Events, the pasteboard, securityd, `cfprefsd.agent`, …); Chromium's own rendezvous service (`org.chromium.Chromium.MachPortRendezvousServer.<pid>`) is always allowed |
 | `env_passthrough` | `[]` | secret-looking environment variables (`DATABASE_URL`, `NPM_TOKEN`, …) the sessions and the gate's commands keep |
+
+Frontends tested with Karma (or another headless-browser runner): Google Chrome can't start in the
+gate (it needs the window server and LaunchServices), so point the runner at Puppeteer's
+`chrome-headless-shell` (`CHROME_BIN`), launched with `--no-sandbox --use-mock-keychain
+--password-store=basic`, and add its folder (e.g. `~/.cache/chrome-headless-shell`) to
+`lean.allowed_read`. Sessions get this automatically: when `CHROME_BIN` (else the last copy found
+in `~/.cache/chrome-headless-shell`) is a `chrome-headless-shell`, the session's `CHROME_BIN`
+points at a wrapper that adds `--single-process`, since Claude Code's sandbox won't let it
+register its rendezvous service (the gate runs the browser unwrapped).
 
 Tools: `claude[:<model>]`, `claude-mini` (the user's fish function, which holds the MiniMax
 credentials). `codex` is designed (design §10) but not built.

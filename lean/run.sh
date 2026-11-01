@@ -12,7 +12,8 @@
 # kept under the project's lean state, lean/lib.sh), --base <rev> (gate base; default the
 # open harness session's recorded BASE for this feature, else HEAD).
 # Run from the project directory. A feature is in risk mode once it has been frozen.
-# Every step first checks the harness-owned files against the hashes pinned for the feature
+# Every step first checks that docs/features/<name>.md exists (nothing is pinned otherwise),
+# then checks the harness-owned files against the hashes pinned for the feature
 # (lean/lib.sh lean_check_trusted) and refuses when one changed.
 #
 # Roles come from .harness.json::lean: implementer (default "claude-mini"), reviewer
@@ -43,6 +44,10 @@ project="$(pwd)"
 # The state is keyed by the project's resolved path (lean/lib.sh), not by anything in the
 # project a session could edit: the trusted hashes and the risk-mode manifest are found the
 # same way whatever .harness.json says.
+# The feature must exist before anything is pinned under its name (a typo would pin hashes
+# for a feature that isn't there).
+doc="docs/features/$name.md"
+[ -f "$doc" ] || { echo "no feature document: $doc (plan it first: lean/instructions/planning.md)" >&2; exit 2; }
 lean_adopt_legacy "$project"
 state=$(lean_state_dir "$project")
 lean_check_trusted "$project" "$name" || exit 3
@@ -58,7 +63,6 @@ acc_dir=$(conf '.lean.acceptance_dir // "acceptance"'); acc_dir="${acc_dir%/}"
 
 frozen="$state/frozen/$name.sha"
 runs="$state/lean"
-doc="docs/features/$name.md"
 review_file="docs/features/$name.review.md"
 risk=0; [ -f "$frozen" ] && risk=1
 
@@ -117,8 +121,6 @@ tree_fingerprint() {
 }
 
 no_human="No human is available during this step: do not ask questions; decide, note it in the document, and finish. Do not commit or push."
-
-[ -f "$doc" ] || [ "$step" = gate ] || { echo "no feature document: $doc (plan it first: lean/instructions/planning.md)" >&2; exit 2; }
 
 case "$step" in
   freeze)
