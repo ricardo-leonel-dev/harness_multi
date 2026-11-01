@@ -9,10 +9,16 @@ At most about 60 lines. Start with the user's request verbatim, then these secti
 
 - **Decisions**: what the request does not say and how you decided it, one line each.
 - **Out of scope**: what this feature must not change.
-- **Files**: every file the feature creates or changes, one path per line (tests included). The gate
-  compares this list with the files actually changed: name paths exactly.
+- **Files**: every file the feature creates or changes, one path per line (tests included), relative
+  to the project directory (the one with `.harness.json`, even when it is a subfolder of the git
+  repository: `src/x.rs`, not `backend/src/x.rs`). The gate compares this list with the files
+  actually changed: name paths exactly. Its rule: a path names `<project>/<path>`; only when nothing
+  is there (no file, no change) and the path starts with the project's folder in the repository
+  (`git rev-parse --show-prefix`) is it read from the repository root, which still lands inside the
+  project. Files outside the project directory can't be listed: changing one fails the gate.
 - **Changed tests**: existing test files whose assertions must change because the feature changes
-  what they pin (a format, a status, a rule), one path per line with the reason; "none" otherwise.
+  what they pin (a format, a status, a rule), one path per line with the reason, relative to the
+  project directory too; "none" otherwise.
   The gate fails on removed assertions in any other existing test file.
 - **Steps**: the order of the work.
 - **Risks**: answer each question in the project's risk question file (`lean/risk-questions/<list>.md`

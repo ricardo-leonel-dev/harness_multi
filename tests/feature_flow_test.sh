@@ -11,6 +11,7 @@
 #      supersede delete it, and the quick gate also finds a handoff named by
 #      feature number or in the older flat progress/quick_<x>.md form.
 #   4. log-out's DIFF says tests=n/a when the project keeps tests/ out of git.
+#      With no mirror configured, record-review/log-out stay quiet about the sync.
 #   5. A Notion push that fails on the network names notion-push, which retries it.
 #   6. tick-tasks ticks several tasks.md checkboxes at once and logs them.
 #   7. link-worktree shares the harness with a git worktree but keeps
@@ -92,10 +93,23 @@ out=$(H claim plain) || die "claim plain: $out"
 grep -q 'work folder: progress/plain/' <<<"$out" || die "claim should name the work folder: $out"
 mkdir -p "$P/progress/plain" && printf 'handoff\n' > "$P/progress/plain/impl.md"
 printf 'b\n' >> "$P/src/app.ts"
-H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
-H log-out --changes src/app.ts --verification v --closure c >/dev/null || die "log-out plain"
+# A mirror sync that fails: log-out still closes, warns, and its exit code stays 0.
+SYNCS="$WORK/syncs"; : > "$SYNCS"
+printf '#!/usr/bin/env bash\necho sync >> "%s"\necho "mirror down" >&2\nexit 3\n' "$SYNCS" > "$P/scripts/sync_postgres.sh"
+syncs() { wc -l < "$SYNCS" | tr -d ' '; }
+H record-init pass >/dev/null
+# Refused closes don't sync: no review yet, and --quick on a normal-size feature.
+H log-out --changes src/app.ts --verification v --closure c >/dev/null && die "log-out without a review must refuse"
+H log-out --quick --changes src/app.ts --verification v --closure c >/dev/null && die "log-out --quick on a normal feature must refuse"
+[ "$(syncs)" = 0 ] || die "a refused close must not sync the mirror (got $(syncs))"
+H record-review approved --by human:tester >/dev/null
+[ "$(syncs)" = 1 ] || die "record-review should sync the mirror once (got $(syncs))"
+out=$(H log-out --changes src/app.ts --verification v --closure c) || die "log-out plain (a failing sync must not fail it): $out"
+[ "$(syncs)" = 2 ] || die "log-out should sync the mirror once (got $(syncs))"
+grep -q '^\[WARN\].*mirror sync failed' <<<"$out" || die "a failing sync should warn: $out"
+[ "$(q "SELECT status FROM features WHERE name='plain';")" = done ] || die "plain should be done despite the failing sync"
 [ ! -e "$P/progress/plain" ] || die "log-out must delete progress/plain/"
-pass "claim names progress/<name>/ and log-out deletes it"
+pass "claim names progress/<name>/ and log-out deletes it; log-out syncs the mirror, a failing sync only warns, a refused close doesn't sync"
 
 H add-feature --name gone --title Gone >/dev/null && mkdir -p "$P/progress/gone" && printf 'split\n' > "$P/progress/gone/split.md"
 H supersede gone --by spec_one --reason "absorbed" >/dev/null || die "supersede"
@@ -111,19 +125,30 @@ for form in number flat; do
   if [ "$form" = number ]; then mkdir -p "$P/progress/$num"; f="$P/progress/$num/quick.md"; else f="$P/progress/quick_$num.md"; fi
   printf 'Cambio: x\nArchivos: src/app.ts\nRisk: none\nMotivo: t\n' > "$f"
   H record-init pass >/dev/null
+  before=$(syncs)
   out=$(H log-out --quick --changes src/app.ts --verification v --closure c) || die "quick gate should accept the $form-named handoff: $out"
+  [ "$(syncs)" = $((before + 1)) ] || die "log-out --quick should sync the mirror once"
   g add -A && g commit -qm "q $form" >/dev/null
 done
-pass "the quick gate accepts handoffs named by feature number and the older flat form"
+pass "the quick gate accepts handoffs named by feature number and the older flat form; log-out --quick syncs"
 
 echo "4. DIFF with ignored tests"
 printf 'tests/\n' >> "$P/.gitignore" && g add -A && g commit -qm ignore-tests >/dev/null
 H add-feature --name t_ignored --title T >/dev/null && H claim t_ignored >/dev/null
 printf 'd\n' >> "$P/src/app.ts" && printf 'test\n' > "$P/tests/app.test.ts"
-H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
+# The real sync script from here on: with no mirror configured the lifecycle commands stay quiet,
+# a configured mirror that fails (its env vars unset) still warns.
+cp "$TOOLKIT_DIR/scripts/sync_postgres.sh" "$P/scripts/"
+cp "$P/.harness.json" "$WORK/harness.json"
+jq '. + {supabase_url_env: "T_NO_SUCH_URL", supabase_key_env: "T_NO_SUCH_KEY"}' "$WORK/harness.json" > "$P/.harness.json"
+H record-init pass >/dev/null
+out=$(H record-review approved --by human:tester) || die "record-review t_ignored: $out"
+grep -q '^\[WARN\].*T_NO_SUCH_URL' <<<"$out" || die "a configured mirror that fails should warn: $out"
+cp "$WORK/harness.json" "$P/.harness.json"
 out=$(H log-out --changes src/app.ts tests/app.test.ts --verification v --closure c) || die "log-out t_ignored: $out"
+grep -qi 'mirror\|supabase' <<<"$out" && die "with no mirror configured log-out should not mention the sync: $out"
 grep -q 'tests=n/a (tests/ is ignored by git)' <<<"$out" || die "DIFF should say tests are not visible: $out"
-pass "DIFF reports tests=n/a when tests/ is ignored by git"
+pass "DIFF reports tests=n/a when tests/ is ignored by git; the sync is quiet without a mirror and warns when a configured one fails"
 
 echo "5. Notion push failure"
 mkdir -p "$WORK/bin" && printf '#!/bin/sh\necho "curl: (6) Could not resolve host" >&2\nexit 6\n' > "$WORK/bin/curl" && chmod +x "$WORK/bin/curl"
