@@ -4,7 +4,8 @@
 #
 # State: the lean flow keeps each project's pinned state outside the project, in
 # lean_state_dir: frozen/<name>.sha (risk mode's acceptance manifest), lean/<name>/trusted.sha
-# (the hashes of the harness-owned files the flow runs or trusts) and run results. The folder is keyed by the project's resolved path,
+# (the hashes of the harness-owned files the flow runs or trusts), lean/<name>/nested.sha (the
+# nested instruction files there before the feature's first run) and run results. The folder is keyed by the project's resolved path,
 # never by .harness.json (a session could edit that and point the next step at fresh state).
 
 LEAN_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,15 +54,45 @@ lean_trusted_manifest() {
   )
 }
 
+# lean_nested_line <path> — "<sha256>  <path>", the line lean_nested_manifest records for a
+# file and lean/gate.sh compares against.
+lean_nested_line() { shasum -a 256 -- "$1"; }
+
+# lean_nested_manifest <project> — lean_nested_line for each nested instruction file already in
+# the project, sorted: the files lean/gate.sh's scan looks for (CLAUDE.md / CLAUDE.local.md below
+# the top level, any case, and files in a .claude/ folder below the top level; git-ignored ones
+# included, .git not entered), regular files only (a link always fails the gate), no name with
+# a newline.
+lean_nested_manifest() {
+  (
+    cd "$1" || exit 1
+    find . -name .git -prune -o \( -iname claude.md -o -iname claude.local.md -o -ipath './?*/.claude/*' \) \
+      -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
+      f="${f#./}"
+      case "$f" in *$'\n'*|.claude/*) continue ;; */*) ;; *) continue ;; esac
+      lean_nested_line "$f"
+    done | LC_ALL=C sort
+  )
+}
+
 # lean_pin <project> <name> [--again] — pins the hashes of the trusted files under
-# <state>/lean/<name>/trusted.sha when they aren't pinned yet (--again: afresh).
+# <state>/lean/<name>/trusted.sha when they aren't pinned yet (--again: afresh). With them, and
+# only when it isn't there yet (--again: afresh), it records the nested instruction files
+# already in the project in <state>/lean/<name>/nested.sha (lean_nested_manifest): the gate
+# accepts those as they are (an npm package that ships a .claude/ folder), not new or changed
+# ones. Deleting trusted.sha to accept a harness-file change keeps nested.sha.
 lean_pin() {
-  local project="$1" name="$2" again="${3:-}" dir
+  local project="$1" name="$2" again="${3:-}" dir n
   dir="$(lean_state_dir "$project")/lean/$name" || return 1
   mkdir -p "$dir" || return 1
   [ "$again" = --again ] || [ ! -f "$dir/trusted.sha" ] || return 0
   lean_trusted_manifest "$project" > "$dir/trusted.tmp" && mv "$dir/trusted.tmp" "$dir/trusted.sha" || return 1
   echo "[lean] pinned the hashes of $(wc -l < "$dir/trusted.sha" | tr -d ' ') harness-owned file(s) in $dir/trusted.sha" >&2
+  if [ "$again" = --again ] || [ ! -f "$dir/nested.sha" ]; then
+    lean_nested_manifest "$project" > "$dir/nested.tmp" && mv "$dir/nested.tmp" "$dir/nested.sha" || return 1
+    n=$(wc -l < "$dir/nested.sha" | tr -d ' ')
+    [ "$n" = 0 ] || echo "[lean] recorded $n nested CLAUDE.md / .claude/ file(s) already in the project in $dir/nested.sha (the gate accepts them unchanged)" >&2
+  fi
 }
 
 # lean_check_trusted <project> <name> — fails, naming the files, when a trusted file changed

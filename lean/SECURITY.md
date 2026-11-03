@@ -62,7 +62,12 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
 - **Instructions for the next session.** Nested `CLAUDE.md` / `CLAUDE.local.md` and `.claude/`
   folders are write-denied (Edit globs; a regex in the profile), and the gate fails on any of them,
   git-ignored ones included, that git doesn't track unchanged at the base. It also fails on paths
-  with a newline and on folders it can't list.
+  with a newline and on folders it can't list. Files present before the feature's first run are
+  trusted as they were (`<lean state>/lean/<name>/nested.sha`, written with the first pin);
+  re-pinning by hand after a session (`claim` afresh, `lean_pin --again`, or deleting `trusted.sha`
+  of a feature pinned before `nested.sha` existed) trusts what the session left, so only re-pin
+  when you know why. The same holds for a new feature after one whose gate never passed: what
+  that one's sessions left is there at the new feature's first pin.
 - **The state the gate trusts** (risk mode's frozen manifest, the pinned hashes) lives in
   `~/.cache/harness/projects/<folder>-<hash of the resolved path>`, outside the project and keyed
   by something a session can't edit.
@@ -70,7 +75,9 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
   allowlist (`LEAN_MACH_ALLOW` in `sandbox.sh`, plus `lean.allowed_mach`), which never includes
   LaunchServices (`open`), Apple Events (`osascript`), the pasteboard or cfprefsd's agent (other
   apps' preferences): denying those services by name alone was not enough, `open` still launched an
-  app outside the sandbox. Also no `/bin/launchctl`,
+  app outside the sandbox. One prefix is allowed besides: Chromium's rendezvous service
+  (`org.chromium.Chromium.MachPortRendezvousServer.<pid>`), which headless Chromium's children
+  need to reach their parent. Also no `/bin/launchctl`,
   no signals to processes outside the sandbox, no write or `ioctl` on a terminal. The gate's commands
   run in a session of their own (`setsid`: no controlling terminal), with stdin from `/dev/null` and
   no inherited descriptor above 2; when they end, whatever is left in their process group is killed

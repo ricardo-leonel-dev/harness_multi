@@ -420,7 +420,9 @@ agent=()
 # stderr when lean.allowed_mach lists one): LaunchServices (`open`), Apple Events (`osascript`),
 # the pasteboard, cfprefsd's agent (any app's preferences), securityd, the window server, the
 # Dock, TCC, launchd's XPC services, login items, nsurlsessiond, Spotlight, distributed
-# notifications.
+# notifications. Allowed by prefix: Chromium's own rendezvous service (its child processes
+# look up the one their parent registered, named after its pid), which headless Chromium test
+# runners (chrome-headless-shell under Karma, Playwright, Puppeteer) need to start.
 LEAN_MACH_ALLOW="com.apple.analyticsd com.apple.bsd.dirhelper
   com.apple.cfprefsd.daemon com.apple.diagnosticd com.apple.logd com.apple.logd.events
   com.apple.system.DirectoryService.libinfo_v1 com.apple.system.logger
@@ -469,5 +471,6 @@ jq -nr --argjson deny_read "$(paths denyRead --deny)" --argjson allow_read "$(pa
   ($agent[] | "(deny network-outbound (remote unix-socket (literal \(tojson))))"),
   "(deny mach-lookup)",
   "(allow mach-lookup \([$mach[] | "(global-name \(tojson))"] | join(" ")))",
+  "(allow mach-lookup (global-name-prefix \"org.chromium.Chromium.MachPortRendezvousServer.\"))",
   "(deny process-exec (literal \"/bin/launchctl\") (signing-identifier \"com.apple.xpc.launchctl\"))",
   "(deny signal)", "(allow signal (target same-sandbox))"'

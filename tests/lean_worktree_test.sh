@@ -19,7 +19,8 @@
 #   4. lean/run.sh through a fake claude (it records the settings and runs their SessionStart
 #      hooks): an excluded link reads, an untracked one doesn't; the session's TMPDIR is a fresh
 #      folder under the allowWrite temp dir, removed after a headless session, and a SessionStart
-#      hook already in the settings is kept. The git state is write-denied: in sandbox-exec, git commit/add
+#      hook already in the settings is kept; chrome-headless-shell (CHROME_BIN or ~/.cache) gets
+#      a --single-process wrapper as CHROME_BIN, other browsers don't. The git state is write-denied: in sandbox-exec, git commit/add
 #      and a write to .git/info/exclude fail, git init can't create the project's missing .git,
 #      status/diff/log/show work.
 #   5. The lean state (trusted hashes, frozen manifest) is keyed by the project's resolved
@@ -51,7 +52,8 @@
 #      nothing into the terminal; sandbox.sh's [WARN] (allowed_domains) reaches gate.sh and
 #      run.sh gate; CLAUDE.local.md and nested CLAUDE.md / CLAUDE.local.md are write-denied
 #      and trusted.
-#  10. Mach services are denied but for an allowlist (lean.allowed_mach can't add
+#  10. Mach services are denied but for an allowlist and Chromium's rendezvous prefix (a name
+#      under it 1102, other Chromium/Chrome names 1100; lean.allowed_mach can't add
 #      LEAN_MACH_NEVER; checked on the generated profile), lookups of LaunchServices, lsd,
 #      Apple Events and the pasteboard refused (1100), launchctl (help only, directly, through
 #      a link or a copy), cfprefsd's agent (a lookup: 1100 inside, 0 outside),
@@ -66,7 +68,10 @@
 #      credentials; lean_in_group runs nothing without perl. The gate refuses a nested
 #      CLAUDE.md / CLAUDE.local.md or .claude/ file not tracked unchanged at the base
 #      (carried into an ignored folder by a rename, any case), paths with a newline and
-#      folders it can't list; lean_run_lock runs one sandboxed run of a project at a time.
+#      folders it can't list, but accepts one already there, unchanged, when the feature was
+#      first pinned (nested.sha; changed or new ones fail; lean_pin --again refreshes the
+#      record); run.sh pins nothing for a name without docs/features/<name>.md;
+#      lean_run_lock runs one sandboxed run of a project at a time.
 #
 # Usage: bash tests/lean_worktree_test.sh   (exits non-zero on the first failure)
 
@@ -319,6 +324,7 @@ grep -q 'FROZEN ACCEPTANCE TESTS CHANGED' <<<"$out" || die "frozen change: $out"
 pass "gate: the frozen manifest is read relative to the project in both spellings; a changed frozen file fails"
 
 echo "4. run.sh; the git state is read-only"
+unset CHROME_BIN
 # A root-level repository: .git is inside the project. lean/run.sh with a fake claude that
 # keeps the --settings it gets.
 R2="$DEV/rootp"
@@ -337,6 +343,9 @@ while [ \$# -gt 0 ]; do [ "\$1" = --settings ] && printf '%s' "\$2" > "$WORK/set
 jq -r '.hooks.SessionStart[]?.hooks[]?.command' "$WORK/settings.json" | while IFS= read -r c; do
   CLAUDE_ENV_FILE="$WORK/hook.env" sh -c "\$c"; done
 d=\$(sed -n 's/^export TMPDIR=//p' "$WORK/hook.env"); [ -n "\$d" ] && [ -d "\$d" ] && printf '%s' "\$d" > "$WORK/session_tmp"
+# The exported CHROME_BIN (a wrapper living in the session's TMPDIR) is run while it exists.
+rm -f "$WORK/chrome.out"
+c=\$(sed -n 's/^export CHROME_BIN=//p' "$WORK/hook.env"); [ -n "\$c" ] && "\$c" a 'b c' > "$WORK/chrome.out" 2>&1
 echo '{}'
 SH
 chmod +x "$WORK/bin/claude"
@@ -361,6 +370,7 @@ pass "run.sh: known links read, untracked ones don't; the git state is write-den
 [ "$(jq '[.hooks.SessionStart[]?.hooks[]?] | length' <<<"$S4")" = 1 ] || die "one SessionStart hook expected: $(jq -c .hooks <<<"$S4")"
 [ "$(grep -c '^export TMPDIR=' "$WORK/hook.env")" = 1 ] || die "the hook should export TMPDIR once: $(cat "$WORK/hook.env")"
 [ -s "$WORK/session_tmp" ] || die "the exported TMPDIR should exist during the session: $(cat "$WORK/hook.env")"
+grep -q '^export CHROME_BIN=' "$WORK/hook.env" && die "no chrome-headless-shell: no CHROME_BIN expected: $(cat "$WORK/hook.env")"
 st=$(cat "$WORK/session_tmp"); st=${st%/}
 case "$(basename "$st")" in lean-session.*) ;; *) die "unexpected session TMPDIR: $st" ;; esac
 under=0
@@ -382,6 +392,33 @@ SH4=$(cat "$WORK/settings.json")
   [ "$(jq '[.hooks.SessionStart[].hooks[]] | length' <<<"$SH4")" = 2 ] || die "the existing SessionStart hook should be kept first: $(jq -c .hooks <<<"$SH4")"
 [ -s "$WORK/session_tmp" ] || die "the TMPDIR hook should still run after an existing one"
 pass "sessions get a TMPDIR of their own (SessionStart hook, writable, removed after headless); existing hooks kept"
+
+# chrome-headless-shell (CHROME_BIN, else Puppeteer's copy in ~/.cache) is wrapped with
+# --single-process; anything else is left alone. Fake browsers that print their arguments.
+fakebrowser() { mkdir -p "$(dirname "$1")" && printf '#!/bin/sh\nprintf "%%s\\n" "$0" "$@"\n' > "$1" && chmod +x "$1"; }
+adapt() { PATH="$WORK/bin:$PATH" bash "$TOOLKIT_DIR/lean/adapters/claude.sh" "$R2" headless - "$WORK/sys.md" go "$WORK/hook.json" \
+  2>"$WORK/run.err" || die "adapter (CHROME_BIN=${CHROME_BIN:-}): $(cat "$WORK/run.err")"
+  [ "$(grep -c '^export TMPDIR=' "$WORK/hook.env")" = 1 ] || die "TMPDIR should be exported once: $(cat "$WORK/hook.env")"; }
+wrapped() {  # <real path>: CHROME_BIN is the session's wrapper, which runs the real one with --single-process first
+  [ "$(grep -c '^export CHROME_BIN=' "$WORK/hook.env")" = 1 ] || die "CHROME_BIN should be exported once for $1: $(cat "$WORK/hook.env")"
+  cb=$(sed -n 's/^export CHROME_BIN=//p' "$WORK/hook.env")
+  [ "$cb" = "$(cat "$WORK/session_tmp")bin/chrome-headless-shell" ] || die "CHROME_BIN should be the wrapper in the session TMPDIR: $cb"
+  [ "$(cat "$WORK/chrome.out" 2>/dev/null)" = "$(printf '%s\n' "$1" --single-process a 'b c')" ] \
+    || die "the wrapper should exec $1 --single-process and pass the args: $(cat "$WORK/chrome.out" 2>/dev/null)"
+  [ ! -e "$cb" ] || die "the wrapper should go with the headless session's TMPDIR"; }
+unwrapped() { grep -q '^export CHROME_BIN=' "$WORK/hook.env" && die "$1: no CHROME_BIN expected: $(cat "$WORK/hook.env")"; return 0; }
+CH="$HOME/.cache/chrome-headless-shell/chrome-headless-shell/mac arm-131.0/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+fakebrowser "$CH"
+adapt; wrapped "$CH"
+CB="$WORK/my browser/chrome-headless-shell"; fakebrowser "$CB"
+CHROME_BIN="$CB" adapt; wrapped "$CB"
+GC="$WORK/Google Chrome.app/Contents/MacOS/Google Chrome"; fakebrowser "$GC"
+CHROME_BIN="$GC" adapt; unwrapped "CHROME_BIN=Google Chrome"
+QB="$WORK/it's/chrome-headless-shell"; fakebrowser "$QB"
+CHROME_BIN="$QB" adapt; unwrapped "a single quote in the path (skipped)"
+chmod -x "$CH"; adapt; unwrapped "a non-executable chrome-headless-shell"
+rm -rf "$HOME/.cache/chrome-headless-shell"; adapt; unwrapped "no chrome-headless-shell"
+pass "sessions run chrome-headless-shell (CHROME_BIN or ~/.cache, spaces in the path) through a --single-process wrapper; Google Chrome, a quoted path or no shell: CHROME_BIN untouched"
 
 if [ "$have_sbx" = 1 ]; then
   head2=$(git -C "$R2" rev-parse HEAD)
@@ -754,8 +791,17 @@ PY
   # can't launch an app, send an Apple Event or read or change any real state.
   PR=$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$R3" --seatbelt 2>/dev/null)
   grep -qxF '(deny mach-lookup)' <<<"$PR" || die "the profile must deny mach lookups by default"
-  [ "$(grep -c '^(allow mach-lookup' <<<"$PR")" = 1 ] || die "the profile must have one mach allow line: $(grep mach-lookup <<<"$PR")"
-  [ "$(grep -n '^(deny mach-lookup)$' <<<"$PR" | cut -d: -f1)" -lt "$(grep -n '^(allow mach-lookup' <<<"$PR" | cut -d: -f1)" ] || die "the mach allow must follow the deny"
+  # Two allow lines: the named allowlist, and Chromium's rendezvous prefix (headless Chromium's
+  # children look up the service their parent registered under its pid).
+  chromium_rule='(allow mach-lookup (global-name-prefix "org.chromium.Chromium.MachPortRendezvousServer."))'
+  [ "$(grep -c '^(allow mach-lookup' <<<"$PR")" = 2 ] || die "the profile must have two mach allow lines: $(grep mach-lookup <<<"$PR")"
+  [ "$(grep -c '^(allow mach-lookup (global-name "' <<<"$PR")" = 1 ] || die "the profile must have one named mach allow line: $(grep mach-lookup <<<"$PR")"
+  grep -qxF "$chromium_rule" <<<"$PR" || die "the profile must allow Chromium's rendezvous prefix: $(grep mach-lookup <<<"$PR")"
+  [ "$(grep -c 'global-name-prefix' <<<"$PR")" = 1 ] || die "the Chromium rendezvous prefix must be the profile's only mach prefix rule: $(grep global-name-prefix <<<"$PR")"
+  deny_line=$(grep -n '^(deny mach-lookup)$' <<<"$PR" | cut -d: -f1)
+  while IFS= read -r n; do
+    [ "$deny_line" -lt "$n" ] || die "the mach allows must follow the deny"
+  done < <(grep -n '^(allow mach-lookup' <<<"$PR" | cut -d: -f1)
   mach_allow=$(sed -n '/^LEAN_MACH_ALLOW="/,/"$/p' "$TOOLKIT_DIR/lean/sandbox.sh" | sed 's/^LEAN_MACH_ALLOW="//; s/"$//' | tr -s ' \t' '\n\n' | sed '/^$/d')
   mach_never=$(sed -n "s/^LEAN_MACH_NEVER='\(.*\)'$/\1/p" "$TOOLKIT_DIR/lean/sandbox.sh")
   [ -n "$mach_allow" ] && [ -n "$mach_never" ] || die "LEAN_MACH_ALLOW / LEAN_MACH_NEVER not found in sandbox.sh"
@@ -768,6 +814,14 @@ PY
   for m in com.apple.coreservices.launchservicesd com.apple.lsd.mapdb com.apple.lsd.modifydb com.apple.lsd.open \
            com.apple.coreservices.appleevents com.apple.pasteboard.1; do
     grep -qE "$mach_never" <<<"$m" || die "$m should match LEAN_MACH_NEVER"
+    [ "$(sb "$R3" python3 -I "$WORK/mach.py" look "$m")" = 1100 ] || die "sandboxed: the lookup of $m must be denied (1100)"
+  done
+  # Chromium's rendezvous prefix: a missing name under it is allowed and not found (1102), while
+  # other Chromium and Chrome names stay denied (1100). Nothing is registered or launched.
+  [ "$(sb "$R3" python3 -I "$WORK/mach.py" look "org.chromium.Chromium.MachPortRendezvousServer.lean.test.$$")" = 1102 ] \
+    || die "sandboxed: a name under Chromium's rendezvous prefix should be allowed (1102: not found)"
+  for m in org.chromium.Chromium.lean.test.$$ "org.chromium.Chromium.MachPortRendezvousServe.lean.test.$$" \
+           "com.google.Chrome.MachPortRendezvousServer.lean.test.$$" com.google.Chrome.lean.test.$$; do
     [ "$(sb "$R3" python3 -I "$WORK/mach.py" look "$m")" = 1100 ] || die "sandboxed: the lookup of $m must be denied (1100)"
   done
   # launchctl: the profile denies running it, by path and by signing identifier (a link or a
@@ -843,7 +897,7 @@ file-ioctl=$d 1"
   grep -qE 'launchservicesd"|pasteboard\.1"|cfprefsd\.agent"|appleevents"' <<<"$P10" && die "LEAN_MACH_NEVER names must stay denied: $(grep mach-lookup <<<"$P10")"
   grep -q 'mach service com.apple.pasteboard.1 stays denied' "$WORK/m.err" || die "a refused mach service should be named: $(cat "$WORK/m.err")"
   jq 'del(.lean.allowed_mach)' "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"
-  pass "sandboxed (--seatbelt): mach lookups denied but for LEAN_MACH_ALLOW (LaunchServices, lsd, Apple Events, the pasteboard refused), launchctl (help, a link, a copy), signals to outside processes, cfprefsd's agent and terminal writes and ioctls fail; git, python, node and cargo run, writing only in the run's TMPDIR"
+  pass "sandboxed (--seatbelt): mach lookups denied but for LEAN_MACH_ALLOW and Chromium's rendezvous prefix (LaunchServices, lsd, Apple Events, the pasteboard refused), launchctl (help, a link, a copy), signals to outside processes, cfprefsd's agent and terminal writes and ioctls fail; git, python, node and cargo run, writing only in the run's TMPDIR"
 fi
 # The env scrub takes the names from the environment itself (names that aren't shell
 # identifiers, multi-line values), and drops git config and npm auth passed through it; in
@@ -985,6 +1039,43 @@ out=$(gate3) && die "a changed tracked nested .claude file must fail the gate: $
 grep -qx 'src/.claude/commands/x.md' <<<"$out" || die "it should be named: $out"
 g -C "$R3" checkout -q -- src/.claude/commands/x.md
 pass "the gate keeps names NUL-separated (newline names fail, non-ASCII tracked ones pass) and fails on folders it can't list and nested .claude files not tracked unchanged; nested .claude is write-denied"
+# Nested instruction files already in the project when a feature is first pinned (an npm
+# package that ships its own .claude/) pass the gate as they were; changed or new ones fail.
+mkdir -p "$R3/node_modules/pkg/.claude" && echo '{}' > "$R3/node_modules/pkg/.claude/settings.local.json"
+cp "$R3/docs/features/f.md" "$R3/docs/features/g.md"   # the same **Files** (.harness.json, changed by setv)
+run_g() { (cd "$R3" && PATH="$WORK/bin:$PATH" bash "$TOOLKIT_DIR/lean/run.sh" "$@") 2>&1; }
+gate_g() { bash "$TOOLKIT_DIR/lean/gate.sh" "$R3" g 2>&1; }
+out=$(run_g gate g) || die "a nested .claude file there before the first pin should pass the gate: $out"
+grep -q '  node_modules/pkg/.claude/settings.local.json$' "$ST3/lean/g/nested.sha" || die "nested.sha should record it: $(cat "$ST3/lean/g/nested.sha")"
+echo '{"x":1}' > "$R3/node_modules/pkg/.claude/settings.local.json"
+out=$(gate_g) && die "a pinned nested .claude file changed after the pin must fail the gate: $out"
+grep -qx 'node_modules/pkg/.claude/settings.local.json' <<<"$out" || die "the changed file should be named: $out"
+echo '{}' > "$R3/node_modules/pkg/.claude/settings.local.json"
+out=$(gate_g) || die "the file restored to its pinned content should pass: $out"
+echo x > "$R3/node_modules/pkg/.claude/x"
+out=$(gate_g) && die "a nested .claude file created after the pin must fail the gate: $out"
+grep -qx 'node_modules/pkg/.claude/x' <<<"$out" || die "the new .claude file should be named: $out"
+rm "$R3/node_modules/pkg/.claude/x"
+mkdir -p "$R3/node_modules/sub" && echo injected > "$R3/node_modules/sub/CLAUDE.md"
+out=$(gate_g) && die "a nested CLAUDE.md created after the pin must fail the gate: $out"
+grep -qx 'node_modules/sub/CLAUDE.md' <<<"$out" || die "the new CLAUDE.md should be named: $out"
+rm -r "$R3/node_modules/sub"
+# A later step doesn't refresh the record; --again does; without one (an older pin), only the git check.
+echo x > "$R3/node_modules/pkg/.claude/y"
+out=$(run_g gate g) && die "a later run.sh step must not trust a file created after the first pin: $out"
+(. "$TOOLKIT_DIR/lean/lib.sh" && lean_pin "$R3" g --again) 2>/dev/null || die "lean_pin --again"
+out=$(gate_g) || die "lean_pin --again should record what is there now: $out"
+rm "$ST3/lean/g/nested.sha"
+out=$(gate_g) && die "without nested.sha the pre-existing nested file must fail as before: $out"
+grep -qx 'node_modules/pkg/.claude/settings.local.json' <<<"$out" || die "it should be named: $out"
+rm -rf "${R3:?}/node_modules" "$R3/docs/features/g.md" "${ST3:?}/lean/g"
+# A feature name without its document pins nothing, whatever the step.
+for st in gate implement; do
+  out=$(run_g "$st" gq) && die "run.sh $st with an unknown feature must fail: $out"
+  grep -q 'no feature document: docs/features/gq.md' <<<"$out" || die "run.sh $st unknown-feature message: $out"
+  [ ! -e "$ST3/lean/gq" ] || die "run.sh $st with an unknown feature must leave no state for it: $(ls -R "$ST3/lean/gq")"
+done
+pass "nested CLAUDE.md / .claude/ files there before the feature's first pin pass the gate unchanged (changed or new ones fail; --again refreshes; no record: git only); run.sh pins nothing for a feature without a document"
 if [ "$have_sbx" = 1 ]; then
   # lean_run_lock: a second sandboxed run of the project fails after LEAN_RUN_LOCK_WAIT with its
   # own message; a third waits for the first and runs; a lock whose holder is gone, or whose pid
