@@ -96,12 +96,15 @@ project docs, specs, tests, `CHECKPOINTS.md` and `.harness.json` belong to the p
 scripts/harness.sh status
 scripts/harness.sh claim --agent <role> [<feature_number-or-name>]   # default: lowest-numbered pending
 scripts/harness.sh set-plan "<step1>" "<step2>" ...
+scripts/harness.sh set-surfaces "<path-or-glob>" ...   # paths the change may touch; add-surface --reason widens
 ```
 
 `claim` atomically marks the feature `in_progress` and opens the session. Before launching the agent that
 claims, the leader runs `scripts/harness.sh recall <keywords>` once and passes the matching notes on. When the
-leader creates a feature it keeps the user's words with `add-feature --request "<verbatim>"`; specs open with
+leader creates a feature it keeps the user's words with `add-feature --request "<verbatim>"`, plus any
+exclusion the user stated as `--out-of-scope "<line>"` (at most 5); specs open with
 that request and the assumptions made to fill its gaps (`docs/specs.md` "Request and assumptions").
+`log-out` refuses a change with files outside the surfaces (lean features use their plan's Files list instead).
 
 ## 4. Closing
 

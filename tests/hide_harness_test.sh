@@ -102,7 +102,7 @@ pass "hide-check lists harness files, words and ids in changes and messages, and
 
 echo "3. log-out warning"
 g add src && g commit -qm wip >/dev/null
-H add-feature --name totals --title Totals >/dev/null && H claim totals >/dev/null || die "claim"
+H add-feature --name totals --title Totals >/dev/null && H claim totals >/dev/null && H set-surfaces src >/dev/null || die "claim"
 printf 'export const b = 1; // T2\n' >> "$P/src/app.js"
 H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
 out=$(H log-out --changes src/app.js --verification v --closure c) || die "log-out: $out"

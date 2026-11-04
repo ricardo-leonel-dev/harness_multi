@@ -43,6 +43,13 @@ or PR descriptions; use conventional commits only.
      request verbatim, when recorded, is in `state/features/<NNN>-<name>.md` under "Request (verbatim)".
    - If the leader's prompt gives a `BUDGET:` line, `append-log` it as given; don't look for the values elsewhere.
 3. **Record your plan**: `scripts/harness.sh set-plan "<step1>" "<step2>" ...`
+   **Declare the surfaces** before editing: `scripts/harness.sh set-surfaces "<path-or-glob>"...` — every path
+   the change may touch, tests included, project-relative (`src/api/**`, `tests/api_*.rs`, `docs/x.md`; `*`
+   stops at `/`, `**` crosses it; `.`, `*`, `**`, absolute paths and `..` are refused). It is set once; to widen
+   it later run `scripts/harness.sh add-surface "<glob>" --reason "<why>"` (the reason goes to the session log
+   for the reviewer). `log-out` refuses without surfaces, or when a `--changes` file or any file changed in the
+   working tree since the claim is outside them. `claim` also prints the feature's "out of scope" lines, if
+   any: behaviour the change must not add.
    Before creating deliverables, check `git status --short --untracked-files=all` and
    `git check-ignore -v -- <planned paths>`. A check-ignore exit 1 means no matching exclusion.
    Preserve harness-owned local exclusions. Resolve project delivery conflicts early against

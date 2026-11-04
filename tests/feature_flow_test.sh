@@ -92,6 +92,7 @@ printf 'a\n' > "$P/src/app.ts" && g add -A && g commit -qm base || die "git setu
 out=$(H claim plain) || die "claim plain: $out"
 grep -q 'work folder: progress/plain/' <<<"$out" || die "claim should name the work folder: $out"
 mkdir -p "$P/progress/plain" && printf 'handoff\n' > "$P/progress/plain/impl.md"
+H set-surfaces src/app.ts >/dev/null || die "set-surfaces plain"
 printf 'b\n' >> "$P/src/app.ts"
 # A mirror sync that fails: log-out still closes, warns, and its exit code stays 0.
 SYNCS="$WORK/syncs"; : > "$SYNCS"
@@ -121,6 +122,7 @@ for form in number flat; do
   H add-feature --name "q_$form" --title Q --size small >/dev/null
   num=$(q "SELECT feature_number FROM features WHERE name='q_$form';")
   H claim "q_$form" >/dev/null || die "claim q_$form"
+  H set-surfaces src/app.ts >/dev/null || die "set-surfaces q_$form"
   printf 'c%s\n' "$form" >> "$P/src/app.ts"
   if [ "$form" = number ]; then mkdir -p "$P/progress/$num"; f="$P/progress/$num/quick.md"; else f="$P/progress/quick_$num.md"; fi
   printf 'Cambio: x\nArchivos: src/app.ts\nRisk: none\nMotivo: t\n' > "$f"
@@ -134,7 +136,7 @@ pass "the quick gate accepts handoffs named by feature number and the older flat
 
 echo "4. DIFF with ignored tests"
 printf 'tests/\n' >> "$P/.gitignore" && g add -A && g commit -qm ignore-tests >/dev/null
-H add-feature --name t_ignored --title T >/dev/null && H claim t_ignored >/dev/null
+H add-feature --name t_ignored --title T >/dev/null && H claim t_ignored >/dev/null && H set-surfaces src tests >/dev/null
 printf 'd\n' >> "$P/src/app.ts" && printf 'test\n' > "$P/tests/app.test.ts"
 # The real sync script from here on: with no mirror configured the lifecycle commands stay quiet,
 # a configured mirror that fails (its env vars unset) still warns.

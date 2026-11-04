@@ -29,7 +29,11 @@ A feature with a mode (listed under "lean mode" in `status`) is not yours: don't
 2. **Claim**: `scripts/harness.sh claim --agent "leader -> quick_implementer (<your model name>)" <feature>`.
    It prints your work folder, `progress/<name>/` (`<name>` is the feature's name, not its number): every file
    you write for this feature goes there. The feature's request and acceptance criteria are in
-   `state/features/<NNN>-<name>.md`. Any notes the leader recalled are in your prompt.
+   `state/features/<NNN>-<name>.md`. Any notes the leader recalled are in your prompt. `claim` also prints the
+   feature's "out of scope" lines, if any: behaviour the change must not add.
+   Then, before editing, `scripts/harness.sh set-surfaces "<path-or-glob>"...` with the files the change may
+   touch (tests included; `*` stops at `/`, `**` crosses it). Widen later only with
+   `scripts/harness.sh add-surface "<glob>" --reason "<why>"`; `log-out` refuses files outside them.
 3. **Implement** the smallest change that meets the acceptance criteria. Locate code with `Grep` and read only
    the line ranges you need. Add or adjust a test that fails without the change, and run it with
    `scripts/harness.sh test <test-file...>` (output in `progress/test_last.log` — grep it, don't re-run).
@@ -57,7 +61,7 @@ A feature with a mode (listed under "lean mode" in `status`) is not yours: don't
    `Risk:` is your honest judgment. Anything other than `none` sends the change to a reviewer — that is the
    right outcome when you have a doubt, not a failure.
 7. Close: `scripts/harness.sh log-out --quick --changes <files...> --verification "<summary>" --closure "<summary>"`.
-   If it refuses, it lists why (size, files, dependencies, undeclared files, Risk, init). Fix only a genuine
+   If it refuses, it lists why (surfaces, size, files, dependencies, undeclared files, Risk, init). Fix only a genuine
    mistake in your handoff (e.g. a file you forgot to declare); never trim real work or edit `harness.db` to pass
    the gate. Otherwise reply with the review-needed line.
 8. If the leader calls you again after a reviewer verdict: on approval run the plain `log-out` (without
