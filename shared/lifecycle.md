@@ -26,7 +26,11 @@ open session can get stuck on a feature that can never finish. This is separate 
    refuses unless a `reviewer` already ran `scripts/harness.sh record-review approved` on this session, and
    unless both that approval and the last `./init.sh` of the session saw exactly the files being closed (a
    change after the approval goes back to the reviewer; one after `./init.sh` needs another run). Both compare
-   file contents, so committing the approved code doesn't invalidate them.
+   file contents, so committing the approved code doesn't invalidate them. It (and `log-out --quick`) also
+   refuses when the session has no surfaces (`set-surfaces`) or a changed file is outside them: `--changes`
+   and everything git shows changed since the claim, untracked included (`progress/`, git-excluded files and
+   files untouched since the claim are skipped). Widen with `add-surface "<glob>" --reason "<why>"` or revert
+   the file. A session opened before the toolkit had surfaces closes with a warning instead.
 3. Leave no temporary files, debug prints, or TODOs without context.
 
 ## Reconciling work implemented outside the harness

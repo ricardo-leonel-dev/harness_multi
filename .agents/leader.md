@@ -95,6 +95,10 @@ For each received task:
    `add-feature ... --request "<their words, unedited>"` (your own summary goes in `--description`). For an
    existing feature without one (`state/features/*.md` has no "Request" section) that the user describes now,
    `scripts/harness.sh set-request <feature> "<their words>"`. Notion intake stores the card text by itself.
+   When the user excludes behaviour ("sin paginación", "no new dependencies"), also pass each exclusion as
+   `--out-of-scope "<line>"` (repeatable, at most 5 short lines; `set-out-of-scope <feature> "<line>"...`
+   later). Only what the user stated or the request makes clear; none is fine. `claim` prints them and the
+   reviewer rejects a diff that adds any of them.
 
 1. Identify whether it requires **one** or **multiple** features (`scripts/harness.sh status` lists them).
 2. If the task names a specific feature, pass that reference (number or name) through to the `implementer` so it can

@@ -120,7 +120,7 @@ install_into "$A"
 cp "$L" "$WORK/local.before"
 install_into "$A"
 cmp "$WORK/local.before" "$L"
-jq -e '.model == "x" and .permissions.deny == ["Bash(rm:*)"] and .permissions.allow[0] == "Bash(ls)" and (.permissions.allow | length) == 15' "$L" >/dev/null
+jq -e '.model == "x" and .permissions.deny == ["Bash(rm:*)"] and .permissions.allow[0] == "Bash(ls)" and (.permissions.allow | length) == 17 and (.permissions.allow | index("Bash(scripts/harness.sh set-surfaces:*)") != null) and (.permissions.allow | index("Bash(scripts/harness.sh add-surface:*)") != null)' "$L" >/dev/null
 if untracked | grep -q 'settings.local.json'; then echo 'settings.local.json visible to git' >&2; exit 1; fi
 printf 'not json' > "$L"
 install_into "$A"

@@ -44,6 +44,10 @@ and a script gate closes it (`lean/README.md`). Don't record a verdict on it; re
    `state/features/<NNN>-<name>.md` otherwise), check the change does what those words ask, and that each
    listed assumption is a reasonable reading of them. A change that meets the spec or acceptance text but
    contradicts the request is a `CHANGES_REQUESTED` reason.
+   **Against the scope:** `status` (and `state/features/<NNN>-<name>.md`, "Out of scope") lists the feature's
+   out-of-scope lines: a diff that adds any of that behaviour is a `CHANGES_REQUESTED` reason. `status` also
+   shows the session's surfaces; check the changed files are inside them and that every `SURFACE added`
+   entry in the session log has a reason that holds — a surface widened without a real need is scope drift.
 3. For each modified file:
    - Does it respect `docs/architecture.md`? (Layers, dependencies, structure)
    - Does it adhere to `docs/conventions.md`? (Style, names, errors)

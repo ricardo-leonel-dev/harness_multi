@@ -38,6 +38,7 @@ H() { (cd "$P" && HARNESS_AGENT=implementer ANTHROPIC_MODEL= bash scripts/harnes
 q() { sqlite3 "$P/harness.db" "$1"; }
 fstatus() { q "SELECT status FROM features WHERE name='$1';"; }
 approve_and_log_out() {
+  [ -n "$(q "SELECT surfaces FROM session_log WHERE closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;")" ] || H set-surfaces x >/dev/null || die "set-surfaces on $1"
   H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "record-review on $1"
   H log-out --changes x --verification v --closure c >/dev/null || die "log-out on $1: $(H status)"
   [ "$(fstatus "$1")" = done ] || die "$1 should be done after log-out"
@@ -45,7 +46,7 @@ approve_and_log_out() {
 
 echo "1. block pauses, unblock resumes the same session"
 P="$WORK/p1"; new_project "$P"
-H claim alpha >/dev/null || die "claim alpha"
+H claim alpha >/dev/null && H set-surfaces x >/dev/null || die "claim alpha"
 s_alpha=$(q "SELECT id FROM session_log WHERE feature_id=1;")
 H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "record-review alpha"
 H block alpha "waiting on beta" >/dev/null || die "block alpha"
@@ -73,7 +74,7 @@ out=$(H unblock alpha) && die "unblock should refuse a feature with no session"
 grep -q "claim alpha" <<<"$out" || die "unblock message should point at claim: $out"
 [ "$(fstatus alpha)" = blocked ] || die "failed unblock must leave the feature blocked"
 pass "unblock refuses (and points at claim) when there is no session"
-H claim alpha >/dev/null || die "explicit claim of blocked alpha: $(H claim alpha)"
+H claim alpha >/dev/null && H set-surfaces x >/dev/null || die "explicit claim of blocked alpha: $(H claim alpha)"
 s_new=$(q "SELECT id FROM session_log WHERE feature_id=1 AND closed_at IS NULL AND deleted_at IS NULL;")
 [ -n "$s_new" ] && [ "$s_new" != "$s_old" ] || die "no new session opened"
 [ "$(fstatus alpha)" = in_progress ] || die "alpha should be in_progress"

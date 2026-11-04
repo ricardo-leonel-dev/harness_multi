@@ -13,6 +13,7 @@
 #                                              features — same project — being 'done' first)
 #   add-feature --name <slug> --title <t> [--description <d>] [--request <text>] [--acceptance <item...>]
 #               [--sdd] [--depends-on <name...>] [--size small|normal] [--mode normal|risk] [--approval]
+#               [--out-of-scope <line>]...
 #                                              create a single pending feature directly (no seed file) — for
 #                                              ad-hoc tasks the leader creates on the spot, no matching pending
 #                                              feature existed; --sdd requires an approved spec before claim;
@@ -20,6 +21,9 @@
 #                                              already exist) that must be 'done' before this one is claimable;
 #                                              --size small lets it close through log-out --quick (default normal);
 #                                              --request keeps the user's request verbatim (the spec quotes it);
+#                                              --out-of-scope (repeatable, 0-5 short lines) records behaviour the
+#                                              user excluded ("no pagination"): claim prints it, the reviewer
+#                                              rejects a diff that adds it (seed files: "out_of_scope": [...]);
 #                                              --mode puts it on the lean flow (lean/README.md): it closes only
 #                                              through log-out --lean; --approval (normal only; risk always needs
 #                                              it, so with risk it only warns) makes claim wait for approve-plan.
@@ -37,6 +41,8 @@
 #                                              <lean state>/frozen/<name>.sha (what lean/run.sh reads; the state is
 #                                              keyed by the project's resolved path, lean/lib.sh);
 #                                              refuses with no acceptance tests
+#   set-out-of-scope <feature_number|name> [line...]
+#                                              replace a not-done feature's out-of-scope lines (none clears them)
 #   set-request <feature_number|name> <text>  store/replace a feature's verbatim user request
 #   drop-sdd <feature_number|name> <reason>   turn a pending sdd=1 feature into sdd=0 before any spec exists
 #                                              (only after the user accepted it in this conversation); the
@@ -132,6 +138,18 @@
 #                                              --feature TARGET writes a feature-level note instead (no open
 #                                              session needed); snapshot lists them under the feature's Notes.
 #   set-plan <item> [item...]                 replace the current open session's plan
+#   set-surfaces <path-or-glob...>            declare, once, right after claim, the paths the open session's
+#                                              change may touch (project-relative): "*" and "?" stop at "/",
+#                                              "**" crosses it (src/api/** also matches src/api), "**/" is zero
+#                                              or more directories, a path without * or ? covers that file or
+#                                              directory. Refused: ".", "*", "**", "**/*", absolute paths, "..".
+#                                              log-out (reviewer path and --quick) refuses without them, and
+#                                              when a --changes path or any file changed in the working tree
+#                                              since the claim (untracked included; git-excluded files,
+#                                              progress/, the snapshot and the feature's own specs/<name>/
+#                                              skipped) is outside them. Lean features use their Files list.
+#                                              A session opened before this existed closes with a warning
+#   add-surface <path-or-glob> --reason <why>  widen the open session's surfaces; the reason goes to its log
 #   hide-check [--message TEXT]              with .harness.json::hide_harness, fail when git (or the commit/PR
 #                                              text) would show the harness: files, words or ids (F12, R3, T4)
 #   tick-tasks T<n> [T<n>...]                 mark those tasks [x] in the open session's specs/<name>/tasks.md
@@ -155,7 +173,8 @@
 #                                              which is the ONLY command that accepts a bare human name).
 #   log-out --changes <item...> --verification <text> --closure <text>
 #                                              close the open session and mark its feature done — refuses
-#                                              unless record-review has recorded 'approved' on this session
+#                                              unless record-review has recorded 'approved' on this session,
+#                                              or when a changed file is outside the surfaces (set-surfaces)
 #                                              (best-effort: also pushes notion_status_done to the
 #                                              feature's source Notion page, if it has a source_id).
 #                                              Also logs a "DIFF: code=N, tests=M" entry measured from
@@ -341,18 +360,22 @@ cmd_import_features() {
     accept=$(jq -c '.acceptance // []' <<<"$item")
     sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
     depends_on=$(jq -c '.depends_on // []' <<<"$item")
+    local oos_lines=() oos_line oos
+    while IFS= read -r oos_line; do oos_lines+=("$oos_line"); done < <(jq -r '(.out_of_scope // [])[]' <<<"$item")
+    oos="$(out_of_scope_json "${oos_lines[@]+"${oos_lines[@]}"}")" || exit 1
     now="$(now_iso)"
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, '$(sql_escape "$status")', '$(sql_escape "$depends_on")', '$now', '$now');"
+    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, out_of_scope, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, '$(sql_escape "$status")', '$(sql_escape "$depends_on")', '$(sql_escape "$oos")', '$now', '$now');"
   done
   ok "imported features from $seed_file"
 }
 
 cmd_add_feature() {
-  local name="" title="" desc="" request="" accept_items=() sdd=0 depends_items=() size=normal mode="" approval=0
+  local name="" title="" desc="" request="" accept_items=() sdd=0 depends_items=() size=normal mode="" approval=0 oos_items=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
+      --out-of-scope) [ $# -ge 2 ] || { fail "--out-of-scope needs a line"; exit 1; }; oos_items+=("$2"); shift 2 ;;
       --mode) mode="$2"; shift 2 ;;
       --approval) approval=1; shift ;;
       --request) request="$2"; shift 2 ;;
@@ -376,10 +399,11 @@ cmd_add_feature() {
     esac
   done
   if [ -z "$name" ] || [ -z "$title" ]; then
-    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--request <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>] [--size small|normal] [--mode normal|risk] [--approval]"
+    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--request <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>] [--size small|normal] [--mode normal|risk] [--approval] [--out-of-scope <line>]..."
     exit 1
   fi
   case "$size" in small|normal) ;; *) fail "--size must be 'small' or 'normal', got: $size"; exit 1 ;; esac
+  local out_of_scope; out_of_scope="$(out_of_scope_json "${oos_items[@]+"${oos_items[@]}"}")" || exit 1
   local mode_sql plan_approval
   IFS=' ' read -r mode_sql plan_approval < <(lean_mode_values "$mode" "$approval" "$sdd") || exit 1
 
@@ -415,13 +439,66 @@ cmd_add_feature() {
   local now; now="$(now_iso)"
 
   local request_sql=NULL; [ -n "$request" ] && request_sql="'$(sql_escape "$request")'"
-  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, size, request, mode, plan_approval, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$size', $request_sql, $mode_sql, $plan_approval, '$now', '$now');"
+  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, size, request, mode, plan_approval, out_of_scope, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$size', $request_sql, $mode_sql, $plan_approval, '$(sql_escape "$out_of_scope")', '$now', '$now');"
   local sdd_note=""; [ "$sdd" = "1" ] && sdd_note=", sdd"
   [ "$size" = "small" ] && sdd_note="$sdd_note, small"
   [ -n "$mode" ] && sdd_note="$sdd_note, mode $mode$([ "$plan_approval" = 1 ] && echo ' (plan approval required)')"
   local deps_note=""; [ "$depends_on" != "[]" ] && deps_note=", depends on: $depends_on"
+  [ "$out_of_scope" != "[]" ] && deps_note="$deps_note, out of scope: ${#oos_items[@]} line(s)"
   ok "added feature $next_number: $name (pending$sdd_note$deps_note)"
+}
+
+# out_of_scope_json [line...] — validates a feature's out-of-scope lines and
+# prints them as a JSON array: at most OUT_OF_SCOPE_MAX lines, each one short
+# (<= OUT_OF_SCOPE_MAX_CHARS), single-line and not blank. These are behaviour
+# exclusions taken from the user's words ("no pagination"); the reviewer
+# rejects a diff that adds any of them.
+OUT_OF_SCOPE_MAX=5
+OUT_OF_SCOPE_MAX_CHARS=200
+out_of_scope_json() {
+  local line
+  if [ $# -gt "$OUT_OF_SCOPE_MAX" ]; then
+    fail "out of scope takes at most $OUT_OF_SCOPE_MAX lines (got $#): keep only the exclusions the user stated"; return 1
+  fi
+  for line in "$@"; do
+    case "$line" in *$'\n'*|*$'\r'*) fail "an out-of-scope line must be a single line: $line"; return 1 ;; esac
+    [ -n "${line//[[:space:]]/}" ] || { fail "an out-of-scope line can't be blank"; return 1; }
+    [ "${#line}" -le "$OUT_OF_SCOPE_MAX_CHARS" ] || { fail "out-of-scope line longer than $OUT_OF_SCOPE_MAX_CHARS characters: $line"; return 1; }
+  done
+  json_array "$@"
+}
+
+# set-out-of-scope <TARGET> [line...] — replace a not-yet-done feature's
+# out-of-scope lines (no line clears them). Same limits as add-feature's.
+cmd_set_out_of_scope() {
+  local target="${1:-}"; shift || true
+  [ -n "$target" ] || { fail "usage: set-out-of-scope <feature_number|name> [line...]"; exit 1; }
+  local json; json="$(out_of_scope_json "$@")" || exit 1
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local updated
+  updated=$(db "UPDATE features SET out_of_scope='$(sql_escape "$json")', updated_at='$(now_iso)'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status NOT IN ('done','superseded') AND $where
+RETURNING feature_number || ' ' || name;")
+  [ -n "$updated" ] || { fail "no matching feature that is not done/superseded: $target"; exit 1; }
+  if [ $# -eq 0 ]; then ok "cleared the out-of-scope lines of feature $updated"; else ok "feature $updated: $# out-of-scope line(s)"; fi
+}
+
+# print_out_of_scope <feature_id> — the feature's out-of-scope lines, for claim
+# and status (nothing when there are none).
+print_out_of_scope() {
+  local lines
+  lines=$(db "SELECT j.value FROM features f, json_each(f.out_of_scope) j WHERE f.id=$1;" 2>/dev/null)
+  [ -n "$lines" ] || return 0
+  echo "out of scope (the change must not add this):"
+  printf '%s\n' "$lines" | sed 's/^/  - /'
 }
 
 # lean_mode_values <mode> <approval 0|1> <sdd 0|1> — validates a lean mode
@@ -1374,6 +1451,8 @@ VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")
   lean_claim_pin "$feature_id"
   ok "claimed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
   ok "work folder: $(feature_dir "$(jq -r '.[0].name' <<<"$updated")")/ (handoffs and logs; deleted at log-out)"
+  print_out_of_scope "$feature_id"
+  surfaces_hint "$feature_id"
 
   push_notion_status "$(jq -r '.[0].id' <<<"$updated")"
 }
@@ -1460,6 +1539,8 @@ SQL
   row=$(sqlite3 -json "$DB_PATH" "SELECT feature_number, name, title, source_id FROM features WHERE id=$fid;")
   ok "resumed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$row") (new session $new_sid; ${resumed#RESUMED: })"
   warn "any review verdict stayed on the old session — record-review must run again on session $new_sid before log-out"
+  print_out_of_scope "$fid"
+  surfaces_hint "$fid"
 
   push_notion_status "$fid"
 }
@@ -1619,6 +1700,209 @@ cmd_record_review() {
   sync_mirror
 }
 
+# --- Surfaces: the paths a change may touch ----------------------------------
+# The implementer declares them right after claim (set-surfaces) and widens
+# them with a logged reason (add-surface --reason). log-out (reviewer path and
+# --quick) refuses a session without them, or with a changed file outside them.
+# Lean features use their plan's Files list instead (lean/gate.sh).
+#
+# Pattern semantics (relative to the project directory):
+#   *    any characters except "/"         tests/api_*.rs
+#   ?    one character except "/"
+#   **   any characters, "/" included      src/api/**  (also matches src/api)
+#   **/  zero or more directories          **/fixtures/*.json
+#   no * or ?: that path, or anything under it when it is a directory  src/api
+# Everything else is literal. A pattern that matches everything (".", "*",
+# "**", "**/*"), an absolute path or one with a ".." segment is refused.
+
+# surface_normalize <path> — strips leading "./" and trailing "/".
+surface_normalize() {
+  local p="$1"
+  while [ "${p#./}" != "$p" ]; do p="${p#./}"; done
+  while [ "${p%/}" != "$p" ] && [ "$p" != "/" ]; do p="${p%/}"; done
+  printf '%s' "$p"
+}
+
+# surface_invalid <pattern> — prints why a surface pattern is refused (nothing
+# when it is acceptable).
+surface_invalid() {
+  local raw="$1" p
+  case "$raw" in *$'\n'*|*$'\r'*) echo "a pattern must be a single line"; return ;; esac
+  p="$(surface_normalize "$raw")"
+  [ -n "${p//[[:space:]]/}" ] || { echo "empty pattern"; return; }
+  case "$p" in /*|"~"*) echo "absolute path (patterns are relative to the project directory)"; return ;; esac
+  case "/$p/" in */../*) echo "'..' leaves the project directory"; return ;; esac
+  [ -n "${p//[*?\/.]/}" ] || { echo "matches every file: name the directories or files the change touches"; return; }
+}
+
+# surface_regex <pattern> — the pattern as an anchored ERE (see semantics above).
+surface_regex() {
+  local p; p="$(surface_normalize "$1")"
+  local re="" i=0 c n="${#p}" glob=0
+  case "$p" in *[*?]*) glob=1 ;; esac
+  while [ "$i" -lt "$n" ]; do
+    c="${p:$i:1}"
+    if [ "$c" = "*" ] && [ "${p:$((i + 1)):1}" = "*" ]; then
+      if [ "${p:$((i + 2)):1}" = "/" ]; then re="$re(.*/)?"; i=$((i + 3)); continue; fi
+      if [ $((i + 2)) -eq "$n" ] && [ "${re%/}" != "$re" ]; then re="${re%/}(/.*)?"; i=$((i + 2)); continue; fi
+      re="$re.*"; i=$((i + 2)); continue
+    fi
+    case "$c" in
+      "*") re="$re[^/]*" ;;
+      "?") re="$re[^/]" ;;
+      "^") re="$re\\^" ;;
+      "\\") re="$re[\\]" ;;
+      .|+|"("|")"|"{"|"}"|"|"|'$'|"["|"]") re="$re[$c]" ;;
+      *) re="$re$c" ;;
+    esac
+    i=$((i + 1))
+  done
+  [ "$glob" = 1 ] || re="$re(/.*)?"
+  printf '^%s$' "$re"
+}
+
+# surface_matches <file> <pattern...> — whether <file> (project-relative) is
+# inside any pattern.
+surface_matches() {
+  local file; file="$(surface_normalize "$1")"; shift
+  local pat re
+  for pat in "$@"; do
+    re="$(surface_regex "$pat")"
+    [[ "$file" =~ $re ]] && return 0
+  done
+  return 1
+}
+
+# session_surfaces <session_id> — the declared patterns, one per line.
+session_surfaces() {
+  db "SELECT j.value FROM session_log s, json_each(s.surfaces) j WHERE s.id=$1;" 2>/dev/null
+}
+
+# surfaces_hint <feature_id> — after claim: the step that comes next (not for
+# lean features, whose plan lists the files).
+surfaces_hint() {
+  [ -z "$(db "SELECT mode FROM features WHERE id=$1;")" ] || return 0
+  echo "next: declare the paths this change may touch before editing: scripts/harness.sh set-surfaces \"<path-or-glob>\"... (widen later with add-surface \"<glob>\" --reason \"<why>\"; log-out refuses files outside them)"
+}
+
+# surfaces_validate_all <pattern...> — fails on the first refused pattern.
+surfaces_validate_all() {
+  local pat why
+  [ $# -gt 0 ] || { fail "name at least one path or glob"; return 1; }
+  for pat in "$@"; do
+    why="$(surface_invalid "$pat")"
+    [ -z "$why" ] || { fail "surface '$pat' refused: $why"; return 1; }
+  done
+}
+
+# set-surfaces <pattern...> — declare the open session's surfaces, once. A
+# later widening goes through add-surface, so its reason is on the log.
+cmd_set_surfaces() {
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || { fail "no open session — run 'claim' first"; exit 1; }
+  surfaces_validate_all "$@" || exit 1
+  if [ -n "$(db "SELECT surfaces FROM session_log WHERE id=$sid AND surfaces IS NOT NULL;")" ]; then
+    fail "session $sid already has surfaces ($(session_surfaces "$sid" | paste -sd ' ' -)) — widen them with add-surface \"<glob>\" --reason \"<why>\""
+    exit 1
+  fi
+  local pats=() pat
+  for pat in "$@"; do pats+=("$(surface_normalize "$pat")"); done
+  local arr; arr=$(json_array "${pats[@]}")
+  local now; now="$(now_iso)"
+  db_exec "UPDATE session_log SET surfaces='$(sql_escape "$arr")' WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] SURFACES: ${pats[*]}")', '$now');"
+  ok "surfaces on session $sid: ${pats[*]}"
+}
+
+# add-surface <pattern> --reason <why> — widen the open session's surfaces;
+# the reason goes to the session log for the reviewer.
+cmd_add_surface() {
+  local pat="" reason="" have_pat=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --reason) reason="${2:-}"; shift; [ $# -eq 0 ] || shift ;;
+      *) [ "$have_pat" = 0 ] || { fail "usage: add-surface \"<path-or-glob>\" --reason \"<why>\""; exit 1; }
+         pat="$1"; have_pat=1; shift ;;
+    esac
+  done
+  if [ "$have_pat" = 0 ] || [ -z "${reason//[[:space:]]/}" ]; then
+    fail "usage: add-surface \"<path-or-glob>\" --reason \"<why>\" (the reason is required: it goes to the session log)"; exit 1
+  fi
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || { fail "no open session — run 'claim' first"; exit 1; }
+  surfaces_validate_all "$pat" || exit 1
+  pat="$(surface_normalize "$pat")"
+  local now; now="$(now_iso)"
+  db_exec "UPDATE session_log SET surfaces=(SELECT json_group_array(value) FROM (
+    SELECT value FROM json_each(COALESCE(session_log.surfaces, '[]'))
+    UNION ALL SELECT '$(sql_escape "$pat")' WHERE NOT EXISTS (SELECT 1 FROM json_each(COALESCE(session_log.surfaces, '[]')) WHERE value='$(sql_escape "$pat")')))
+  WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] SURFACE added: $pat — reason: $reason")', '$now');"
+  ok "added surface $pat on session $sid (reason logged)"
+}
+
+# surfaces_outside <session_id> <feature_name> [change...] — prints every
+# changed file outside the session's surfaces, one per line: the --changes
+# paths, plus what git shows changed in the project since the session base
+# (committed, uncommitted and untracked; git-excluded files, progress/, the
+# snapshot and harness.db are skipped, like files already uncommitted at claim
+# and untouched since). The feature's own specs/<name>/ is always allowed
+# (tick-tasks).
+surfaces_outside() {
+  local sid="$1" name="$2"; shift 2
+  local pats=() pat line file here
+  while IFS= read -r pat; do [ -n "$pat" ] && pats+=("$pat"); done < <(session_surfaces "$sid")
+  pats+=("specs/$name")
+  here="$(pwd -P)"
+  local files=()
+  for file in "$@"; do
+    case "$file" in
+      /*) if [ "${file#"$here"/}" != "$file" ]; then file="${file#"$here"/}"; else printf '%s\n' "$file"; continue; fi ;;
+    esac
+    file="$(surface_normalize "$file")"
+    case "/$file/" in */../*) printf '%s\n' "$file"; continue ;; esac
+    files+=("$file")
+  done
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    local base scope before
+    IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
+    before=$(session_claim_listing "$sid")
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      grep -qxF -- "$line" <<<"$before" || files+=("${line#* }")
+    done < <(dirty_listing "$base")
+  fi
+  for file in "${files[@]+"${files[@]}"}"; do
+    case "$file" in progress|progress/*|"$SNAPSHOT_PATH"/*|"$DB_PATH"|"$DB_PATH"-*) continue ;; esac
+    surface_matches "$file" "${pats[@]}" || printf '%s\n' "$file"
+  done | awk '!seen[$0]++'
+}
+
+# surfaces_gate <session_id> <changes...> — log-out's surfaces check (not for
+# lean features). Exits with the offending files listed; a session opened
+# before surfaces existed only warns.
+surfaces_gate() {
+  local sid="$1"; shift
+  local name required has
+  IFS='|' read -r name required has < <(db "SELECT f.name, s.surfaces_required, CASE WHEN s.surfaces IS NULL THEN 0 ELSE 1 END FROM session_log s JOIN features f ON f.id=s.feature_id WHERE s.id=$sid;")
+  if [ "$has" != 1 ]; then
+    if [ "$required" = 0 ]; then
+      warn "session $sid was opened before surfaces existed: closing without the surfaces check"
+      return 0
+    fi
+    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] SURFACES: refused — none declared', '$(now_iso)');"
+    fail "cannot log out session $sid: no surfaces declared — run 'scripts/harness.sh set-surfaces \"<path-or-glob>\"...' with the paths the change touches"
+    exit 1
+  fi
+  local outside; outside="$(surfaces_outside "$sid" "$name" "$@")"
+  [ -n "$outside" ] || return 0
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] SURFACES: refused — outside: $(printf '%s' "$outside" | paste -sd ' ' -)")', '$(now_iso)');"
+  fail "cannot log out session $sid: changed files outside the declared surfaces ($(session_surfaces "$sid" | paste -sd ' ' -)):"
+  printf '%s\n' "$outside" | sed 's/^/  - /' >&2
+  echo "  add each with 'scripts/harness.sh add-surface \"<glob>\" --reason \"<why>\"' if the change needs it, or revert it" >&2
+  exit 1
+}
+
 # is_review_excluded <path> — lockfiles, generated/build output and prose are
 # not code a person reviews line by line, so they don't count toward the
 # review budget.
@@ -1693,14 +1977,19 @@ $dirty")', '$(now_iso)');"
 
 # dirty_listing <base> — one "<blob hash> <path>" line per file under this
 # project that differs from <base> or is untracked ("deleted" for a removed
-# file), skipping progress/ and the snapshot, which the harness rewrites.
+# file), skipping progress/ and the snapshot, which the harness rewrites, and
+# untracked nested repositories or worktrees (git lists them as one "dir/"
+# entry: another checkout, not a file of this change). Paths come back raw
+# (core.quotePath=false), so a non-ASCII name matches surfaces and exists.
 # With -w the contents are also stored in git's object database, so the
 # session can later measure its own changes against them (session_file_lines).
 dirty_listing() {
   local file write="${2:-}"
-  { git diff --name-only --relative "$1" -- . 2>/dev/null; git ls-files --others --exclude-standard -- . 2>/dev/null; } \
+  { git -c core.quotePath=false diff --name-only --relative "$1" -- . 2>/dev/null
+    git -c core.quotePath=false ls-files --others --exclude-standard -- . 2>/dev/null; } \
     | while IFS= read -r file; do
         case "$file" in ""|progress/*|"$SNAPSHOT_PATH"/*) continue ;; esac
+        case "$file" in */) [ -e "${file}.git" ] && continue ;; esac
         if [ -f "$file" ]; then printf '%s %s\n' "$(git hash-object $write -- "$file" 2>/dev/null || git hash-object -- "$file")" "$file"; else printf 'deleted %s\n' "$file"; fi
       done
 }
@@ -2134,6 +2423,9 @@ cmd_log_out() {
     fail "cannot log out session $sid: its 'lean' pass doesn't apply to feature $lname, which has no lean mode — use the reviewer path"
     exit 1
   fi
+  # Reviewer path and --quick: every changed file must be inside the
+  # surfaces declared after claim. Lean features have their own Files check.
+  [ "$lean" = 1 ] || surfaces_gate "$sid" "${changes[@]+"${changes[@]}"}"
   if [ "$lean" = 1 ]; then
     lean_gate "$sid" "$lname" "$lmode"
     if [ "${#LEAN_REASONS[@]}" -gt 0 ]; then
@@ -2788,6 +3080,16 @@ FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND
   fi
   echo "--- open session ---"
   db -header -column "SELECT id, agent, started_at, review_status, reviewed_by, held_at FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;"
+  local open_sid; open_sid="$(current_session_id)"
+  if [ -n "$open_sid" ]; then
+    local open_fid; open_fid=$(db "SELECT feature_id FROM session_log WHERE id=$open_sid;")
+    [ -z "$open_fid" ] || print_out_of_scope "$open_fid"
+    local surf; surf="$(session_surfaces "$open_sid" | paste -sd ' ' -)"
+    if [ -n "$surf" ]; then echo "surfaces: $surf"
+    elif [ "$(db "SELECT surfaces_required FROM session_log WHERE id=$open_sid;")" = 1 ] && [ -z "$(db "SELECT mode FROM features WHERE id=${open_fid:-0};")" ]; then
+      echo "surfaces: none declared yet (set-surfaces)"
+    fi
+  fi
   local paused
   paused=$(db -header -column "SELECT sl.id, f.feature_number, f.name AS feature, sl.paused_at, sl.review_status FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id WHERE sl.project_id='$(sql_escape "$pid")' AND sl.closed_at IS NULL AND sl.deleted_at IS NULL AND sl.paused_at IS NOT NULL;")
   if [ -n "$paused" ]; then
@@ -3085,6 +3387,9 @@ main() {
     record-review) cmd_record_review "$@" ;;
     append-log) cmd_append_log "$@" ;;
     set-plan) cmd_set_array_field plan "$@" ;;
+    set-surfaces) cmd_set_surfaces "$@" ;;
+    add-surface) cmd_add_surface "$@" ;;
+    set-out-of-scope) cmd_set_out_of_scope "$@" ;;
     tick-tasks) cmd_tick_tasks "$@" ;;
     hide-check) cmd_hide_check "$@" ;;
     set-next-step) cmd_set_array_field next_step "$@" ;;

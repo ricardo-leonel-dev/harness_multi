@@ -112,7 +112,7 @@ echo "3. log-out review budget"
 P="$WORK/p3"; new_project "$P" '{"review_budget_lines":5}'
 (cd "$P" && git init -q && mkdir -p src && printf 'a\nb\n' > src/app.ts && git add src && \
   git -c user.email=t@t -c user.name=t commit -qm base) || die "git setup"
-H claim beta >/dev/null || die "claim beta"
+H claim beta >/dev/null && H set-surfaces src bun.lock NOTES.md >/dev/null || die "claim beta"
 printf 'a\nB\nc\nd\n' > "$P/src/app.ts"                     # +3 -1 = 4 code lines
 mkdir -p "$P/src/x"; printf '1\n2\n3\n' > "$P/src/x/app.spec.ts"   # 3 test lines (untracked)
 printf 'lock\n%.0s' $(seq 1 50) > "$P/bun.lock"            # excluded
@@ -125,7 +125,7 @@ grep -q 'exceeds' <<<"$out" && die "4 code lines must not exceed a budget of 5: 
 pass "DIFF logged with code/test split, lockfile and prose excluded"
 [ "$(q "SELECT status FROM features WHERE name='beta';")" = done ] || die "log-out must still close"
 q "UPDATE features SET status='pending' WHERE name='beta';"
-H claim beta >/dev/null || die "re-claim beta"
+H claim beta >/dev/null && H set-surfaces src >/dev/null || die "re-claim beta"
 printf 'x\n%.0s' $(seq 1 10) >> "$P/src/app.ts"
 H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "re-claim beta"
 out=$(H log-out --changes src/app.ts --verification v --closure c) || die "log-out over budget must not block: $out"
@@ -133,7 +133,7 @@ grep -q 'exceeds review_budget_lines=5' <<<"$out" || die "over-budget warning mi
 pass "over budget warns and still closes"
 q "UPDATE features SET status='pending' WHERE name='beta';"
 (cd "$P" && git add src && git -c user.email=t@t -c user.name=t commit -qm wip) || die "git commit"
-H claim beta >/dev/null || die "re-claim beta for committed work"
+H claim beta >/dev/null && H set-surfaces src >/dev/null || die "re-claim beta for committed work"
 printf 'y\ny\n' >> "$P/src/app.ts"
 (cd "$P" && git add src && git -c user.email=t@t -c user.name=t commit -qm work) || die "git commit work"
 H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "record-review"
@@ -141,7 +141,7 @@ out=$(H log-out --changes src/app.ts --verification v --closure c) || die "log-o
 grep -q 'DIFF: code=2 lines' <<<"$out" || die "work committed before log-out must count from the session base: $out"
 pass "DIFF counts work committed during the session"
 q "UPDATE features SET status='pending' WHERE name='beta';"
-H claim beta >/dev/null || die "re-claim beta for a branch switch"
+H claim beta >/dev/null && H set-surfaces src >/dev/null || die "re-claim beta for a branch switch"
 (cd "$P" && git checkout -q -b right HEAD~2) || die "git checkout"   # base no longer in history
 printf 'z\n' >> "$P/src/app.ts"
 H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "record-review"

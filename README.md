@@ -383,6 +383,19 @@ Covered by `bash tests/quick_path_test.sh`.
   re-run.
 Covered by `bash tests/feature_flow_test.sh`.
 
+### Out of scope and surfaces
+
+- `add-feature --out-of-scope "<line>"` (repeatable, at most 5) / `set-out-of-scope` keep the
+  behaviour the user excluded; `claim`, `status` and the snapshot show it, and the reviewer
+  rejects a diff that adds it.
+- Right after `claim` the implementer runs `set-surfaces "<path-or-glob>"...` (`*` stops at `/`,
+  `**` crosses it); `add-surface "<glob>" --reason "<why>"` widens it and logs the reason.
+  `log-out` and `log-out --quick` refuse without surfaces, or when a `--changes` path or a file
+  changed since the claim (untracked included; `progress/` and git-excluded files skipped) is
+  outside them. `log-out --lean` keeps its own Files check. Sessions opened before the upgrade
+  close with a warning.
+Covered by `bash tests/scope_surfaces_test.sh`.
+
 ## Versioned PostgreSQL mock data
 
 Install with `--profile postgres --postgres-database DB --postgres-schemas '["schema"]'`.

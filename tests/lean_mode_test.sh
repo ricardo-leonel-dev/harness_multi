@@ -143,7 +143,7 @@ grep -q 'approve-plan r0' <<<"$out" || die "risk refusal should name approve-pla
 out=$(H claim n2) && die "a normal --approval feature must not claim before approve-plan"
 grep -q 'approve-plan n2' <<<"$out" || die "normal refusal should name approve-plan: $out"
 [ "$(q "SELECT count(*) FROM features WHERE status='in_progress';")" = 0 ] || die "a refused claim changed a status"
-H claim plain >/dev/null || die "a feature without a mode should claim"
+H claim plain >/dev/null && H set-surfaces src >/dev/null || die "a feature without a mode should claim"
 out=$(H log-out --lean --changes src/app.txt --verification v --closure c) && die "--lean must refuse a feature without a mode"
 grep -q 'only for features with a lean mode' <<<"$out" || die "mode-less --lean reason: $out"
 H record-review approved --by human:tester >/dev/null && H record-init pass >/dev/null
@@ -346,7 +346,7 @@ H unhold >/dev/null && H block x1 parked by the test >/dev/null || die "park x1"
 g checkout -q -- src/app.txt
 pass "set-mode refuses after a reviewer verdict or on hold; --lean refuses requested changes"
 
-H claim x2 >/dev/null || die "claim x2"
+H claim x2 >/dev/null && H set-surfaces src >/dev/null || die "claim x2"
 printf 'hello x2\n' > "$P/src/app.txt"
 out=$(lean_out) && die "x2 closing without ./init.sh"
 grep -q 'lean gate passed' <<<"$out" || die "x2 gate should pass first: $out"
