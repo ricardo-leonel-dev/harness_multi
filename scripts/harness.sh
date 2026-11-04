@@ -119,7 +119,7 @@
 #                                              A feature with a lean mode also gets the harness-owned files'
 #                                              hashes pinned afresh, and in risk mode its
 #                                              approved manifest written again, in the lean state (lean/lib.sh)
-#                                              Prints the feature's work folder, progress/<name>/: every handoff
+#                                              Creates and prints the work folder, progress/<name>/: every handoff
 #                                              (impl.md, quick.md, review.md, escalate.md, logs) goes there, and
 #                                              log-out deletes it once the feature is done
 #                                              An explicit TARGET that is in_progress/blocked with NO open session
@@ -1477,6 +1477,7 @@ VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")
   record_session_base "$(current_session_id)"
   lean_claim_pin "$feature_id"
   ok "claimed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
+  ensure_feature_dir "$(jq -r '.[0].name' <<<"$updated")"
   ok "work folder: $(feature_dir "$(jq -r '.[0].name' <<<"$updated")")/ (handoffs and logs; deleted at log-out)"
   print_out_of_scope "$feature_id"
   surfaces_hint "$feature_id"
@@ -1955,6 +1956,23 @@ feature_dir() {
   printf 'progress/%s' "$1"
 }
 
+# ensure_feature_dir <name> — creates progress/<name>/ so the folder claim
+# announces exists before an agent writes into it (a shell heredoc doesn't
+# create parent folders). Only plain slugs, and never through a symlinked
+# progress/ or progress/<name>: that would write into another checkout
+# (link-worktree makes progress/ local). Failing to create it only warns.
+ensure_feature_dir() {
+  local name="$1" dir
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
+  dir="$(feature_dir "$name")"
+  if [ -L progress ] || [ -L "$dir" ]; then
+    warn "not creating $dir/: progress/ or $dir is a symlink (run 'scripts/harness.sh link-worktree' to make progress/ local)"
+    return 0
+  fi
+  [ -d "$dir" ] || mkdir -p -- "$dir" 2>/dev/null || warn "could not create $dir/ — create it before writing handoffs there"
+  return 0
+}
+
 # clean_feature_dir <name> — deletes progress/<name>/ once the feature no
 # longer needs it (done or superseded). harness.db keeps what matters: plan,
 # log, verification, closure and the review verdict. Only plain slugs are
@@ -2294,7 +2312,7 @@ review_verdict() {
 # record-init's fingerprint.
 quick_gate() {
   local sid="$1" handoff; handoff="$(quick_handoff "$2" "$3")"
-  QUICK_REASONS=(); QUICK_LINES=0; QUICK_FILES=0
+  QUICK_REASONS=(); QUICK_LINES=0; QUICK_FILES=0; QUICK_MISSING_HANDOFF=""
   if ! git rev-parse --git-dir >/dev/null 2>&1; then
     QUICK_REASONS+=("not a git repository: the change can't be measured"); return
   fi
@@ -2324,7 +2342,7 @@ quick_gate() {
   done
 
   if [ ! -f "$handoff" ]; then
-    QUICK_REASONS+=("handoff $handoff is missing")
+    QUICK_REASONS+=("handoff $handoff is missing"); QUICK_MISSING_HANDOFF="$handoff"
   else
     local risk declared
     risk=$(sed -n 's/^Risk:[[:space:]]*//p' "$handoff" | head -n 1 | tr -d '\r`' | sed 's/[[:space:]]*$//')
@@ -2509,8 +2527,14 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$
     if [ "${#QUICK_REASONS[@]}" -gt 0 ]; then
       local joined; joined=$(printf '%s; ' "${QUICK_REASONS[@]}"); joined="${joined%; }"
       db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] QUICK: refused — $joined")', '$(now_iso)');"
-      fail "log-out --quick refused — reviewer required:"
-      printf '  - %s\n' "${QUICK_REASONS[@]}" >&2
+      if [ "${#QUICK_REASONS[@]}" -eq 1 ] && [ -n "$QUICK_MISSING_HANDOFF" ]; then
+        # Only the handoff is missing: no gate signal asks for a reviewer yet.
+        fail "log-out --quick refused — missing handoff: write $QUICK_MISSING_HANDOFF (Risk: and Files: lines), then retry"
+      else
+        fail "log-out --quick refused — reviewer required:"
+        printf '  - %s\n' "${QUICK_REASONS[@]}" >&2
+        [ -z "$QUICK_MISSING_HANDOFF" ] || echo "  write $QUICK_MISSING_HANDOFF too: the gate reads its Risk: and Files: lines" >&2
+      fi
       exit 1
     fi
     db_exec "UPDATE session_log SET review_status='quick', reviewed_by='harness (quick gate)', reviewed_at='$(now_iso)' WHERE id=$sid;

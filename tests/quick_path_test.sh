@@ -11,7 +11,8 @@
 #      closes (contents, so a commit doesn't invalidate either).
 #      Tests kept out of git (.git/info/exclude) count toward that tree too.
 #   3. hold keeps the slot: claim and log-out refuse until unhold.
-#   4. learn caps notes at 300 characters; recall returns at most 5 ranked
+#   4. claim creates progress/<name>/, but never through a symlinked progress/.
+#   5. learn caps notes at 300 characters; recall returns at most 5 ranked
 #      matches; forget hides a note.
 #
 # Usage: bash tests/quick_path_test.sh   (exits non-zero on the first failure)
@@ -118,13 +119,21 @@ g add -A && g commit -qm hidden >/dev/null
 pass "a git-ignored test changed after the approval invalidates it, and stays out of git"
 
 printf 'pre\n' > "$P/src/pre.ts"; printf 'x\nlocal\n' > "$P/src/other.ts"   # uncommitted before the claim
-H claim tiny >/dev/null && H set-surfaces src package.json >/dev/null || die "claim tiny"
+out=$(H claim tiny) && H set-surfaces src package.json >/dev/null || die "claim tiny: $out"
+grep -q 'work folder: progress/tiny/' <<<"$out" && [ -d "$P/progress/tiny" ] || die "claim must create the work folder it announces: $out"
+pass "claim creates the work folder progress/<name>/ it prints"
 printf 'a\nB\n' > "$P/src/app.ts"
 out=$(H log-out --quick --changes src/app.ts --verification v --closure c) && die "--quick without handoff/init must refuse"
 grep -q 'handoff progress/tiny/quick.md is missing' <<<"$out" && grep -q 'init.sh has not passed' <<<"$out" \
+  && grep -q 'reviewer required' <<<"$out" && grep -q 'write progress/tiny/quick.md too' <<<"$out" \
   || die "missing reasons: $out"
 grep -q 'QUICK: refused' <<<"$(q "SELECT entry FROM session_log_entries;")" || die "refusal must be logged"
 pass "refuses without handoff or a passing init, and logs why"
+H record-init pass >/dev/null
+out=$(H log-out --quick --changes src/app.ts --verification v --closure c) && die "--quick without a handoff must refuse"
+grep -q 'refused — missing handoff: write progress/tiny/quick.md' <<<"$out" || die "missing-handoff message: $out"
+grep -q 'reviewer required' <<<"$out" && die "a missing handoff alone must not say reviewer required: $out"
+pass "a missing handoff alone says where to write it, not that a reviewer is required"
 handoff tiny "fix" "src/app.ts" "low"
 H record-init pass >/dev/null
 out=$(H log-out --quick --changes src/app.ts --verification v --closure c) && die "Risk: low must refuse"
@@ -219,7 +228,17 @@ H log-out --changes src/app.ts --verification v --closure c >/dev/null || die "l
 grep -q 'UNHOLD: user approved after all' <<<"$(q "SELECT entry FROM session_log_entries;")" || die "unhold not logged"
 pass "hold keeps the slot (claim and log-out refuse) until unhold"
 
-echo "4. learnings"
+echo "4. work folder through a link"
+OUT_DIR="$WORK/elsewhere" && mkdir -p "$OUT_DIR" && mv "$P/progress" "$P/progress.real" && ln -s "$OUT_DIR" "$P/progress"
+H add-feature --name linked --title Linked >/dev/null || die "add-feature linked"
+out=$(H claim linked) || die "claim must not fail when it can't create the work folder: $out"
+grep -q 'not creating progress/linked/' <<<"$out" || die "a symlinked progress/ should warn: $out"
+[ ! -e "$OUT_DIR/linked" ] || die "claim must not create the work folder through a symlinked progress/"
+out=$(H cancel-session --force "$(q "SELECT id FROM session_log WHERE closed_at IS NULL AND deleted_at IS NULL;")" "slot") || die "cancel linked: $out"
+rm "$P/progress" && mv "$P/progress.real" "$P/progress"
+pass "a symlinked progress/ warns and is not written through"
+
+echo "5. learnings"
 out=$(H learn "$(printf 'x%.0s' $(seq 1 301))") && die "notes over 300 characters must be refused"
 for i in 1 2 3 4 5 6; do H learn --feature held "canDeactivate lesson $i" >/dev/null || die "learn $i"; done
 H learn "i18n keys go through jq" >/dev/null || die "learn i18n"
