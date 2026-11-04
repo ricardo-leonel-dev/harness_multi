@@ -222,6 +222,8 @@ else
     ok "agent usage: $USAGE_RECORDED"
   elif [ -n "$USAGE_RECORDED" ]; then
     warn "agent usage: $USAGE_RECORDED; $USAGE_WARNS warning(s) — run scripts/harness.sh record-usage for details"
+  elif USAGE_FAILED="$(printf '%s\n' "$USAGE_OUT" | grep -m 1 'record-usage failed:' | sed 's/^\[WARN\][[:space:]]*//')" && [ -n "$USAGE_FAILED" ]; then
+    warn "agent usage not recorded (continuing): ${USAGE_FAILED#record-usage failed: }"
   else
     warn "agent usage not recorded — run scripts/harness.sh record-usage for details (continuing)"
   fi
