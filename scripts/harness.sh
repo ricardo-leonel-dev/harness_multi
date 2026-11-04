@@ -289,7 +289,8 @@
 #                                              toolkit installs (listed in harness/installed-files.txt, untracked in
 #                                              the worktree; top-level or a direct child of scripts/, .claude/agents/,
 #                                              harness/) with a link (a differing copy is moved to
-#                                              progress/stale_harness_copies/); other existing files are kept. install.sh re-runs it for every linked
+#                                              progress/stale_harness_copies/); other existing files, and anything under a linked directory of the
+#                                              worktree (.claude -> main's .claude), are kept. install.sh re-runs it for every linked
 #                                              worktree; install.sh itself refuses to run inside one
 #   test [file...]                            run tests with output to progress/test_last.log, printing only
 #                                              the result (and the log's tail on failure): with files and
@@ -3268,31 +3269,78 @@ cmd_test() {
   return "$rc"
 }
 
+# wt_owns_path <wt> <rel> — true when <wt>/<rel> is the worktree's own path:
+# no directory between <wt> and <rel> (the existing ones) is a symlink, and the
+# deepest existing one resolves inside the worktree's real directory
+# (LINK_WT_REAL) and not into the main checkout (LINK_MAIN_REAL) unless the
+# worktree itself sits inside it. A worktree whose .claude links to main's
+# .claude would otherwise let a repair delete main's own files through it.
+LINK_WT_REAL="" LINK_MAIN_REAL=""
+wt_owns_path() {
+  local wt="$1" rel="$2" rest sub="" last="" part real
+  case "$rel" in */*) rest="${rel%/*}" ;; *) rest="" ;; esac
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    if [ "$part" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+    sub="${sub:+$sub/}$part"
+    [ ! -L "$wt/$sub" ] || return 1
+    [ -d "$wt/$sub" ] || break
+    last="$sub"
+  done
+  real="$(cd "$wt${last:+/$last}" 2>/dev/null && pwd -P)" || return 1
+  case "$real/" in "$LINK_WT_REAL"/*) ;; *) return 1 ;; esac
+  case "$real/" in
+    "$LINK_MAIN_REAL"/*) case "$LINK_WT_REAL/" in "$LINK_MAIN_REAL"/?*) ;; *) return 1 ;; esac ;;
+  esac
+  return 0
+}
+
 # relink_stale_copy <main> <wt> <rel> — when <wt>/<rel> is a regular file
 # copy of a file the toolkit installs (<rel> is listed in the main checkout's
 # harness/installed-files.txt, written by install.sh) and the worktree doesn't
 # track it, replace it with a link to <main>/<rel>. Anything else — a project
 # file that is merely git-ignored (scripts/local.json), user config such as
-# .codex/config.toml, mock-data/ — is never touched. A copy that differs is
-# moved to <wt>/progress/stale_harness_copies/<rel> (a timestamp suffix when a
-# backup is already there; sets RELINK_MOVED) instead of deleted. Returns 1
-# when it leaves the file.
-RELINK_MOVED=""
+# .codex/config.toml, mock-data/ — is never touched, nor is a path reached
+# through a linked directory or one that is main's own file (wt_owns_path, -ef).
+# A copy that differs is moved to <wt>/progress/stale_harness_copies/<rel> (a
+# timestamp suffix when a backup is already there; sets RELINK_MOVED) instead
+# of deleted. The link is created beside the file and checked first; when the
+# result does not resolve to main's regular file the original is put back and
+# <rel> is added to RELINK_FAILED. Returns 1 when it leaves the file.
+RELINK_MOVED="" RELINK_FAILED=""
 relink_stale_copy() {
-  local main="$1" wt="$2" rel="$3" aside
+  local main="$1" wt="$2" rel="$3" aside tmp src_dir
   case "$rel" in mock-data|mock-data/*) return 1 ;; esac
   [ -f "$main/harness/installed-files.txt" ] && grep -qxF -- "$rel" "$main/harness/installed-files.txt" || return 1
-  [ -f "$wt/$rel" ] && [ ! -L "$wt/$rel" ] && [ -f "$main/$rel" ] || return 1
+  [ -f "$wt/$rel" ] && [ ! -L "$wt/$rel" ] && [ -f "$main/$rel" ] && [ ! -L "$main/$rel" ] || return 1
+  wt_owns_path "$wt" "$rel" || return 1
+  [ ! "$wt/$rel" -ef "$main/$rel" ] || return 1
+  src_dir="$(cd "$(dirname "$main/$rel")" 2>/dev/null && pwd -P)" || return 1
+  case "$src_dir/" in "$LINK_WT_REAL"/*) return 1 ;; esac
   ! git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || return 1
+  tmp="$wt/$rel.harness-relink.$$"
+  rm -f "$tmp" && ln -s "$main/$rel" "$tmp" || return 1
+  if [ ! -f "$tmp" ] || [ ! "$tmp" -ef "$main/$rel" ]; then
+    rm -f "$tmp"; RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+  fi
   if cmp -s "$main/$rel" "$wt/$rel"; then
-    rm -f "$wt/$rel" || return 1
+    aside="$wt/$rel.harness-relink-bak.$$"
   else
     aside="$wt/progress/stale_harness_copies/$rel"
     { [ ! -e "$aside" ] && [ ! -L "$aside" ]; } || aside="$aside.$(date -u +%Y%m%dT%H%M%SZ).$$"
-    mkdir -p "$(dirname "$aside")" && mv "$wt/$rel" "$aside" || return 1
-    RELINK_MOVED=1
+    mkdir -p "$(dirname "$aside")" || { rm -f "$tmp"; return 1; }
   fi
-  ln -s "$main/$rel" "$wt/$rel"
+  mv "$wt/$rel" "$aside" || { rm -f "$tmp"; return 1; }
+  if mv "$tmp" "$wt/$rel" && [ -L "$wt/$rel" ] && [ -f "$wt/$rel" ] && [ "$wt/$rel" -ef "$main/$rel" ] \
+      && [ -f "$main/$rel" ] && [ ! -L "$main/$rel" ]; then
+    case "$aside" in *.harness-relink-bak.$$) rm -f "$aside" ;; *) RELINK_MOVED=1 ;; esac
+    return 0
+  fi
+  rm -f "$tmp"
+  [ ! -L "$wt/$rel" ] || rm -f "$wt/$rel"
+  mv "$aside" "$wt/$rel"
+  RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"
+  return 1
 }
 
 # link-worktree <dir> — see the usage comment. Items are relative to the
@@ -3303,7 +3351,11 @@ cmd_link_worktree() {
   [ -d "$wt" ] || { fail "not a directory: $wt"; exit 1; }
   wt="$(cd "$wt" && pwd)"
   local main; main="$(pwd)"
-  [ "$wt" != "$main" ] || { fail "link-worktree takes the worktree's project directory, not this checkout"; exit 1; }
+  LINK_WT_REAL="$(cd "$wt" && pwd -P)"; LINK_MAIN_REAL="$(pwd -P)"
+  # Compared resolved too: a worktree directory that is a link to this checkout
+  # would make every "stale copy" one of main's own files.
+  [ "$wt" != "$main" ] && [ "$LINK_WT_REAL" != "$LINK_MAIN_REAL" ] \
+    || { fail "link-worktree takes the worktree's project directory, not this checkout ($wt resolves to $LINK_MAIN_REAL)"; exit 1; }
   local common_main common_wt
   common_main="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
   common_wt="$(cd "$wt" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
@@ -3315,9 +3367,13 @@ cmd_link_worktree() {
   # copy of its own (e.g. excluded from git); a tracked one is the branch's.
   local shared="AGENTS.md CLAUDE.md init.sh harness.db harness scripts .harness.json .claude/agents .codex mock-data"
   local fallback="docs CHECKPOINTS.md specs features.seed.json"
-  local item child rel linked=() kept=() repaired=()
+  local item child rel linked=() kept=() repaired=() through=()
+  RELINK_MOVED="" RELINK_FAILED=""
   for item in $shared $fallback; do
     [ -e "$main/$item" ] || continue
+    # Under a linked directory (.claude -> main's .claude, or a folder outside
+    # the worktree) nothing is linked or repaired: it would write elsewhere.
+    if ! wt_owns_path "$wt" "$item"; then through+=("$item"); continue; fi
     if [ -L "$wt/$item" ] || [ -e "$wt/$item" ]; then
       # A real directory in the worktree (e.g. tracked project scripts next to
       # the harness ones): link the children it is missing, and replace stale
@@ -3371,6 +3427,8 @@ cmd_link_worktree() {
   ok "worktree $wt: linked ${#linked[@]} item(s)${linked[0]+: ${linked[*]}}; progress/ is local"
   [ "${#repaired[@]}" -eq 0 ] || ok "replaced stale harness copies with links: ${repaired[*]}${RELINK_MOVED:+ (differing copies kept in progress/stale_harness_copies/)}"
   [ "${#kept[@]}" -eq 0 ] || ok "already present, left as they are: ${kept[*]}"
+  [ "${#through[@]}" -eq 0 ] || ok "inside a linked directory of the worktree, left as they are: ${through[*]}"
+  [ -z "$RELINK_FAILED" ] || warn "could not replace these stale harness copies with links (left as they were): $RELINK_FAILED"
 }
 
 cmd_stats() {

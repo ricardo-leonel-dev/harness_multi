@@ -17,6 +17,18 @@
 #   5. record-usage with a collector that rejects its options prints a [WARN]
 #      with the collector's error and still exits 0; stats shows that warning
 #      before "no agent runs recorded".
+#   6. a worktree whose .claude is a directory link to the main checkout's
+#      .claude (the layout older link-worktree runs left): install.sh in main
+#      and link-worktree never replace main's own agent files through it — they
+#      stay regular files with their content and no self-referential link appears.
+#   7. the same for a worktree whose scripts/ links to main's, and for a
+#      worktree project directory that is itself a link to the main checkout
+#      (link-worktree refuses it).
+#   8. a worktree .claude linked to a folder outside both checkouts: nothing
+#      there is deleted, replaced or linked.
+#   9. without harness/installed-files.txt nothing is repaired.
+#  10. install.sh in main fails loudly, before copying, on a self-referential
+#      link or a linked directory where it would copy a harness file.
 #
 # Usage: bash tests/worktree_link_refresh_test.sh   (exits non-zero on the first failure)
 
@@ -144,5 +156,94 @@ out=$(H "$Q" stats); rc=$?
 [ "$(printf '%s\n' "$out" | grep -n 'record-usage failed' | cut -d: -f1)" = 1 ] && [ "$(printf '%s\n' "$out" | grep -n 'no agent runs recorded' | cut -d: -f1)" = 2 ] \
   || die "stats should show the warning before 'no agent runs recorded': $out"
 pass "record-usage warns about a failed collector and stats shows it"
+
+# main_agents_intact <label> — main's agent files are regular, with their
+# install-time content, and the main checkout holds no broken or looping link.
+cp -R "$P/.claude/agents" "$WORK/main-agents.before"
+main_agents_intact() {
+  local f n=0
+  for f in "$WORK/main-agents.before"/*.md; do
+    n=$((n + 1))
+    [ -f "$P/.claude/agents/${f##*/}" ] && [ ! -L "$P/.claude/agents/${f##*/}" ] \
+      || die "$1: main's .claude/agents/${f##*/} must stay a regular file: $(ls -la "$P/.claude/agents/${f##*/}" 2>&1)"
+    cmp -s "$f" "$P/.claude/agents/${f##*/}" || die "$1: main's .claude/agents/${f##*/} lost its content"
+  done
+  [ "$n" -gt 0 ] || die "setup: no agent files in main"
+  [ -z "$(find -L "$P" -type l 2>/dev/null)" ] || die "$1: broken or looping links in main: $(find -L "$P" -type l 2>/dev/null)"
+}
+
+echo "6. a worktree .claude linked to main's .claude"
+rm -rf "$W/.claude" && ln -s "$P/.claude" "$W/.claude"
+out=$(install_into "$P") || die "reinstall in the main checkout: $out"
+main_agents_intact "install.sh in main"
+out=$(H "$P" link-worktree "$W") || die "link-worktree: $out"
+main_agents_intact "link-worktree"
+cmp -s "$WORK/main-agents.before/implementer.md" "$W/.claude/agents/implementer.md" || die "the worktree must still read the agents"
+grep -q 'replaced stale.*\.claude' <<<"$out" && die "nothing under a linked .claude may be repaired: $out"
+pass "main's agent files survive a worktree .claude that links to them"
+
+echo "7. a worktree scripts/ linked to main's, and a worktree project dir linked to main"
+cp -R "$P/scripts" "$WORK/main-scripts.before"
+mv "$W/scripts" "$WORK/wt-scripts.real" && ln -s "$P/scripts" "$W/scripts"
+out=$(H "$P" link-worktree "$W") || die "link-worktree: $out"
+out=$(install_into "$P") || die "reinstall in the main checkout: $out"
+for f in "$WORK/main-scripts.before"/*; do
+  [ -f "$P/scripts/${f##*/}" ] && [ ! -L "$P/scripts/${f##*/}" ] || die "main's scripts/${f##*/} must stay a regular file"
+done
+main_agents_intact "scripts/ linked"
+rm "$W/scripts" && mv "$WORK/wt-scripts.real" "$W/scripts"
+git -C "$WORK/repo" worktree add -q "$WORK/wt2" 2>/dev/null || die "git worktree add wt2"
+rm -rf "$WORK/wt2/app" && ln -s "$P" "$WORK/wt2/app"
+out=$(H "$P" link-worktree "$WORK/wt2/app") && die "a worktree dir that resolves to the main checkout must be refused: $out"
+main_agents_intact "worktree dir linked to main"
+for f in "$WORK/main-scripts.before"/*; do
+  [ -f "$P/scripts/${f##*/}" ] && [ ! -L "$P/scripts/${f##*/}" ] || die "main's scripts/${f##*/} must stay a regular file after the refusal"
+done
+out=$(install_into "$P") || die "reinstall with wt2 linked to main: $out"
+main_agents_intact "install.sh with a worktree dir linked to main"
+rm "$WORK/wt2/app" && git -C "$WORK/repo" worktree remove --force "$WORK/wt2" 2>/dev/null
+pass "linked scripts/ and a worktree dir that is main itself leave main's files alone"
+
+echo "8. a worktree .claude linked outside both checkouts"
+mkdir -p "$WORK/outside" && cp -R "$P/.claude" "$WORK/outside/.claude"
+cp -R "$WORK/outside/.claude" "$WORK/outside.before"
+rm "$W/.claude" && ln -s "$WORK/outside/.claude" "$W/.claude"
+out=$(H "$P" link-worktree "$W") || die "link-worktree: $out"
+out=$(install_into "$P") || die "reinstall in the main checkout: $out"
+[ -z "$(find "$WORK/outside" -type l)" ] || die "no link may be written outside the worktree: $(find "$WORK/outside" -type l)"
+diff -r "$WORK/outside.before" "$WORK/outside/.claude" >/dev/null || die "the outside folder changed"
+main_agents_intact "outside link"
+pass "a .claude linked outside both checkouts is left alone"
+
+echo "9. no installed-files list, no repair"
+rm "$W/.claude" && mkdir -p "$W/.claude"
+out=$(H "$P" link-worktree "$W") || die "link-worktree: $out"
+is_link_to "$W/.claude/agents" "$P/.claude/agents" || die "link-worktree should link .claude/agents: $(ls -la "$W/.claude")"
+mv "$P/harness/installed-files.txt" "$WORK/installed-files.txt"
+rm "$W/AGENTS.md" && cp "$P/AGENTS.md" "$W/AGENTS.md"
+out=$(H "$P" link-worktree "$W") || die "link-worktree: $out"
+[ -f "$W/AGENTS.md" ] && [ ! -L "$W/AGENTS.md" ] || die "without the list the copy must stay"
+grep -q 'replaced stale' <<<"$out" && die "without the list nothing is repaired: $out"
+mv "$WORK/installed-files.txt" "$P/harness/installed-files.txt"
+out=$(H "$P" link-worktree "$W") || die "link-worktree: $out"
+is_link_to "$W/AGENTS.md" "$P/AGENTS.md" || die "with the list back the copy is repaired"
+pass "without harness/installed-files.txt nothing is repaired"
+
+echo "10. install.sh refuses a self-referential link or a linked directory in main"
+cp "$P/.claude/agents/reviewer.md" "$WORK/reviewer.md.bak"
+rm "$P/.claude/agents/reviewer.md" && ln -s "$P/.claude/agents/reviewer.md" "$P/.claude/agents/reviewer.md"
+out=$(install_into "$P") && die "install.sh must fail on a self-referential link: $out"
+grep -q '\[FAIL\].*\.claude/agents/reviewer.md' <<<"$out" || die "the failure must name the link: $out"
+grep -q 'Copying harness-core files' <<<"$out" && die "it must fail before copying: $out"
+rm "$P/.claude/agents/reviewer.md" && cp "$WORK/reviewer.md.bak" "$P/.claude/agents/reviewer.md"
+mv "$P/.codex" "$WORK/codex-elsewhere" && ln -s "$WORK/codex-elsewhere" "$P/.codex"
+cp -R "$WORK/codex-elsewhere" "$WORK/codex.before"
+out=$(install_into "$P") && die "install.sh must fail on a linked directory: $out"
+grep -q '\[FAIL\].*\.codex' <<<"$out" || die "the failure must name the linked directory: $out"
+diff -r "$WORK/codex.before" "$WORK/codex-elsewhere" >/dev/null || die "nothing may be written through the link"
+rm "$P/.codex" && mv "$WORK/codex-elsewhere" "$P/.codex"
+out=$(install_into "$P") || die "install.sh after the links are fixed: $out"
+main_agents_intact "after the refused installs"
+pass "install.sh fails loudly before writing through a link"
 
 echo "all $PASS checks passed"
