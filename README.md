@@ -389,8 +389,15 @@ Covered by `bash tests/quick_path_test.sh`.
   `AGENTS.md`, `.harness.json`; `docs/`, `specs/`, `CHECKPOINTS.md` only when the worktree
   has none) and keeps `progress/` a local directory, so agents never write through a symlink
   into another checkout. It lists the links in the shared `.git/info/exclude` and is safe to
-  re-run.
-Covered by `bash tests/feature_flow_test.sh`.
+  re-run: it links harness files added since and replaces a stale regular copy of a file
+  the toolkit installs (listed in `harness/installed-files.txt`, untracked in the worktree;
+  top-level or directly under `scripts/`, `.claude/agents/`, `harness/`) with a link, moving a
+  differing copy to the worktree's `progress/stale_harness_copies/`. Other files there, such
+  as a git-ignored `scripts/local.json`, `.codex/config.toml` or `mock-data/`, are kept. `install.sh` in the main checkout
+  re-runs it for every worktree linked there, and refuses to run inside a linked worktree
+  (it would write through the links). A `record-usage` whose collector fails (e.g. a stale
+  `agent_usage.py`) prints a `[WARN]` with its error, also shown by `stats` and `./init.sh`.
+Covered by `bash tests/feature_flow_test.sh` and `bash tests/worktree_link_refresh_test.sh`.
 
 ### Out of scope and surfaces
 

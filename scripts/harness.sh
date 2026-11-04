@@ -284,7 +284,13 @@
 #                                              project files such as docs/ or specs/ only when the worktree lacks
 #                                              them) and keeps progress/ a real local directory, so agents writing
 #                                              handoffs never write outside the worktree. Lists the links in the
-#                                              shared .git/info/exclude. Safe to re-run: existing files are kept
+#                                              shared .git/info/exclude. Safe to re-run and repairing: links harness
+#                                              files added since, and replaces a stale regular copy of a file the
+#                                              toolkit installs (listed in harness/installed-files.txt, untracked in
+#                                              the worktree; top-level or a direct child of scripts/, .claude/agents/,
+#                                              harness/) with a link (a differing copy is moved to
+#                                              progress/stale_harness_copies/); other existing files are kept. install.sh re-runs it for every linked
+#                                              worktree; install.sh itself refuses to run inside one
 #   test [file...]                            run tests with output to progress/test_last.log, printing only
 #                                              the result (and the log's tail on failure): with files and
 #                                              .harness.json::test_targeted_command (its {files} placeholder
@@ -3147,8 +3153,21 @@ cmd_record_usage() {
     warn "record-usage needs python3 and scripts/agent_usage.py (re-run install.sh) — skipping"
     return 0
   fi
+  # Still best-effort (exit 0), but a collector that fails outright (e.g. a
+  # stale agent_usage.py that rejects an option) is a [WARN] with its stderr,
+  # never a silent "no agent runs recorded".
+  local errf rc=0
+  errf="$(mktemp "${TMPDIR:-/tmp}/harness_usage.XXXXXX")" || errf=/dev/null
   python3 "$SCRIPT_DIR/agent_usage.py" --db "$DB_PATH" --project-slug "$PROJECT_SLUG" \
-    collect --project-root "$(pwd)" --reopen-warn-tokens "$(reopen_warn_tokens)" "$@" || true
+    collect --project-root "$(pwd)" --reopen-warn-tokens "$(reopen_warn_tokens)" "$@" 2>"$errf" || rc=$?
+  if [ "$errf" != /dev/null ]; then
+    if [ "$rc" -ne 0 ]; then
+      warn "record-usage failed: scripts/agent_usage.py exited $rc, nothing recorded — $(grep -v '^[[:space:]]*$' "$errf" | tail -n 2 | tr '\n' ' ' | sed 's/ *$//') (a stale copy? re-run install.sh in the main checkout; in a linked worktree, harness.sh link-worktree from the main checkout replaces it)"
+    else
+      cat "$errf" >&2
+    fi
+    rm -f "$errf"
+  fi
   warn_token_budget
 }
 
@@ -3249,6 +3268,33 @@ cmd_test() {
   return "$rc"
 }
 
+# relink_stale_copy <main> <wt> <rel> — when <wt>/<rel> is a regular file
+# copy of a file the toolkit installs (<rel> is listed in the main checkout's
+# harness/installed-files.txt, written by install.sh) and the worktree doesn't
+# track it, replace it with a link to <main>/<rel>. Anything else — a project
+# file that is merely git-ignored (scripts/local.json), user config such as
+# .codex/config.toml, mock-data/ — is never touched. A copy that differs is
+# moved to <wt>/progress/stale_harness_copies/<rel> (a timestamp suffix when a
+# backup is already there; sets RELINK_MOVED) instead of deleted. Returns 1
+# when it leaves the file.
+RELINK_MOVED=""
+relink_stale_copy() {
+  local main="$1" wt="$2" rel="$3" aside
+  case "$rel" in mock-data|mock-data/*) return 1 ;; esac
+  [ -f "$main/harness/installed-files.txt" ] && grep -qxF -- "$rel" "$main/harness/installed-files.txt" || return 1
+  [ -f "$wt/$rel" ] && [ ! -L "$wt/$rel" ] && [ -f "$main/$rel" ] || return 1
+  ! git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || return 1
+  if cmp -s "$main/$rel" "$wt/$rel"; then
+    rm -f "$wt/$rel" || return 1
+  else
+    aside="$wt/progress/stale_harness_copies/$rel"
+    { [ ! -e "$aside" ] && [ ! -L "$aside" ]; } || aside="$aside.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    mkdir -p "$(dirname "$aside")" && mv "$wt/$rel" "$aside" || return 1
+    RELINK_MOVED=1
+  fi
+  ln -s "$main/$rel" "$wt/$rel"
+}
+
 # link-worktree <dir> — see the usage comment. Items are relative to the
 # project directory (the same subdirectory inside the worktree).
 cmd_link_worktree() {
@@ -3269,19 +3315,28 @@ cmd_link_worktree() {
   # copy of its own (e.g. excluded from git); a tracked one is the branch's.
   local shared="AGENTS.md CLAUDE.md init.sh harness.db harness scripts .harness.json .claude/agents .codex mock-data"
   local fallback="docs CHECKPOINTS.md specs features.seed.json"
-  local item child linked=() kept=()
+  local item child rel linked=() kept=() repaired=()
   for item in $shared $fallback; do
     [ -e "$main/$item" ] || continue
     if [ -L "$wt/$item" ] || [ -e "$wt/$item" ]; then
       # A real directory in the worktree (e.g. tracked project scripts next to
-      # the harness ones): link only the harness children it is missing.
+      # the harness ones): link the children it is missing, and replace stale
+      # regular copies of toolkit-installed ones (left by an install.sh run
+      # inside the worktree, or by an older link-worktree) with links. Only
+      # direct children and top-level files are repaired (harness/installed-files.txt
+      # decides which; harness.db, .harness.json and mock-data/ never are).
       if [ -d "$wt/$item" ] && [ ! -L "$wt/$item" ] && [ -d "$main/$item" ] && [[ " $shared " == *" $item "* ]]; then
         for child in "$main/$item"/*; do
           [ -e "$child" ] || continue
-          if [ ! -e "$wt/$item/${child##*/}" ] && [ ! -L "$wt/$item/${child##*/}" ]; then
-            ln -s "$child" "$wt/$item/${child##*/}" && linked+=("$item/${child##*/}")
+          rel="$item/${child##*/}"
+          if [ ! -e "$wt/$rel" ] && [ ! -L "$wt/$rel" ]; then
+            ln -s "$child" "$wt/$rel" && linked+=("$rel")
+          elif relink_stale_copy "$main" "$wt" "$rel"; then
+            repaired+=("$rel")
           fi
         done
+      elif [ -f "$wt/$item" ] && relink_stale_copy "$main" "$wt" "$item"; then
+        repaired+=("$item")
       else
         kept+=("$item")
       fi
@@ -3314,6 +3369,7 @@ cmd_link_worktree() {
   } > "$exclude_file.tmp" && mv "$exclude_file.tmp" "$exclude_file"
 
   ok "worktree $wt: linked ${#linked[@]} item(s)${linked[0]+: ${linked[*]}}; progress/ is local"
+  [ "${#repaired[@]}" -eq 0 ] || ok "replaced stale harness copies with links: ${repaired[*]}${RELINK_MOVED:+ (differing copies kept in progress/stale_harness_copies/)}"
   [ "${#kept[@]}" -eq 0 ] || ok "already present, left as they are: ${kept[*]}"
 }
 
@@ -3328,7 +3384,8 @@ cmd_stats() {
   for a in "$@"; do
     if [ "$a" = "--no-refresh" ]; then refresh=0; else args+=("$a"); fi
   done
-  [ "$refresh" = 0 ] || cmd_record_usage --max-seconds 10 >/dev/null 2>&1 || true
+  # Only a failed collector's warning is shown: an empty table must not hide why.
+  [ "$refresh" = 0 ] || { cmd_record_usage --max-seconds 10 2>&1 >/dev/null | grep -F 'record-usage failed:' >&2; } || true
   python3 "$SCRIPT_DIR/agent_usage.py" --db "$DB_PATH" --project-slug "$PROJECT_SLUG" stats "${args[@]+"${args[@]}"}"
 }
 

@@ -177,6 +177,25 @@ gen_uuid() {
 
 sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 
+# link_target_dir <path> — physical directory a symlink at <path> points into
+# (empty when <path> is not a symlink).
+link_target_dir() {
+  local t
+  [ -L "$1" ] || return 0
+  t="$(readlink "$1")"
+  case "$t" in /*) ;; *) t="$(dirname "$1")/$t" ;; esac
+  (cd "$(dirname "$t")" 2>/dev/null && pwd -P)
+}
+
+# A git worktree given the harness by `harness.sh link-worktree` shares the main
+# checkout's files through symlinks: copying into it would write through those
+# links and leave regular copies of files added since (a stale agent_usage.py
+# that later breaks record-usage). The main checkout's install refreshes it.
+if [ -L "$TARGET_DIR/harness.db" ] || [ -L "$TARGET_DIR/scripts" ] || [ -L "$TARGET_DIR/scripts/harness.sh" ]; then
+  fail "$TARGET_DIR shares another checkout's harness (link-worktree symlinks): run install.sh in that main checkout instead — it re-links its worktrees"
+  exit 1
+fi
+
 echo "── 1. Copying harness-core files ───────────────────────"
 
 cp "$TOOLKIT_DIR/AGENTS.md" "$TARGET_DIR/AGENTS.md"
@@ -192,6 +211,16 @@ cp "$TOOLKIT_DIR/scripts/time_phase.py" "$TARGET_DIR/scripts/time_phase.py"
 cp "$TOOLKIT_DIR/scripts/agent_usage.py" "$TARGET_DIR/scripts/agent_usage.py"
 chmod +x "$TARGET_DIR/init.sh" "$TARGET_DIR"/scripts/*.sh
 ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*.toml, init.sh, scripts/*.sh, scripts/{time_phase,agent_usage}.py"
+
+# The files copied above (and the profile ones below) are listed, relative to
+# the project, in harness/installed-files.txt: link-worktree replaces a stale
+# regular copy in a worktree only for a path in that list, never for a project
+# file that merely happens to be git-ignored (scripts/local.json, .codex/config.toml,
+# mock-data/). INSTALLED_FILES is appended to next to every cp that adds one.
+INSTALLED_FILES="AGENTS.md init.sh scripts/time_phase.py scripts/agent_usage.py"
+for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do INSTALLED_FILES="$INSTALLED_FILES .claude/agents/${name##*/}"; done
+for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do INSTALLED_FILES="$INSTALLED_FILES .codex/agents/${name##*/}"; done
+for name in "$TOOLKIT_DIR"/scripts/*.sh; do INSTALLED_FILES="$INSTALLED_FILES scripts/${name##*/}"; done
 
 # lean/ (the lean flow: gate, runner, sandbox, adapters, instructions) sits at the
 # project root, where harness.sh looks for the gate (<scripts>/../lean/gate.sh).
@@ -209,6 +238,8 @@ cp "$TOOLKIT_DIR/shared/timing.md" "$TARGET_DIR/harness/instructions/timing.md"
 for name in testing lifecycle notion cross-project; do
   cp "$TOOLKIT_DIR/shared/$name.md" "$TARGET_DIR/harness/instructions/$name.md"
 done
+INSTALLED_FILES="$INSTALLED_FILES harness/instructions/coverage.md harness/instructions/persona.md harness/instructions/timing.md"
+for name in testing lifecycle notion cross-project; do INSTALLED_FILES="$INSTALLED_FILES harness/instructions/$name.md"; done
 if [ "$PROFILE" = postgres ]; then
   mkdir -p "$TARGET_DIR/scripts/templates"
   cp "$TOOLKIT_DIR/profiles/postgres/mock_data.py" "$TARGET_DIR/scripts/mock_data.py"
@@ -228,7 +259,10 @@ if [ "$PROFILE" = postgres ]; then
   cp -r "$TOOLKIT_DIR/profiles/postgres/test_helpers/." "$TARGET_DIR/harness/test_helpers/"
   chmod +x "$TARGET_DIR/harness/test_helpers/install.sh" "$TARGET_DIR/harness/test_helpers/uninstall.sh"
   ok "refreshed postgres profile tools, shared instructions, and test_helpers (harness/test_helpers/)"
+  INSTALLED_FILES="$INSTALLED_FILES scripts/mock_data.py scripts/assemble_migration.py scripts/build_traceability.sh scripts/run_tests.sh scripts/templates/acceptance_test_prologue.sql harness/instructions/mock-data.md harness/instructions/postgres.md"
 fi
+# shellcheck disable=SC2086
+printf '%s\n' $INSTALLED_FILES > "$TARGET_DIR/harness/installed-files.txt"
 
 # The harness no longer installs Claude Code hooks, so Claude Code and Codex CLI
 # behave the same: agents run ./init.sh themselves (it also records agent usage)
@@ -484,6 +518,27 @@ echo "── 6. Generating initial snapshot + mirror sync ───────�
 
 bash scripts/harness.sh snapshot
 bash scripts/harness.sh sync
+
+# Worktrees linked to this checkout (harness.sh link-worktree) get harness files
+# added since and lose stale regular copies of harness-owned ones: re-run the
+# linking for each worktree whose harness.db links here.
+refresh_linked_worktrees() {
+  git -C "$TARGET_DIR" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  local prefix here wt dir
+  prefix="$(git -C "$TARGET_DIR" rev-parse --show-prefix)"
+  here="$(cd "$TARGET_DIR" && pwd -P)"
+  while IFS= read -r wt; do
+    [ -n "$wt" ] || continue
+    dir="$wt/$prefix"; dir="${dir%/}"
+    [ -d "$dir" ] || continue
+    [ "$(cd "$dir" && pwd -P)" != "$here" ] || continue
+    [ "$(link_target_dir "$dir/harness.db")" = "$here" ] || continue
+    echo ""
+    echo "── Refreshing linked worktree $dir ──"
+    bash scripts/harness.sh link-worktree "$dir" || warn "could not refresh the links of worktree $dir — run scripts/harness.sh link-worktree \"$dir\""
+  done < <(git -C "$TARGET_DIR" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
+}
+refresh_linked_worktrees
 
 echo ""
 ok "install complete. Fill in docs/*.md and CHECKPOINTS.md, then run ./init.sh."
