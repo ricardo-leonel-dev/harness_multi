@@ -51,6 +51,9 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
 - **Unix sockets.** Only in the project, the local database sockets (`.s.PGSQL.<port>`,
   `mysql.sock`, `redis*.sock`, `memcached*.sock` in `/private/tmp`) and the gate run's own `TMPDIR`:
   no Docker API, no ssh-agent.
+- **TCP ports.** The gate's profile denies the harness Postgres mirror's host ports (54329 Postgres,
+  3001 PostgREST: `LEAN_DENY_PORTS`) and `lean.deny_ports` on every address, after the localhost
+  allow and also with `lean.allowed_domains`: a suite can't read the cross-project mirror.
 - **Writes.** Only in the project and the temp dir (the gate's commands: the project, `/private/tmp`,
   `/dev` and a fresh `TMPDIR` of their own). A session's `TMPDIR` is a fresh folder in the user temp
   dir (a SessionStart hook; Claude Code's own temp folder is denied), removed after a headless session. Inside the project, the harness-owned paths are
@@ -94,7 +97,10 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
 - **Reads outside `$HOME`** stay open: system toolchains, `/opt/homebrew`, the user temp dir and
   `/private/tmp`, other apps' files there included. A project kept outside `$HOME` has its siblings
   readable.
-- **Localhost** reaches every local service (databases, dev servers, the harness mirror), by design.
+- **Localhost**: sessions reach every local service (databases, dev servers, the harness mirror
+  included). Claude Code's sandbox can't deny a single localhost port, and macOS refuses a nested
+  `sandbox-exec`; the mirror's credentials stay out of the session (environment stripped,
+  `docker-compose.yml` unreadable). The gate denies `LEAN_DENY_PORTS` and `lean.deny_ports`.
 - **`lean.allowed_domains`**: seatbelt can't filter by host name, so the gate's outbound network is
   open while it is set (a `[WARN]` says so).
 - **Processes that leave the process group** (a new session or process group: `setsid`, `setpgid`)

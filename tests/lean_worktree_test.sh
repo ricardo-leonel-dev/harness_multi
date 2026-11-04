@@ -51,7 +51,10 @@
 #      [WARN] in the report); fds above 2 are closed; run from a pty, a TIOCSTI suite pushes
 #      nothing into the terminal; sandbox.sh's [WARN] (allowed_domains) reaches gate.sh and
 #      run.sh gate; CLAUDE.local.md and nested CLAUDE.md / CLAUDE.local.md are write-denied
-#      and trusted.
+#      and trusted. TCP: the profile denies the harness Postgres mirror's ports (54329, 3001)
+#      and lean.deny_ports after the localhost allow, also with allowed_domains (invalid
+#      entries fail the build); a test listener on a denied port is unreachable inside it on
+#      127.0.0.1, localhost and ::1, another one answers.
 #  10. Mach services are denied but for an allowlist and Chromium's rendezvous prefix (a name
 #      under it 1102, other Chromium/Chrome names 1100; lean.allowed_mach can't add
 #      LEAN_MACH_NEVER; checked on the generated profile), lookups of LaunchServices, lsd,
@@ -669,6 +672,61 @@ if [ "$have_sbx" = 1 ]; then
   pass "sandboxed (--seatbelt): Docker and ssh-agent sockets are unreachable; database sockets and the project's are reachable"
 fi
 cleanup9; SERVERS=(); rm -r "$R3/run"
+# TCP ports: the profile denies the harness Postgres mirror's host ports (LEAN_DENY_PORTS) and
+# lean.deny_ports on every address, after the localhost allow, also with allowed_domains; an
+# invalid lean.deny_ports entry fails the build. Behaviour on listeners of the test's own, on
+# loopback only (the real mirror ports are never connected to).
+setj() { jq "$1" "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"; }
+deny_ip() { printf '(deny network-outbound (remote ip "*:%s"))' "$1"; }
+PN=$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$R3" --seatbelt 2>/dev/null) || die "sandbox.sh --seatbelt"
+local_at=$(grep -nxF '(allow network-outbound (remote ip "localhost:*"))' <<<"$PN" | cut -d: -f1)
+[ -n "$local_at" ] || die "the profile should allow localhost"
+for port in 54329 3001; do
+  at=$(grep -nxF "$(deny_ip $port)" <<<"$PN" | cut -d: -f1)
+  [ -n "$at" ] && [ "$at" -gt "$local_at" ] || die "the profile must deny port $port after the localhost allow: $(grep 'remote ip' <<<"$PN")"
+done
+[ "$(grep 'remote ip' <<<"$PN" | tail -1)" = "$(deny_ip 54329)" ] || die "no remote ip rule may follow the port denies: $(grep 'remote ip' <<<"$PN")"
+setj '.lean.allowed_domains = ["registry.npmjs.org"] | .lean.deny_ports = [6543, 3001]'
+PN=$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$R3" --seatbelt 2>/dev/null) || die "sandbox.sh --seatbelt with allowed_domains"
+for port in 3001 6543 54329; do
+  [ "$(grep -cxF "$(deny_ip $port)" <<<"$PN")" = 1 ] || die "with allowed_domains and lean.deny_ports the profile must deny port $port once: $(grep 'remote ip' <<<"$PN")"
+done
+for bad in 0 70000 '"abc"' 1.5 '"5432"' 5432; do
+  case "$bad" in 5432) setj ".lean.deny_ports = $bad" ;; *) setj ".lean.deny_ports = [3001, $bad]" ;; esac
+  out=$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$R3" --seatbelt 2>&1 >/dev/null) && die "lean.deny_ports $bad must fail the profile build"
+  grep -qF 'lean.deny_ports must be an array of integers 1-65535' <<<"$out" || die "lean.deny_ports $bad: no clear error: $out"
+done
+pass "the profile denies the mirror ports (54329, 3001) and lean.deny_ports after the localhost allow, also with allowed_domains; invalid entries fail"
+if [ "$have_sbx" = 1 ]; then
+  # A TCP listener on 127.0.0.1 (and ::1 on the same port when loopback v6 is there): it writes
+  # "<port> <v6>" to a file and waits.
+  cat > "$WORK/tcp.py" <<'PY'
+import os, socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(5); port, v6 = s.getsockname()[1], 0
+try:
+    t = socket.socket(socket.AF_INET6); t.bind(("::1", port)); t.listen(5); v6 = 1
+except OSError: pass
+open(sys.argv[1] + ".tmp", "w").write("%d %d\n" % (port, v6)); os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(120)
+PY
+  listen() { python3 -I "$WORK/tcp.py" "$1" & SERVERS+=($!); local i=0; while [ ! -s "$1" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done; [ -s "$1" ] || die "no TCP listener ($1)"; }
+  listen "$WORK/tcp.deny"; listen "$WORK/tcp.open"
+  read -r DPORT DV6 < "$WORK/tcp.deny"; read -r OPORT OV6 < "$WORK/tcp.open"
+  hosts=(127.0.0.1 localhost); [ "$DV6" = 1 ] && [ "$OV6" = 1 ] && hosts+=(::1)
+  for h in "${hosts[@]}"; do
+    nc -z -G 2 "$h" "$DPORT" >/dev/null 2>&1 || die "unsandboxed, $h:$DPORT should answer"
+  done
+  for domains in '[]' '["registry.npmjs.org"]'; do
+    setj ".lean.allowed_domains = $domains | .lean.deny_ports = [$DPORT]"
+    for h in "${hosts[@]}"; do
+      sb "$R3" nc -z -G 2 "$h" "$OPORT" >/dev/null 2>&1 || die "sandboxed (allowed_domains $domains): $h:$OPORT (not denied) should answer"
+      sb "$R3" nc -z -G 2 "$h" "$DPORT" >/dev/null 2>&1 && die "sandboxed (allowed_domains $domains): $h:$DPORT (lean.deny_ports) must be unreachable"
+    done
+  done
+  pass "sandboxed (--seatbelt): a listener on a lean.deny_ports port is unreachable on ${hosts[*]}, also with allowed_domains; another local port answers"
+  cleanup9; SERVERS=(); rm -f "$WORK/tcp.deny" "$WORK/tcp.open"
+fi
+setj 'del(.lean.allowed_domains, .lean.deny_ports)'
 # The gate's environment: no SSH_AUTH_SOCK, no secret-looking variable unless passed through,
 # no global git config; in both sandboxed and unsandboxed runs.
 jq '.lean.env_passthrough = ["KEEP_TOKEN"]' "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"

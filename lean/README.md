@@ -69,7 +69,8 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
   accept a change you made yourself). Claude Code's own temp folder is denied, so each session gets
   a fresh `TMPDIR` in the user temp dir (a SessionStart hook; removed after a headless session).
 - **Network.** Localhost and `lean.allowed_domains`; unix sockets only in the project and the local
-  database sockets.
+  database sockets. The gate's profile denies the harness Postgres mirror's TCP ports (54329,
+  3001: `LEAN_DENY_PORTS`) and `lean.deny_ports` on every address; sessions still reach them.
 - **Environment.** Secret-looking variables are dropped (`lean.env_passthrough` keeps one);
   `RUSTC_WRAPPER`/`CARGO_BUILD_RUSTC_WRAPPER` empty (sccache can't reach its server),
   `GIT_OPTIONAL_LOCKS=0`, `GIT_CONFIG_GLOBAL=/dev/null` (a suite that commits sets its own identity).
@@ -94,6 +95,7 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 | `acceptance_dir` | `acceptance` | where risk-mode acceptance tests live (outside `src/` and `tests/`, so the planner may write them) |
 | `allowed_domains` | `[]` | hosts the sandboxed sessions may reach besides localhost |
 | `allowed_read` | `[]` | paths (`~` expanded, `..` normalised, links resolved) the sessions and the gate may read in `$HOME` besides the toolchain list; an entry reaching credentials or the lean state is refused whole |
+| `deny_ports` | `[]` | TCP ports (integers 1-65535) the gate's profile denies on every address besides `LEAN_DENY_PORTS` in `sandbox.sh` (the mirror's 54329 and 3001); an invalid entry fails the profile build |
 | `allowed_mach` | `[]` | mach service names the gate's commands may look up besides `LEAN_MACH_ALLOW` in `sandbox.sh` (`LEAN_MACH_NEVER` is refused: LaunchServices, Apple Events, the pasteboard, securityd, `cfprefsd.agent`, …); Chromium's own rendezvous service (`org.chromium.Chromium.MachPortRendezvousServer.<pid>`) is always allowed |
 | `env_passthrough` | `[]` | secret-looking environment variables (`DATABASE_URL`, `NPM_TOKEN`, …) the sessions and the gate's commands keep |
 

@@ -21,9 +21,11 @@
 # Writes: the project and the temp dir. Inside the project the harness-owned paths
 # (LEAN_DENY_WRITE) and the git state (.git, the git dir, the common dir) are write-denied by
 # name, and CLAUDE.md / CLAUDE.local.md / .claude/ anywhere get Edit deny globs (the profile:
-# a regex, any case). Network: localhost and lean.allowed_domains; unix sockets only in the
-# project and the local database sockets (.s.PGSQL.<port>, mysql.sock, redis*.sock,
-# memcached*.sock in /private/tmp; LEAN_DB_SOCK_DIR replaces that folder, for tests).
+# a regex, any case). Network: localhost and lean.allowed_domains (the profile: never the
+# harness Postgres mirror's TCP ports, LEAN_DENY_PORTS plus lean.deny_ports, on any address);
+# unix sockets only in the project and the local database sockets (.s.PGSQL.<port>,
+# mysql.sock, redis*.sock, memcached*.sock in /private/tmp; LEAN_DB_SOCK_DIR replaces that
+# folder, for tests).
 #
 # --seatbelt adds what Claude Code's settings can't say: writes only in the project, /dev
 # (but the terminals: no write or ioctl on /dev/tty*) and /private/tmp (lean/lib.sh
@@ -71,6 +73,10 @@ LEAN_HOME_READ=".cargo .rustup .npm .nvm .pyenv .rbenv .gem .bun .deno .volta .a
 db_path=$(jq -r '.db_path // "harness.db"' "$project/.harness.json" 2>/dev/null || echo harness.db)
 LEAN_DENY_WRITE=(lean scripts .harness.json "$db_path" "$db_path-journal" "$db_path-wal" "$db_path-shm"
   init.sh harness .claude .codex AGENTS.md CLAUDE.md CLAUDE.local.md .mcp.json)
+# TCP ports the seatbelt profile denies on every address (loopback, the LAN IP): the harness
+# Postgres mirror's host ports in the toolkit's docker-compose.yml (Postgres, PostgREST).
+# .harness.json::lean.deny_ports (integers 1-65535) adds ports.
+LEAN_DENY_PORTS="54329 3001"
 
 # Protected: never opened through a link. The hard ones not through lean.allowed_read either
 # (Documents, Desktop, Downloads and Library may be opened there, one subfolder at a time).
@@ -439,6 +445,13 @@ while IFS= read -r m; do
   fi
   mach+=("$m")
 done < <(printf '%s\n' $LEAN_MACH_ALLOW; jq -r '.lean.allowed_mach // [] | .[]' "$project/.harness.json" 2>/dev/null || true)
+deny_ports=$(jq -c '.lean.deny_ports // []' "$project/.harness.json" 2>/dev/null || echo '[]')
+bad_ports=$(jq -c 'if type == "array" then map(select(type != "number" or . != floor or . < 1 or . > 65535)) else [.] end' <<<"$deny_ports")
+if [ "$bad_ports" != '[]' ]; then
+  echo "lean/sandbox.sh: .harness.json::lean.deny_ports must be an array of integers 1-65535 (invalid: $bad_ports)" >&2
+  exit 1
+fi
+deny_ports=$(jq -c --arg d "$LEAN_DENY_PORTS" '[$d | splits("[[:space:]]+") | select(. != "") | tonumber] + . | map(floor) | unique' <<<"$deny_ports")
 [ "$domains" = '[]' ] || echo "[WARN] lean/sandbox.sh --seatbelt: lean.allowed_domains is set and seatbelt can't filter by host name: outbound network stays open in this profile" >&2
 jq -nr --argjson deny_read "$(paths denyRead --deny)" --argjson allow_read "$(paths allowRead)" \
   --argjson redeny "$(printf '%s\n' ${redeny[@]+"${redeny[@]}"} | list --deny)" \
@@ -450,6 +463,7 @@ jq -nr --argjson deny_read "$(paths denyRead --deny)" --argjson allow_read "$(pa
   --argjson claude_tmp "$(printf '%s\n' ${claude_tmps[@]+"${claude_tmps[@]}"} | list)" \
   --argjson claude_open "$(printf '%s\n' ${claude_open[@]+"${claude_open[@]}"} | list)" \
   --argjson mach "$(to_json "${mach[@]}")" \
+  --argjson deny_ports "$deny_ports" \
   --argjson open_net "$([ "$domains" = '[]' ] && echo false || echo true)" '
   "(version 1)", "(allow default)",
   ($deny_read[] | "(deny file-read* (subpath \(tojson)))"),
@@ -464,6 +478,7 @@ jq -nr --argjson deny_read "$(paths denyRead --deny)" --argjson allow_read "$(pa
   "(deny file-write* (regex #\"^/dev/tty\"))", "(deny file-ioctl (regex #\"^/dev/tty\"))",
   (if $open_net then empty else
     "(deny network-outbound (remote ip \"*:*\"))", "(allow network-outbound (remote ip \"localhost:*\"))" end),
+  ($deny_ports[] | "(deny network-outbound (remote ip \"*:\(.)\"))"),
   "(deny network-outbound (remote unix-socket))",
   ($socks[] | "(allow network-outbound (remote unix-socket (subpath \(tojson))))"),
   "(allow network-outbound (remote unix-socket (regex #\"^\($db_dir)/(\($db))$\")))",
