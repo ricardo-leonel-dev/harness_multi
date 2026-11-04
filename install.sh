@@ -196,6 +196,49 @@ if [ -L "$TARGET_DIR/harness.db" ] || [ -L "$TARGET_DIR/scripts" ] || [ -L "$TAR
   exit 1
 fi
 
+# Every harness file install.sh copies, and each directory down to it, must be
+# a real file or directory of this project: cp onto a self-referential link
+# (`f -> f`, left by an older link-worktree repair) fails with "Too many levels
+# of symbolic links" and a linked directory would send the copies into another
+# checkout or folder. Checked before anything is written.
+linked_dest() {
+  local rest="$1" sub="" part
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    if [ "$part" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+    sub="${sub:+$sub/}$part"
+    if [ -L "$TARGET_DIR/$sub" ]; then printf '%s\n' "$sub"; return 0; fi
+    [ -e "$TARGET_DIR/$sub" ] || return 0
+  done
+}
+DESTS="AGENTS.md init.sh scripts/time_phase.py scripts/agent_usage.py harness/installed-files.txt"
+for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do DESTS="$DESTS .claude/agents/${name##*/}"; done
+for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do DESTS="$DESTS .codex/agents/${name##*/}"; done
+for name in "$TOOLKIT_DIR"/scripts/*.sh; do DESTS="$DESTS scripts/${name##*/}"; done
+for name in coverage persona timing testing lifecycle notion cross-project; do DESTS="$DESTS harness/instructions/$name.md"; done
+DESTS="$DESTS $(cd "$TOOLKIT_DIR" && find lean -type f | tr '\n' ' ')"
+if [ "$PROFILE" = postgres ]; then
+  DESTS="$DESTS scripts/mock_data.py scripts/assemble_migration.py scripts/build_traceability.sh scripts/run_tests.sh scripts/templates/acceptance_test_prologue.sql harness/instructions/mock-data.md harness/instructions/postgres.md"
+  DESTS="$DESTS $(cd "$TOOLKIT_DIR/profiles/postgres" && find test_helpers -type f | sed 's|^|harness/|' | tr '\n' ' ')"
+fi
+LINKED=""
+for rel in $DESTS; do
+  hit="$(linked_dest "$rel")"
+  [ -z "$hit" ] || case " $LINKED " in *" $hit "*) ;; *) LINKED="${LINKED:+$LINKED }$hit" ;; esac
+done
+if [ -n "$LINKED" ]; then
+  for hit in $LINKED; do
+    if [ "$(readlink "$TARGET_DIR/$hit")" = "$TARGET_DIR/$hit" ] || [ "$(readlink "$TARGET_DIR/$hit")" = "${hit##*/}" ]; then
+      fail "$hit is a link to itself (left by an older link-worktree repair): restore it as a regular file, then re-run install.sh"
+    elif [ ! -e "$TARGET_DIR/$hit" ]; then
+      fail "$hit is a broken or looping link ($(readlink "$TARGET_DIR/$hit")): restore it as a regular file or directory, then re-run install.sh"
+    else
+      fail "$hit is a link to $(readlink "$TARGET_DIR/$hit"): install.sh would copy harness files through it into another place — make it a regular file or directory of this project, then re-run install.sh"
+    fi
+  done
+  exit 1
+fi
+
 echo "── 1. Copying harness-core files ───────────────────────"
 
 cp "$TOOLKIT_DIR/AGENTS.md" "$TARGET_DIR/AGENTS.md"
