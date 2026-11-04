@@ -280,16 +280,17 @@
 #                                              (--no-refresh skips that)
 #   link-worktree <worktree_project_dir>      run from the main checkout: give a git worktree of this repository
 #                                              the harness without a second harness.db — symlinks what must be
-#                                              shared (harness.db, scripts, agents, AGENTS.md, .harness.json, ...;
+#                                              shared (harness.db, scripts, agents, AGENTS.md, .harness.json, lean/, ...;
 #                                              project files such as docs/ or specs/ only when the worktree lacks
 #                                              them) and keeps progress/ a real local directory, so agents writing
 #                                              handoffs never write outside the worktree. Lists the links in the
 #                                              shared .git/info/exclude. Safe to re-run and repairing: links harness
 #                                              files added since, and replaces a stale regular copy of a file the
 #                                              toolkit installs (listed in harness/installed-files.txt, untracked in
-#                                              the worktree; top-level, a direct child of scripts/ or .claude/agents/,
-#                                              or a file in .codex/agents/ or harness/instructions/ when those are real
-#                                              directories) with a link (a differing copy is moved to the worktree's
+#                                              the worktree; top-level, a direct child of scripts/, .claude/agents/ or
+#                                              lean/, or a file in .codex/agents/, harness/instructions/ or a lean/
+#                                              subdirectory (adapters/, instructions/, risk-questions/) when those are
+#                                              real directories; nothing deeper) with a link (a differing copy is moved to the worktree's
 #                                              own progress/stale_harness_copies/); other existing files, and anything under a linked directory of the
 #                                              worktree (.claude -> main's .claude), are kept. install.sh re-runs it for every linked
 #                                              worktree; install.sh itself refuses to run inside one
@@ -3439,7 +3440,7 @@ cmd_link_worktree() {
 
   # Harness-owned: always shared. Project-owned: only when the worktree has no
   # copy of its own (e.g. excluded from git); a tracked one is the branch's.
-  local shared="AGENTS.md CLAUDE.md init.sh harness.db harness scripts .harness.json .claude/agents .codex mock-data"
+  local shared="AGENTS.md CLAUDE.md init.sh harness.db harness scripts .harness.json .claude/agents .codex lean mock-data"
   local fallback="docs CHECKPOINTS.md specs features.seed.json"
   local item child rel sub srel linked=() kept=() repaired=() through=()
   RELINK_MOVED="" RELINK_FAILED=""
@@ -3462,9 +3463,10 @@ cmd_link_worktree() {
       # the harness ones): link the children it is missing, and replace stale
       # regular copies of toolkit-installed ones (left by an install.sh run
       # inside the worktree, or by an older link-worktree) with links. Only
-      # direct children, top-level files and the files of a real .codex/agents/
-      # or harness/instructions/ are repaired (harness/installed-files.txt
-      # decides which; harness.db, .harness.json and mock-data/ never are).
+      # direct children, top-level files and the files of a real .codex/agents/,
+      # harness/instructions/ or lean/<subdir>/ (adapters/, instructions/, ...)
+      # are repaired (harness/installed-files.txt decides which; harness.db,
+      # .harness.json and mock-data/ never are). Nothing deeper is touched.
       if [ -d "$wt/$item" ] && [ ! -L "$wt/$item" ] && [ -d "$main/$item" ] && [[ " $shared " == *" $item "* ]]; then
         for child in "$main/$item"/*; do
           [ -e "$child" ] || continue
@@ -3472,7 +3474,8 @@ cmd_link_worktree() {
           if [ ! -e "$wt/$rel" ] && [ ! -L "$wt/$rel" ]; then
             ln -s "$child" "$wt/$rel" && linked+=("$rel")
           elif [ -d "$child" ] && [ ! -L "$child" ] && [ -d "$wt/$rel" ] && [ ! -L "$wt/$rel" ] \
-              && { [ "$rel" = .codex/agents ] || [ "$rel" = harness/instructions ]; } && wt_owns_path "$wt" "$rel/x"; then
+              && case "$rel" in .codex/agents|harness/instructions|lean/*) true ;; *) false ;; esac \
+              && wt_owns_path "$wt" "$rel/x"; then
             # The toolkit's files one level further down (installed-files.txt
             # lists them) when the worktree holds that directory for real: same
             # rules as the direct children.

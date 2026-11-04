@@ -287,6 +287,7 @@ mkdir -p "$TARGET_DIR/lean"
 cp -R "$TOOLKIT_DIR/lean/." "$TARGET_DIR/lean/"
 find "$TARGET_DIR/lean" -type f -name '*.sh' -exec chmod +x {} +
 ok "copied lean/ (gate, runner, adapters, instructions)"
+INSTALLED_FILES="$INSTALLED_FILES $(cd "$TOOLKIT_DIR" && find lean -type f | LC_ALL=C sort | tr '\n' ' ')"
 
 # Shared instructions are harness-owned and refreshed even in existing projects.
 mkdir -p "$TARGET_DIR/harness/instructions"

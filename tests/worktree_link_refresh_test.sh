@@ -34,6 +34,12 @@
 #      file; a real harness/instructions/ is repaired like scripts/; install.sh in
 #      a partly linked worktree prints one summary [FAIL]; on a case-insensitive
 #      volume the main checkout named in another case is refused as this checkout.
+#  12. lean/: installed-files.txt lists its files; a missing worktree lean/ is
+#      linked (by link-worktree and by install.sh in main) and lean/gate.sh
+#      resolves; a lean link is left alone; a real lean/ is repaired one level
+#      deep (direct files and lean/<subdir>/ files) with backups, project files
+#      there kept; a git-tracked lean/ is never replaced; main's lean/ stays
+#      byte-identical throughout.
 #
 # Usage: bash tests/worktree_link_refresh_test.sh   (exits non-zero on the first failure)
 
@@ -308,5 +314,69 @@ if [ "$PU" != "$P" ] && [ -d "$PU" ] && [ "$PU" -ef "$P" ]; then
   echo "  (case-insensitive volume: path-case checks ran)"
 fi
 pass "backups stay in the worktree's own progress/, a failed ln warns, harness/instructions/ is repaired, one summary refusal, path case"
+
+echo "12. lean/ is linked, repaired one level deep, and a tracked one is kept"
+grep -qx 'lean/gate.sh' "$P/harness/installed-files.txt" && grep -qx 'lean/adapters/claude.sh' "$P/harness/installed-files.txt" \
+  && grep -qx 'lean/instructions/planning.md' "$P/harness/installed-files.txt" || die "installed-files.txt must list lean/ files"
+rm -rf "$WORK/main-lean.before" && cp -R "$P/lean" "$WORK/main-lean.before"
+main_lean_intact() {
+  diff -r "$WORK/main-lean.before" "$P/lean" >/dev/null || die "$1: main's lean/ changed: $(diff -r "$WORK/main-lean.before" "$P/lean" 2>&1 | head -5)"
+  [ -z "$(find "$P/lean" -type l)" ] || die "$1: a link appeared in main's lean/: $(find "$P/lean" -type l)"
+}
+# Missing: link-worktree links it, and the gate resolves where harness.sh looks for it.
+rm -rf "$W/lean"
+out=$(H "$P" link-worktree "$W") || die "link-worktree: $out"
+is_link_to "$W/lean" "$P/lean" || die "a missing lean/ should be linked: $out"
+[ -x "$W/scripts/../lean/gate.sh" ] && [ "$W/lean/gate.sh" -ef "$P/lean/gate.sh" ] || die "lean/gate.sh must resolve to main's"
+main_lean_intact "missing lean/"
+# Already a link: left alone.
+out=$(H "$P" link-worktree "$W") || die "link-worktree re-run: $out"
+is_link_to "$W/lean" "$P/lean" || die "the lean link must be left as it is"
+grep -q 'already present, left as they are: .*lean' <<<"$out" || die "the existing link should be reported as kept: $out"
+main_lean_intact "lean link"
+# Missing again: install.sh in main restores it.
+rm "$W/lean"
+out=$(install_into "$P") || die "reinstall in the main checkout: $out"
+is_link_to "$W/lean" "$P/lean" || die "install.sh in main should link a missing worktree lean/: $out"
+rm -rf "$WORK/main-lean.before" && cp -R "$P/lean" "$WORK/main-lean.before"
+main_lean_intact "install.sh relink"
+# A real lean/: stale copies one level deep become links (differing ones backed up), missing
+# files and subdirectories get linked, files the toolkit doesn't install are kept.
+rm "$W/lean" && mkdir -p "$W/lean/adapters"
+printf 'stale gate\n' > "$W/lean/gate.sh"
+cp "$P/lean/run.sh" "$W/lean/run.sh"
+printf 'stale adapter\n' > "$W/lean/adapters/claude.sh"
+printf 'own\n' > "$W/lean/notes.md"
+printf 'own adapter\n' > "$W/lean/adapters/custom.sh"
+out=$(H "$P" link-worktree "$W") || die "link-worktree on a real lean/: $out"
+is_link_to "$W/lean/gate.sh" "$P/lean/gate.sh" || die "a stale lean/gate.sh should become a link: $out"
+[ "$(cat "$W/progress/stale_harness_copies/lean/gate.sh")" = "stale gate" ] || die "the differing gate copy must be kept"
+is_link_to "$W/lean/run.sh" "$P/lean/run.sh" || die "an identical lean/run.sh copy should become a link"
+[ ! -e "$W/progress/stale_harness_copies/lean/run.sh" ] || die "an identical copy needs no backup"
+is_link_to "$W/lean/README.md" "$P/lean/README.md" || die "a missing lean file should be linked"
+is_link_to "$W/lean/instructions" "$P/lean/instructions" || die "a missing lean subdirectory should be linked"
+is_link_to "$W/lean/adapters/claude.sh" "$P/lean/adapters/claude.sh" || die "a stale lean/adapters/claude.sh should become a link"
+[ "$(cat "$W/progress/stale_harness_copies/lean/adapters/claude.sh")" = "stale adapter" ] || die "the differing adapter copy must be kept"
+is_link_to "$W/lean/adapters/claude-mini.sh" "$P/lean/adapters/claude-mini.sh" || die "a missing adapter should be linked"
+[ "$(cat "$W/lean/notes.md")" = own ] && [ ! -L "$W/lean/notes.md" ] && [ "$(cat "$W/lean/adapters/custom.sh")" = "own adapter" ] \
+  && [ ! -L "$W/lean/adapters/custom.sh" ] || die "files the toolkit doesn't install must be kept"
+[ -x "$W/scripts/../lean/gate.sh" ] && [ "$W/lean/gate.sh" -ef "$P/lean/gate.sh" ] || die "lean/gate.sh must resolve after the repair"
+grep -q 'replaced stale harness copies with links: .*lean/gate.sh' <<<"$out" && grep -q 'replaced stale harness copies with links: .*lean/adapters/claude.sh' <<<"$out" || die "the lean repairs must be reported: $out"
+[ -z "$(git -C "$WORK/wt" status --porcelain --untracked-files=all)" ] || die "the worktree must stay clean: $(git -C "$WORK/wt" status --porcelain)"
+main_lean_intact "real lean/"
+rm -rf "$W/lean" && H "$P" link-worktree "$W" >/dev/null && is_link_to "$W/lean" "$P/lean" || die "restore lean link"
+# A git-tracked lean/ (a branch that commits its own): never replaced, even when it differs.
+g worktree add -q -b tracked-lean "$WORK/wt3" 2>/dev/null || die "git worktree add (tracked lean)"
+W3="$WORK/wt3/app"
+mkdir -p "$W3/lean/adapters" && printf 'tracked gate\n' > "$W3/lean/gate.sh" && printf 'tracked adapter\n' > "$W3/lean/adapters/claude.sh"
+git -C "$WORK/wt3" add -f app/lean && git -C "$WORK/wt3" -c user.email=t@t -c user.name=t commit -qm "tracked lean" >/dev/null || die "commit tracked lean/"
+out=$(H "$P" link-worktree "$W3") || die "link-worktree on a tracked lean/: $out"
+[ -d "$W3/lean" ] && [ ! -L "$W3/lean" ] || die "a tracked lean/ must stay a directory"
+[ "$(cat "$W3/lean/gate.sh")" = "tracked gate" ] && [ ! -L "$W3/lean/gate.sh" ] || die "the tracked lean/gate.sh must be untouched"
+[ "$(cat "$W3/lean/adapters/claude.sh")" = "tracked adapter" ] && [ ! -L "$W3/lean/adapters/claude.sh" ] || die "the tracked adapter must be untouched"
+[ ! -e "$W3/progress/stale_harness_copies/lean" ] || die "tracked lean files must not be backed up"
+[ -z "$(git -C "$WORK/wt3" status --porcelain)" ] || die "tracked lean/ must show no change: $(git -C "$WORK/wt3" status --porcelain)"
+main_lean_intact "tracked lean/"
+pass "lean/ linked when missing, kept as a link, repaired one level deep when real, tracked one untouched, main's intact"
 
 echo "all $PASS checks passed"
