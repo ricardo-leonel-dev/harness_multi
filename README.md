@@ -389,13 +389,14 @@ Covered by `bash tests/quick_path_test.sh`.
 - `log-out`'s DIFF says `tests=n/a` when the project keeps `tests/` out of git on purpose.
 - `scripts/harness.sh link-worktree <worktree_project_dir>`, run from the main checkout,
   gives a git worktree the same harness (symlinks to `harness.db`, `scripts/`, agents,
-  `AGENTS.md`, `.harness.json`; `docs/`, `specs/`, `CHECKPOINTS.md` only when the worktree
+  `AGENTS.md`, `.harness.json`, `lean/`; `docs/`, `specs/`, `CHECKPOINTS.md` only when the worktree
   has none) and keeps `progress/` a local directory, so agents never write through a symlink
   into another checkout. It lists the links in the shared `.git/info/exclude` and is safe to
   re-run: it links harness files added since and replaces a stale regular copy of a file
   the toolkit installs (listed in `harness/installed-files.txt`, untracked in the worktree;
-  top-level, directly under `scripts/` or `.claude/agents/`, or in `.codex/agents/` or
-  `harness/instructions/` when the worktree holds those directories for real) with a link,
+  top-level, directly under `scripts/`, `.claude/agents/` or `lean/`, or in `.codex/agents/`,
+  `harness/instructions/` or a `lean/` subdirectory such as `lean/adapters/` when the worktree
+  holds those directories for real; nothing deeper) with a link,
   moving a differing copy to the worktree's own `progress/stale_harness_copies/` (a linked
   `progress/` is made local first; a failed step prints a `[WARN]` naming the file). Other files there, such
   as a git-ignored `scripts/local.json`, `.codex/config.toml` or `mock-data/`, are kept. `install.sh` in the main checkout
