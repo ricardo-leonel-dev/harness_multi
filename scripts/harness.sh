@@ -1257,7 +1257,7 @@ WHERE feature_id=$fid AND status='ready' AND deleted_at IS NULL;")
     count_sql=", requirements_count=$req_count, tasks_count=$task_count"
     counts_note="R=$req_count, T=$task_count"
     if [ "$prev_req" != "$req_count" ] || [ "$prev_task" != "$task_count" ]; then
-      warn "spec counts changed since mark-spec-ready: R $prev_req→$req_count, T $prev_task→$task_count — recording the current ones"
+      warn "spec counts changed since mark-spec-ready: R ${prev_req}→${req_count}, T ${prev_task}→${task_count} — recording the current ones"
     fi
   fi
 
