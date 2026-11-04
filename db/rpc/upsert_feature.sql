@@ -3,12 +3,15 @@
 -- it in place instead of inserting a duplicate. Exposed via
 -- POST /rest/v1/rpc/upsert_feature. Soft delete propagates by passing
 -- p_deleted_at instead of a hard DELETE.
--- The lean-mode parameters (migration 0005) default to "no lean flow", so a
--- sync_postgres.sh that predates them keeps working. Replaces the 10-argument
--- signature (before p_mode) so re-applying this file never leaves an ambiguous
--- overload behind.
+-- The lean-mode parameters (migration 0005) default to "no lean flow" and
+-- p_out_of_scope (migration 0006) to no lines, so a sync_postgres.sh that
+-- predates them keeps working. Replaces the 10-argument signature (before
+-- p_mode) and the 14-argument one (before p_out_of_scope) so re-applying this
+-- file never leaves an ambiguous overload behind.
 drop function if exists upsert_feature(text, bigint, integer, text, text, text, text[], feature_status,
   boolean, timestamptz);
+drop function if exists upsert_feature(text, bigint, integer, text, text, text, text[], feature_status,
+  boolean, timestamptz, text, boolean, text, timestamptz);
 
 create or replace function upsert_feature(
   p_project_slug text,
@@ -24,7 +27,8 @@ create or replace function upsert_feature(
   p_mode text default null,
   p_plan_approval boolean default false,
   p_plan_approved_by text default null,
-  p_plan_approved_at timestamptz default null
+  p_plan_approved_at timestamptz default null,
+  p_out_of_scope jsonb default '[]'
 ) returns features
 language plpgsql as $$
 declare
@@ -37,9 +41,10 @@ begin
   end if;
 
   insert into features (project_id, local_id, feature_number, name, title, description, acceptance, sdd, status, deleted_at,
-                        mode, plan_approval, plan_approved_by, plan_approved_at)
+                        mode, plan_approval, plan_approved_by, plan_approved_at, out_of_scope)
     values (v_project_id, p_local_id, p_feature_number, p_name, p_title, p_description, p_acceptance, p_sdd, p_status, p_deleted_at,
-            p_mode, coalesce(p_plan_approval, false), p_plan_approved_by, p_plan_approved_at)
+            p_mode, coalesce(p_plan_approval, false), p_plan_approved_by, p_plan_approved_at,
+            coalesce(p_out_of_scope, '[]'))
   on conflict (project_id, local_id)
     do update set
       feature_number = excluded.feature_number,
@@ -54,6 +59,7 @@ begin
       plan_approval = excluded.plan_approval,
       plan_approved_by = excluded.plan_approved_by,
       plan_approved_at = excluded.plan_approved_at,
+      out_of_scope = excluded.out_of_scope,
       updated_at = now()
   returning * into result;
   return result;

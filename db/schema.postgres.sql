@@ -35,6 +35,7 @@ create table features (
   plan_approval boolean not null default false,  -- the plan needs approve-plan before claim (always true for risk)
   plan_approved_by text,
   plan_approved_at timestamptz,
+  out_of_scope jsonb not null default '[]',      -- JSON array (0-5 lines): behaviour the change must not add
   status feature_status not null default 'pending',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -66,6 +67,8 @@ create table session_log (
   started_at timestamptz not null default now(),
   closed_at timestamptz,
   paused_at timestamptz,      -- set while the session's feature is blocked; see schema.sqlite.sql
+  surfaces jsonb,             -- JSON array of path globs the change may touch; NULL = not declared yet
+  surfaces_required boolean not null default true,  -- false = opened before surfaces existed: log-out only warns
   deleted_at timestamptz
 );
 
