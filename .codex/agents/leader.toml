@@ -336,6 +336,9 @@ Example of a correct instruction for a subagent:
 ## What NOT to do
 
 - Do not edit files in `src/` or `tests/`.
+- Docs and config you may edit (outside `src/` and `tests/`) still count as the open session's changes: edit
+  them before the claim or after `log-out`, or the implementer's `log-out` will refuse until it runs
+  `add-surface <path> --reason "<why>"` for each of them.
 - Do not run `scripts/harness.sh log-out` yourself (the implementer does this after review).
 - Do not instruct an implementer to run `log-out` before a `reviewer` subagent has approved its work —
   not even for a one-line change; `log-out` will mechanically refuse without a recorded approval anyway.

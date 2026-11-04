@@ -287,9 +287,10 @@
 #                                              shared .git/info/exclude. Safe to re-run and repairing: links harness
 #                                              files added since, and replaces a stale regular copy of a file the
 #                                              toolkit installs (listed in harness/installed-files.txt, untracked in
-#                                              the worktree; top-level or a direct child of scripts/, .claude/agents/,
-#                                              harness/) with a link (a differing copy is moved to
-#                                              progress/stale_harness_copies/); other existing files, and anything under a linked directory of the
+#                                              the worktree; top-level, a direct child of scripts/ or .claude/agents/,
+#                                              or a file in .codex/agents/ or harness/instructions/ when those are real
+#                                              directories) with a link (a differing copy is moved to the worktree's
+#                                              own progress/stale_harness_copies/); other existing files, and anything under a linked directory of the
 #                                              worktree (.claude -> main's .claude), are kept. install.sh re-runs it for every linked
 #                                              worktree; install.sh itself refuses to run inside one
 #   test [file...]                            run tests with output to progress/test_last.log, printing only
@@ -356,25 +357,43 @@ cmd_import_features() {
   local seed_file="${1:?usage: import-features <seed.json>}"
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  jq -e 'type == "array"' "$seed_file" >/dev/null 2>&1 || { fail "import-features: $seed_file must be a JSON array of features"; exit 1; }
 
-  jq -c '.[]' "$seed_file" | while IFS= read -r item; do
+  # Every item is validated before anything is written, and the inserts run as
+  # one transaction: a bad item N (or an insert that fails, e.g. a duplicate
+  # number) leaves no items 1..N-1 behind. An item whose name already names an
+  # active feature of the project is skipped and reported as already present,
+  # so re-running with an extended seed still adds the new items.
+  local sql="BEGIN;" item i=0 added=0 present=0 items=()
+  while IFS= read -r item; do items+=("$item"); done < <(jq -c '.[]' "$seed_file")
+  for item in "${items[@]+"${items[@]}"}"; do
+    i=$((i + 1))
     local number name title desc status accept sdd depends_on now
     number=$(jq -r '.feature_number' <<<"$item")
-    name=$(jq -r '.name' <<<"$item")
-    title=$(jq -r '.title' <<<"$item")
+    name=$(jq -r '.name // ""' <<<"$item")
+    title=$(jq -r '.title // ""' <<<"$item")
     desc=$(jq -r '.description // ""' <<<"$item")
     status=$(jq -r '.status // "pending"' <<<"$item")
     accept=$(jq -c '.acceptance // []' <<<"$item")
     sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
     depends_on=$(jq -c '.depends_on // []' <<<"$item")
+    [[ "$number" =~ ^[0-9]+$ ]] || { fail "import-features: item $i has no integer feature_number ($number): nothing imported"; exit 1; }
+    [ -n "$name" ] || { fail "import-features: item $i (feature $number) has no name: nothing imported"; exit 1; }
     local oos_lines=() oos_line oos
     while IFS= read -r oos_line; do oos_lines+=("$oos_line"); done < <(jq -r '(.out_of_scope // [])[]' <<<"$item")
-    oos="$(out_of_scope_json "${oos_lines[@]+"${oos_lines[@]}"}")" || exit 1
+    oos="$(out_of_scope_json "${oos_lines[@]+"${oos_lines[@]}"}")" || { fail "import-features: item $i (feature $number $name) is invalid: nothing imported"; exit 1; }
+    if [ -n "$(db "SELECT 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND name='$(sql_escape "$name")' LIMIT 1;")" ]; then
+      present=$((present + 1)); continue
+    fi
+    added=$((added + 1))
     now="$(now_iso)"
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, out_of_scope, created_at, updated_at)
+    sql="$sql
+INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, out_of_scope, created_at, updated_at)
 VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, '$(sql_escape "$status")', '$(sql_escape "$depends_on")', '$(sql_escape "$oos")', '$now', '$now');"
   done
-  ok "imported features from $seed_file"
+  db_exec "$sql
+COMMIT;" || { fail "import-features: the import failed and was rolled back: nothing imported"; exit 1; }
+  ok "imported $added feature(s) from $seed_file ($present already present)"
 }
 
 cmd_add_feature() {
@@ -1848,6 +1867,21 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$
   ok "added surface $pat on session $sid (reason logged)"
 }
 
+# abs_physical <absolute path> — the path with its deepest existing directory
+# resolved through symlinks (pwd -P), the rest appended as given, so a path
+# typed through a link (macOS /tmp -> /private/tmp) compares to `pwd -P`.
+# The leaf itself is not followed: a file that is a link stays named as is.
+abs_physical() {
+  local dir="${1%/*}" rest="${1##*/}" real
+  [ -n "$dir" ] || dir=/
+  while [ ! -d "$dir" ]; do
+    [ "$dir" != / ] && [ -n "$dir" ] || { printf '%s' "$1"; return 0; }
+    rest="${dir##*/}/$rest"; dir="${dir%/*}"; [ -n "$dir" ] || dir=/
+  done
+  real="$(cd "$dir" 2>/dev/null && pwd -P)" || { printf '%s' "$1"; return 0; }
+  printf '%s/%s' "${real%/}" "$rest"
+}
+
 # surfaces_outside <session_id> <feature_name> [change...] — prints every
 # changed file outside the session's surfaces, one per line: the --changes
 # paths, plus what git shows changed in the project since the session base
@@ -1864,7 +1898,8 @@ surfaces_outside() {
   local files=()
   for file in "$@"; do
     case "$file" in
-      /*) if [ "${file#"$here"/}" != "$file" ]; then file="${file#"$here"/}"; else printf '%s\n' "$file"; continue; fi ;;
+      /*) file="$(abs_physical "$file")"
+          if [ "${file#"$here"/}" != "$file" ]; then file="${file#"$here"/}"; else printf '%s\n' "$file"; continue; fi ;;
     esac
     file="$(surface_normalize "$file")"
     case "/$file/" in */../*) printf '%s\n' "$file"; continue ;; esac
@@ -3276,6 +3311,18 @@ cmd_test() {
 # worktree itself sits inside it. A worktree whose .claude links to main's
 # .claude would otherwise let a repair delete main's own files through it.
 LINK_WT_REAL="" LINK_MAIN_REAL=""
+# path_within <physical path> <dir> — true when <path> is <dir> or below it,
+# compared by inode (-ef) at each ancestor rather than as strings: on a
+# case-insensitive volume `pwd -P` keeps the case as typed, so /Repo/app and
+# /repo/app are the same directory but not the same string.
+path_within() {
+  local d="$1"
+  while :; do
+    [ ! "$d" -ef "$2" ] || return 0
+    case "$d" in /|"") return 1 ;; esac
+    d="${d%/*}"; [ -n "$d" ] || d=/
+  done
+}
 wt_owns_path() {
   local wt="$1" rel="$2" rest sub="" last="" part real
   case "$rel" in */*) rest="${rel%/*}" ;; *) rest="" ;; esac
@@ -3288,10 +3335,11 @@ wt_owns_path() {
     last="$sub"
   done
   real="$(cd "$wt${last:+/$last}" 2>/dev/null && pwd -P)" || return 1
-  case "$real/" in "$LINK_WT_REAL"/*) ;; *) return 1 ;; esac
-  case "$real/" in
-    "$LINK_MAIN_REAL"/*) case "$LINK_WT_REAL/" in "$LINK_MAIN_REAL"/?*) ;; *) return 1 ;; esac ;;
-  esac
+  path_within "$real" "$LINK_WT_REAL" || return 1
+  if path_within "$real" "$LINK_MAIN_REAL"; then
+    # Only a worktree nested inside the main checkout may be under it.
+    path_within "$LINK_WT_REAL" "$LINK_MAIN_REAL" && [ ! "$LINK_WT_REAL" -ef "$LINK_MAIN_REAL" ] || return 1
+  fi
   return 0
 }
 
@@ -3304,9 +3352,13 @@ wt_owns_path() {
 # through a linked directory or one that is main's own file (wt_owns_path, -ef).
 # A copy that differs is moved to <wt>/progress/stale_harness_copies/<rel> (a
 # timestamp suffix when a backup is already there; sets RELINK_MOVED) instead
-# of deleted. The link is created beside the file and checked first; when the
-# result does not resolve to main's regular file the original is put back and
-# <rel> is added to RELINK_FAILED. Returns 1 when it leaves the file.
+# of deleted, and only when that backup path is the worktree's own
+# (wt_owns_path; cmd_link_worktree makes a linked progress/ local first):
+# otherwise the copy is left, with a [WARN] naming where it is. The link is
+# created beside the file and checked first; when a step fails (ln, mkdir, mv)
+# or the result does not resolve to main's regular file, a [WARN] names the
+# path and what was restored, and <rel> is added to RELINK_FAILED. Returns 1
+# when it leaves the file.
 RELINK_MOVED="" RELINK_FAILED=""
 relink_stale_copy() {
   local main="$1" wt="$2" rel="$3" aside tmp src_dir
@@ -3316,29 +3368,51 @@ relink_stale_copy() {
   wt_owns_path "$wt" "$rel" || return 1
   [ ! "$wt/$rel" -ef "$main/$rel" ] || return 1
   src_dir="$(cd "$(dirname "$main/$rel")" 2>/dev/null && pwd -P)" || return 1
-  case "$src_dir/" in "$LINK_WT_REAL"/*) return 1 ;; esac
+  ! path_within "$src_dir" "$LINK_WT_REAL" || return 1
   ! git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || return 1
+  if ! cmp -s "$main/$rel" "$wt/$rel" && ! wt_owns_path "$wt" "progress/stale_harness_copies/$rel"; then
+    warn "not replacing $wt/$rel: its backup would go through a link (progress/ is not the worktree's own); the copy stays at $LINK_WT_REAL/$rel"
+    RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+  fi
   tmp="$wt/$rel.harness-relink.$$"
-  rm -f "$tmp" && ln -s "$main/$rel" "$tmp" || return 1
+  if ! { rm -f "$tmp" && ln -s "$main/$rel" "$tmp"; } 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    warn "could not create a link for $wt/$rel (ln -s failed): the copy stays where it was, unchanged"
+    RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+  fi
   if [ ! -f "$tmp" ] || [ ! "$tmp" -ef "$main/$rel" ]; then
-    rm -f "$tmp"; RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+    rm -f "$tmp"
+    warn "the new link for $wt/$rel did not resolve to $main/$rel: removed it; the copy stays where it was, unchanged"
+    RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
   fi
   if cmp -s "$main/$rel" "$wt/$rel"; then
     aside="$wt/$rel.harness-relink-bak.$$"
   else
     aside="$wt/progress/stale_harness_copies/$rel"
     { [ ! -e "$aside" ] && [ ! -L "$aside" ]; } || aside="$aside.$(date -u +%Y%m%dT%H%M%SZ).$$"
-    mkdir -p "$(dirname "$aside")" || { rm -f "$tmp"; return 1; }
+    if ! mkdir -p "$(dirname "$aside")" 2>/dev/null; then
+      rm -f "$tmp"
+      warn "could not create $(dirname "$aside") for the backup of $wt/$rel: the copy stays where it was, unchanged"
+      RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+    fi
   fi
-  mv "$wt/$rel" "$aside" || { rm -f "$tmp"; return 1; }
-  if mv "$tmp" "$wt/$rel" && [ -L "$wt/$rel" ] && [ -f "$wt/$rel" ] && [ "$wt/$rel" -ef "$main/$rel" ] \
+  if ! mv "$wt/$rel" "$aside" 2>/dev/null; then
+    rm -f "$tmp"
+    warn "could not move $wt/$rel aside (mv failed): the copy stays where it was"
+    RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+  fi
+  if mv "$tmp" "$wt/$rel" 2>/dev/null && [ -L "$wt/$rel" ] && [ -f "$wt/$rel" ] && [ "$wt/$rel" -ef "$main/$rel" ] \
       && [ -f "$main/$rel" ] && [ ! -L "$main/$rel" ]; then
     case "$aside" in *.harness-relink-bak.$$) rm -f "$aside" ;; *) RELINK_MOVED=1 ;; esac
     return 0
   fi
   rm -f "$tmp"
   [ ! -L "$wt/$rel" ] || rm -f "$wt/$rel"
-  mv "$aside" "$wt/$rel"
+  if mv "$aside" "$wt/$rel" 2>/dev/null; then
+    warn "could not put the link in place for $wt/$rel: restored the original copy there"
+  else
+    warn "could not put the link in place for $wt/$rel, nor move the original back: it is at $aside"
+  fi
   RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"
   return 1
 }
@@ -3354,7 +3428,7 @@ cmd_link_worktree() {
   LINK_WT_REAL="$(cd "$wt" && pwd -P)"; LINK_MAIN_REAL="$(pwd -P)"
   # Compared resolved too: a worktree directory that is a link to this checkout
   # would make every "stale copy" one of main's own files.
-  [ "$wt" != "$main" ] && [ "$LINK_WT_REAL" != "$LINK_MAIN_REAL" ] \
+  [ "$wt" != "$main" ] && [ "$LINK_WT_REAL" != "$LINK_MAIN_REAL" ] && [ ! "$wt" -ef "$main" ] \
     || { fail "link-worktree takes the worktree's project directory, not this checkout ($wt resolves to $LINK_MAIN_REAL)"; exit 1; }
   local common_main common_wt
   common_main="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
@@ -3367,8 +3441,17 @@ cmd_link_worktree() {
   # copy of its own (e.g. excluded from git); a tracked one is the branch's.
   local shared="AGENTS.md CLAUDE.md init.sh harness.db harness scripts .harness.json .claude/agents .codex mock-data"
   local fallback="docs CHECKPOINTS.md specs features.seed.json"
-  local item child rel linked=() kept=() repaired=() through=()
+  local item child rel sub srel linked=() kept=() repaired=() through=()
   RELINK_MOVED="" RELINK_FAILED=""
+  # progress/ holds each agent's handoffs: a symlink there sends every write
+  # outside the worktree, which agent sandboxes and permission prompts treat
+  # as an external path. Made local before the repair below, so the backups of
+  # differing copies land in the worktree, not in main's progress/. The main
+  # checkout's progress/ is left as it is.
+  if [ -L "$wt/progress" ]; then
+    rm -f "$wt/progress" && ok "progress/ was a symlink to another checkout — replaced by a local directory"
+  fi
+  mkdir -p "$wt/progress"
   for item in $shared $fallback; do
     [ -e "$main/$item" ] || continue
     # Under a linked directory (.claude -> main's .claude, or a folder outside
@@ -3379,7 +3462,8 @@ cmd_link_worktree() {
       # the harness ones): link the children it is missing, and replace stale
       # regular copies of toolkit-installed ones (left by an install.sh run
       # inside the worktree, or by an older link-worktree) with links. Only
-      # direct children and top-level files are repaired (harness/installed-files.txt
+      # direct children, top-level files and the files of a real .codex/agents/
+      # or harness/instructions/ are repaired (harness/installed-files.txt
       # decides which; harness.db, .harness.json and mock-data/ never are).
       if [ -d "$wt/$item" ] && [ ! -L "$wt/$item" ] && [ -d "$main/$item" ] && [[ " $shared " == *" $item "* ]]; then
         for child in "$main/$item"/*; do
@@ -3387,6 +3471,20 @@ cmd_link_worktree() {
           rel="$item/${child##*/}"
           if [ ! -e "$wt/$rel" ] && [ ! -L "$wt/$rel" ]; then
             ln -s "$child" "$wt/$rel" && linked+=("$rel")
+          elif [ -d "$child" ] && [ ! -L "$child" ] && [ -d "$wt/$rel" ] && [ ! -L "$wt/$rel" ] \
+              && { [ "$rel" = .codex/agents ] || [ "$rel" = harness/instructions ]; } && wt_owns_path "$wt" "$rel/x"; then
+            # The toolkit's files one level further down (installed-files.txt
+            # lists them) when the worktree holds that directory for real: same
+            # rules as the direct children.
+            for sub in "$child"/*; do
+              [ -f "$sub" ] && [ ! -L "$sub" ] || continue
+              srel="$rel/${sub##*/}"
+              if [ ! -e "$wt/$srel" ] && [ ! -L "$wt/$srel" ]; then
+                ln -s "$sub" "$wt/$srel" && linked+=("$srel")
+              elif relink_stale_copy "$main" "$wt" "$srel"; then
+                repaired+=("$srel")
+              fi
+            done
           elif relink_stale_copy "$main" "$wt" "$rel"; then
             repaired+=("$rel")
           fi
@@ -3401,14 +3499,6 @@ cmd_link_worktree() {
     mkdir -p "$(dirname "$wt/$item")"
     ln -s "$main/$item" "$wt/$item" && linked+=("$item")
   done
-
-  # progress/ holds each agent's handoffs: a symlink there sends every write
-  # outside the worktree, which agent sandboxes and permission prompts treat
-  # as an external path. The main checkout's progress/ is left as it is.
-  if [ -L "$wt/progress" ]; then
-    rm -f "$wt/progress" && ok "progress/ was a symlink to another checkout — replaced by a local directory"
-  fi
-  mkdir -p "$wt/progress"
 
   local prefix exclude_file begin end
   prefix="$(cd "$wt" && git rev-parse --show-prefix)"
@@ -3425,7 +3515,7 @@ cmd_link_worktree() {
   } > "$exclude_file.tmp" && mv "$exclude_file.tmp" "$exclude_file"
 
   ok "worktree $wt: linked ${#linked[@]} item(s)${linked[0]+: ${linked[*]}}; progress/ is local"
-  [ "${#repaired[@]}" -eq 0 ] || ok "replaced stale harness copies with links: ${repaired[*]}${RELINK_MOVED:+ (differing copies kept in progress/stale_harness_copies/)}"
+  [ "${#repaired[@]}" -eq 0 ] || ok "replaced stale harness copies with links: ${repaired[*]}${RELINK_MOVED:+ (differing copies kept in $LINK_WT_REAL/progress/stale_harness_copies/)}"
   [ "${#kept[@]}" -eq 0 ] || ok "already present, left as they are: ${kept[*]}"
   [ "${#through[@]}" -eq 0 ] || ok "inside a linked directory of the worktree, left as they are: ${through[*]}"
   [ -z "$RELINK_FAILED" ] || warn "could not replace these stale harness copies with links (left as they were): $RELINK_FAILED"

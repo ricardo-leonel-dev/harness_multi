@@ -691,12 +691,25 @@ PN=$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$R3" --seatbelt 2>/dev/null) || die "s
 for port in 3001 6543 54329; do
   [ "$(grep -cxF "$(deny_ip $port)" <<<"$PN")" = 1 ] || die "with allowed_domains and lean.deny_ports the profile must deny port $port once: $(grep 'remote ip' <<<"$PN")"
 done
-for bad in 0 70000 '"abc"' 1.5 '"5432"' 5432; do
-  case "$bad" in 5432) setj ".lean.deny_ports = $bad" ;; *) setj ".lean.deny_ports = [3001, $bad]" ;; esac
+# A present lean.deny_ports that isn't an array (5432, false, null, a string, an object) is
+# invalid like a bad entry; only a missing key means the default.
+for bad in 0 70000 '"abc"' 1.5 '"5432"' =5432 =false =null '="3001"' '={"p":3001}'; do
+  case "$bad" in =*) setj ".lean.deny_ports = ${bad#=}" ;; *) setj ".lean.deny_ports = [3001, $bad]" ;; esac
   out=$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$R3" --seatbelt 2>&1 >/dev/null) && die "lean.deny_ports $bad must fail the profile build"
   grep -qF 'lean.deny_ports must be an array of integers 1-65535' <<<"$out" || die "lean.deny_ports $bad: no clear error: $out"
 done
-pass "the profile denies the mirror ports (54329, 3001) and lean.deny_ports after the localhost allow, also with allowed_domains; invalid entries fail"
+# The gate's "broken:" message carries sandbox.sh's reason (only where sandbox-exec exists:
+# elsewhere lean_sandbox_prepare never calls sandbox.sh).
+if command -v sandbox-exec >/dev/null 2>&1; then
+  why=$(bash -c '. "$1/lean/lib.sh"; lean_sandbox_prepare "$2"; printf "%s" "$LEAN_SANDBOX"' _ "$TOOLKIT_DIR" "$R3" 2>&1)
+  case "$why" in
+    "broken: lean/sandbox.sh could not build the profile: "*"lean.deny_ports must be an array"*) ;;
+    *) die "lean_sandbox_prepare should name sandbox.sh's reason: $why" ;;
+  esac
+fi
+setj 'del(.lean.deny_ports)'
+bash "$TOOLKIT_DIR/lean/sandbox.sh" "$R3" --seatbelt >/dev/null 2>&1 || die "a missing lean.deny_ports must build the default profile"
+pass "the profile denies the mirror ports (54329, 3001) and lean.deny_ports after the localhost allow, also with allowed_domains; invalid entries and non-array values fail, the gate names why"
 if [ "$have_sbx" = 1 ]; then
   # A TCP listener on 127.0.0.1 (and ::1 on the same port when loopback v6 is there): it writes
   # "<port> <v6>" to a file and waits.

@@ -15,6 +15,10 @@
 #      worktrees; non-ASCII names match raw; inside the surfaces it closes.
 #   5. A session opened before the migration closes with a warning; a lean
 #      log-out never reaches the surfaces check.
+#   6. import-features validates every item before inserting and inserts in
+#      one transaction; items already present by name are skipped and
+#      counted, so an extended seed adds only its new items. An absolute
+#      --changes path through a symlink is resolved first (section 4).
 #
 # Usage: bash tests/scope_surfaces_test.sh   (exits non-zero on the first failure)
 
@@ -104,6 +108,12 @@ ready
 out=$(H log-out --changes src/api/a.ts src/main.ts --verification v --closure c) && die "a --changes file outside must refuse"
 grep -q -- '- src/main.ts' <<<"$out" && grep -q 'add-surface' <<<"$out" || die "refusal must list src/main.ts and point to add-surface: $out"
 grep -q 'progress/\|specs/api\|other/ignored\|tests/api_one' <<<"$out" && die "progress/, the feature's specs, excluded and declared files are not offenders: $out"
+# An absolute --changes path typed through a symlink to the project (macOS /tmp vs /private/tmp)
+# is resolved before it is compared to the project's physical path.
+ln -s "$P" "$WORK/plink"
+out=$(H log-out --changes "$WORK/plink/src/api/a.ts" "$WORK/plink/src/main.ts" --verification v --closure c) && die "an absolute path outside, typed through a link, must refuse"
+grep -qxF -- '  - src/main.ts' <<<"$out" || die "a linked absolute path outside must be listed project-relative: $out"
+grep -q 'plink\|src/api/a.ts' <<<"$out" && die "a linked absolute path inside the surfaces is not an offender: $out"
 printf 'n\n' > "$P/src/new.ts"
 out=$(H log-out --changes src/api/a.ts --verification v --closure c) && die "an untracked file outside must refuse"
 grep -q -- '- src/new.ts' <<<"$out" || die "refusal must list the untracked file: $out"
@@ -122,7 +132,7 @@ pass "non-ASCII file names are matched by their raw name (inside allowed, outsid
 g worktree add -q "$P/.claude/worktrees/agent-x" 2>/dev/null || die "git worktree add"
 mkdir -p "$P/vendor/nested" && (cd "$P/vendor/nested" && git init -q) || die "nested git init"
 ready
-out=$(H log-out --changes src/api/a.ts tests/api_one.sh docs/x.md --verification v --closure c) || die "inside the surfaces it must close: $out"
+out=$(H log-out --changes "$WORK/plink/src/api/a.ts" tests/api_one.sh docs/x.md --verification v --closure c) || die "inside the surfaces it must close: $out"
 grep -q '\.claude/worktrees\|vendor/nested' <<<"$out" && die "a nested worktree or repository is not a changed file: $out"
 [ "$(q "SELECT status FROM features WHERE name='api';")" = done ] || die "api must be done"
 g worktree remove --force "$P/.claude/worktrees/agent-x" && rm -rf "$P/.claude" "$P/vendor" || die "worktree cleanup"
@@ -156,6 +166,32 @@ out=$(H log-out --lean --changes src/api/a.ts --verification v --closure c)
 grep -qi 'surfaces' <<<"$out" && die "the lean path must not check surfaces: $out"
 grep -q 'log-out --lean refused' <<<"$out" || die "the lean gate should be what answers: $out"
 pass "log-out --lean never reaches the surfaces check"
+
+echo "6. import-features is all or nothing"
+before=$(q "SELECT count(*) FROM features;")
+good='{"feature_number":101,"name":"imp-a","title":"A"},{"feature_number":102,"name":"imp-b","title":"B","out_of_scope":["no UI"]}'
+for bad in '{"feature_number":103,"name":"imp-c","title":"C","out_of_scope":["1","2","3","4","5","6"]}' \
+           '{"feature_number":"x","name":"imp-c","title":"C"}' \
+           '{"feature_number":103,"title":"C"}' \
+           '{"feature_number":101,"name":"imp-dup","title":"Dup"}'; do
+  printf '[%s,%s]\n' "$good" "$bad" > "$WORK/seed.json"
+  out=$(H import-features "$WORK/seed.json") && die "a bad last item must fail the import: $bad"
+  grep -q 'nothing imported' <<<"$out" || die "the refusal must say nothing was imported: $out"
+  [ "$(q "SELECT count(*) FROM features;")" = "$before" ] || die "a bad item must leave no earlier item inserted: $bad"
+done
+printf '[%s]\n' "$good" > "$WORK/seed.json"
+out=$(H import-features "$WORK/seed.json") || die "a valid seed must import: $out"
+[ "$(q "SELECT out_of_scope FROM features WHERE name='imp-b';")" = '["no UI"]' ] && [ "$(q "SELECT count(*) FROM features;")" = $((before + 2)) ] \
+  || die "a valid seed must insert every item"
+pass "import-features validates every item first and inserts in one transaction (bad out_of_scope, number, name or a duplicate leave nothing)"
+q "UPDATE features SET title='A edited', status='done' WHERE name='imp-a';"
+printf '[%s,%s]\n' "$good" '{"feature_number":104,"name":"imp-d","title":"D"}' > "$WORK/seed.json"
+out=$(H import-features "$WORK/seed.json") || die "a seed with existing and new items must import the new ones: $out"
+grep -q 'imported 1 feature(s).*(2 already present)' <<<"$out" || die "the message must count imported and already-present items: $out"
+[ "$(q "SELECT count(*) FROM features WHERE name='imp-d' AND feature_number=104;")" = 1 ] && [ "$(q "SELECT count(*) FROM features;")" = $((before + 3)) ] \
+  || die "only the new item must be inserted"
+[ "$(q "SELECT title || '|' || status FROM features WHERE name='imp-a';")" = 'A edited|done' ] || die "an existing item must be left untouched"
+pass "import-features skips items already present by name and still imports the new ones"
 
 H snapshot >/dev/null || die "snapshot"
 grep -q '^## Out of scope' "$P"/state/features/*-api.md || die "snapshot must list out of scope"

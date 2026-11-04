@@ -11,7 +11,8 @@
 #   3. Any other failure (a 500) is reported per row, with no retry and no
 #      lean-mode warning.
 #   4. upsert_feature carries out_of_scope ([] when none), upsert_session
-#      surfaces (null when not declared) and surfaces_required (migration 0006).
+#      surfaces (null when not declared) and surfaces_required (migration 0006);
+#      a current mirror gets them on the first call with no 0006 warning.
 #   5. A mirror with 0005 but without 0006 gets every row with the lean fields
 #      and without the scope ones, and one 0006 warning (no lean-mode one).
 #
@@ -125,6 +126,9 @@ pass "a 500 is reported per row, without a retry or the lean-mode warning"
 
 echo "4. payloads carry the scope fields (migration 0006)"
 out=$(sync_run) || die "sync: $out"
+grep -q 'predate scope surfaces\|predate lean mode' <<<"$out" && die "a current mirror (with 0006) must not get a compat warning: $out"
+[ "$(grep -c '^upsert_feature ' "$WORK/log")" = 2 ] && [ "$(grep -c '^upsert_session ' "$WORK/log")" = 2 ] \
+  || die "a current mirror takes every row on the first call, no 0006 retry: $(cat "$WORK/log")"
 f=$(payload upsert_feature '.p_name == "leanf"')
 jq -e '.p_out_of_scope == ["no new endpoints", "no UI"]' <<<"$f" >/dev/null || die "out_of_scope payload: $f"
 f=$(payload upsert_feature '.p_name == "plain"')
@@ -135,7 +139,7 @@ jq -e '.p_surfaces == ["src/api/**", "tests/api_*.sh"] and .p_surfaces_required 
 s=$(payload upsert_session '.p_agent == "bootstrap"')
 jq -e '.p_surfaces == null and .p_surfaces_required == false' <<<"$s" >/dev/null \
   || die "a session without surfaces sends null and its surfaces_required: $s"
-pass "upsert_feature sends out_of_scope, upsert_session surfaces and surfaces_required"
+pass "upsert_feature sends out_of_scope, upsert_session surfaces and surfaces_required; a current mirror gets no 0006 fallback warning or retry"
 
 echo "5. a mirror with 0005 but without 0006"
 out=$(sync_run STUB_MIRROR_0005=1) || die "sync: $out"
