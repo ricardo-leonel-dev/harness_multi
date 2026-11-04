@@ -81,7 +81,10 @@ installs can share one repository. Only project-owned content reaches git:
 `install.sh` lists them so you can untrack them with `git rm -r --cached`.
 
 Optionally pass `--features-seed features.seed.json` (see
-`templates/features.seed.json.tmpl`) to bulk-load an initial feature list.
+`templates/features.seed.json.tmpl`) to bulk-load an initial feature list. The import is
+all or nothing: every item is checked first and a bad one imports nothing. Items
+whose name already exists in the project are skipped and reported as already
+present, so re-running with an extended seed adds only the new items.
 
 ## The Postgres/Supabase mirror (optional)
 
@@ -391,8 +394,10 @@ Covered by `bash tests/quick_path_test.sh`.
   into another checkout. It lists the links in the shared `.git/info/exclude` and is safe to
   re-run: it links harness files added since and replaces a stale regular copy of a file
   the toolkit installs (listed in `harness/installed-files.txt`, untracked in the worktree;
-  top-level or directly under `scripts/`, `.claude/agents/`, `harness/`) with a link, moving a
-  differing copy to the worktree's `progress/stale_harness_copies/`. Other files there, such
+  top-level, directly under `scripts/` or `.claude/agents/`, or in `.codex/agents/` or
+  `harness/instructions/` when the worktree holds those directories for real) with a link,
+  moving a differing copy to the worktree's own `progress/stale_harness_copies/` (a linked
+  `progress/` is made local first; a failed step prints a `[WARN]` naming the file). Other files there, such
   as a git-ignored `scripts/local.json`, `.codex/config.toml` or `mock-data/`, are kept. `install.sh` in the main checkout
   re-runs it for every worktree linked there, and refuses to run inside a linked worktree
   (it would write through the links). A `record-usage` whose collector fails (e.g. a stale

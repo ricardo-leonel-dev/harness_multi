@@ -445,7 +445,9 @@ while IFS= read -r m; do
   fi
   mach+=("$m")
 done < <(printf '%s\n' $LEAN_MACH_ALLOW; jq -r '.lean.allowed_mach // [] | .[]' "$project/.harness.json" 2>/dev/null || true)
-deny_ports=$(jq -c '.lean.deny_ports // []' "$project/.harness.json" 2>/dev/null || echo '[]')
+# A missing key is the default (no extra ports); a present one must be an array (false, null, a
+# string or an object fail like a bad entry instead of reading as []).
+deny_ports=$(jq -c 'if (.lean | type) == "object" and (.lean | has("deny_ports")) then .lean.deny_ports else [] end' "$project/.harness.json" 2>/dev/null || echo '[]')
 bad_ports=$(jq -c 'if type == "array" then map(select(type != "number" or . != floor or . < 1 or . > 65535)) else [.] end' <<<"$deny_ports")
 if [ "$bad_ports" != '[]' ]; then
   echo "lean/sandbox.sh: .harness.json::lean.deny_ports must be an array of integers 1-65535 (invalid: $bad_ports)" >&2

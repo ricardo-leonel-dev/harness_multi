@@ -256,7 +256,7 @@ lean_run_unlock() { rm -rf "$(lean_state_dir "$1")/tmp/run.lock"; }
 # LEAN_SANDBOX_WARN holds sandbox.sh's [WARN] lines (allowed_domains opening the network):
 # every caller prints them.
 lean_sandbox_prepare() {
-  local err
+  local err why
   LEAN_PROFILE="" LEAN_SANDBOX_WARN=""
   if [ "${LEAN_GATE_UNSANDBOXED:-}" = 1 ]; then LEAN_SANDBOX="unsandboxed: LEAN_GATE_UNSANDBOXED=1"; return 0; fi
   if ! command -v sandbox-exec >/dev/null 2>&1; then
@@ -264,7 +264,9 @@ lean_sandbox_prepare() {
   fi
   err=$(mktemp) || { LEAN_SANDBOX="broken: no temp file for lean/sandbox.sh's messages"; return 0; }
   if ! LEAN_PROFILE=$("$LEAN_LIB_DIR/sandbox.sh" "$1" --seatbelt 2>"$err"); then
-    rm -f "$err"; LEAN_SANDBOX="broken: lean/sandbox.sh could not build the profile"; return 0
+    # Name sandbox.sh's own reason (its first non-[WARN] lines) so the gate's message says why.
+    why=$(grep -v '^\[WARN\]' "$err" | grep -v '^[[:space:]]*$' | head -3 | tr '\n' ' ' | sed 's/ *$//')
+    rm -f "$err"; LEAN_SANDBOX="broken: lean/sandbox.sh could not build the profile${why:+: $why}"; return 0
   fi
   LEAN_SANDBOX_WARN=$(grep '^\[WARN\]' "$err" || true); rm -f "$err"
   if ! sandbox-exec -p "$LEAN_PROFILE" true 2>/dev/null; then

@@ -558,7 +558,12 @@ INSERT INTO session_log (id, project_id, feature_id, agent, started_at, closed_a
         self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
         self.assertEqual(len(self.usage_lines(failed.stdout)), 1, failed.stdout)
         self.assertIn('agent usage not recorded', failed.stdout)
-        self.assertNotIn('boom', failed.stdout + failed.stderr)
+        # The warning names the failure (exit status and the collector's last
+        # stderr line); the raw traceback never leaks onto any other line.
+        usage_line = self.usage_lines(failed.stdout)[0]
+        self.assertIn('exited 3', usage_line)
+        boom_lines = [line for line in (failed.stdout + failed.stderr).splitlines() if 'boom' in line]
+        self.assertEqual(boom_lines, [usage_line], failed.stdout + failed.stderr)
         script.unlink()
         missing = self.init()
         self.assertEqual(missing.returncode, 0, missing.stdout + missing.stderr)

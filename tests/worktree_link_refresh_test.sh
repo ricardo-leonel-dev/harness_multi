@@ -29,6 +29,11 @@
 #   9. without harness/installed-files.txt nothing is repaired.
 #  10. install.sh in main fails loudly, before copying, on a self-referential
 #      link or a linked directory where it would copy a harness file.
+#  11. a worktree progress/ that links to main's is made local before the repair,
+#      so backups never land in main's; a failed ln prints a [WARN] naming the
+#      file; a real harness/instructions/ is repaired like scripts/; install.sh in
+#      a partly linked worktree prints one summary [FAIL]; on a case-insensitive
+#      volume the main checkout named in another case is refused as this checkout.
 #
 # Usage: bash tests/worktree_link_refresh_test.sh   (exits non-zero on the first failure)
 
@@ -245,5 +250,63 @@ rm "$P/.codex" && mv "$WORK/codex-elsewhere" "$P/.codex"
 out=$(install_into "$P") || die "install.sh after the links are fixed: $out"
 main_agents_intact "after the refused installs"
 pass "install.sh fails loudly before writing through a link"
+
+echo "11. backups stay in the worktree, failures warn, nested toolkit dirs, path case"
+WR="$(cd "$W" && pwd -P)"
+# A worktree progress/ that links to main's: the backup lands in the worktree's own real
+# progress/, never in main's, and the message names where it is.
+rm -rf "$W/progress" && ln -s "$P/progress" "$W/progress"
+rm "$W/scripts/agent_usage.py" && printf 'stale2\n' > "$W/scripts/agent_usage.py"
+ls "$P/progress/stale_harness_copies" >/dev/null 2>&1 && die "setup: main has no backups"
+out=$(H "$P" link-worktree "$W") || die "link-worktree: $out"
+[ -d "$W/progress" ] && [ ! -L "$W/progress" ] || die "progress/ must be local"
+is_link_to "$W/scripts/agent_usage.py" "$P/scripts/agent_usage.py" || die "the stale copy should be replaced"
+[ "$(cat "$W/progress/stale_harness_copies/scripts/agent_usage.py")" = stale2 ] || die "the backup must be in the worktree's own progress/"
+[ ! -e "$P/progress/stale_harness_copies" ] || die "no backup may go into main's progress/: $(ls -R "$P/progress")"
+grep -qF "kept in $WR/progress/stale_harness_copies/" <<<"$out" || die "the message must name the backups' real location: $out"
+# ln fails (a read-only scripts/): a [WARN] names the file and says the copy is unchanged.
+rm "$W/scripts/agent_usage.py" && printf 'stale3\n' > "$W/scripts/agent_usage.py"
+chmod a-w "$W/scripts"
+out=$(H "$P" link-worktree "$W"); rc=$?
+chmod u+w "$W/scripts"
+[ "$rc" = 0 ] || die "a failed repair is a warning, not a failure: $out"
+grep -q "WARN.*could not create a link for $W/scripts/agent_usage.py (ln -s failed): the copy stays where it was, unchanged" <<<"$out" \
+  || die "a failed ln must warn naming the file and that it is unchanged: $out"
+[ -f "$W/scripts/agent_usage.py" ] && [ ! -L "$W/scripts/agent_usage.py" ] && [ "$(cat "$W/scripts/agent_usage.py")" = stale3 ] \
+  || die "after a failed ln the copy must be unchanged"
+ls "$W/scripts"/*.harness-relink* >/dev/null 2>&1 && die "no temp file may be left"
+out=$(H "$P" link-worktree "$W") || die "link-worktree: $out"
+is_link_to "$W/scripts/agent_usage.py" "$P/scripts/agent_usage.py" || die "once writable the copy is replaced"
+# A real harness/instructions/ in the worktree: its stale copies are replaced and missing
+# files linked, by the same rules (backup kept).
+rm "$W/harness" && mkdir -p "$W/harness/instructions" && printf 'stale\n' > "$W/harness/instructions/persona.md"
+out=$(H "$P" link-worktree "$W") || die "link-worktree: $out"
+is_link_to "$W/harness/instructions/persona.md" "$P/harness/instructions/persona.md" || die "a stale instruction copy should become a link: $out"
+is_link_to "$W/harness/instructions/testing.md" "$P/harness/instructions/testing.md" || die "a missing instruction file should be linked: $out"
+[ "$(cat "$W/progress/stale_harness_copies/harness/instructions/persona.md")" = stale ] || die "the differing instruction copy must be kept"
+grep -q 'replaced stale harness copies with links: .*harness/instructions/persona.md' <<<"$out" || die "the repair must be reported: $out"
+rm -rf "$W/harness" && H "$P" link-worktree "$W" >/dev/null && is_link_to "$W/harness" "$P/harness" || die "restore harness link"
+# install.sh in a partly linked worktree (a regular scripts/harness.sh, the rest links):
+# one summary [FAIL] with the count, the first paths and the main-checkout hint.
+rm "$W/scripts/harness.sh" "$W/harness.db" && cp "$P/scripts/harness.sh" "$W/scripts/harness.sh"
+out=$(install_into "$W") && die "install.sh in a partly linked worktree must refuse: $out"
+[ "$(grep -c '\[FAIL\]' <<<"$out")" = 1 ] || die "one summary [FAIL] line expected: $out"
+grep -q '\[FAIL\].*[0-9][0-9]* harness path(s) are links.*and [0-9][0-9]* more.*linked git worktree: run install.sh in its main checkout' <<<"$out" \
+  || die "the summary must give the count, the first paths and the hint: $out"
+rm "$W/scripts/harness.sh" && ln -s "$P/scripts/harness.sh" "$W/scripts/harness.sh" && ln -s "$P/harness.db" "$W/harness.db" || die "restore links"
+main_agents_intact "partly linked worktree install"
+# A case-insensitive volume: the main checkout named in another case is still this checkout,
+# and a worktree named in another case is repaired normally.
+PU="$(printf '%s' "$P" | tr '[:lower:]' '[:upper:]')"; WU="$(printf '%s' "$W" | tr '[:lower:]' '[:upper:]')"
+if [ "$PU" != "$P" ] && [ -d "$PU" ] && [ "$PU" -ef "$P" ]; then
+  out=$(H "$P" link-worktree "$PU") && die "the main checkout in another case must be refused: $out"
+  grep -q 'not this checkout' <<<"$out" || die "the refusal must say it is this checkout: $out"
+  rm "$W/AGENTS.md" && cp "$P/AGENTS.md" "$W/AGENTS.md"
+  out=$(H "$P" link-worktree "$WU") || die "link-worktree with the worktree in another case: $out"
+  [ -L "$W/AGENTS.md" ] && [ "$W/AGENTS.md" -ef "$P/AGENTS.md" ] || die "a worktree named in another case must still be repaired: $out"
+  main_agents_intact "path case"
+  echo "  (case-insensitive volume: path-case checks ran)"
+fi
+pass "backups stay in the worktree's own progress/, a failed ln warns, harness/instructions/ is repaired, one summary refusal, path case"
 
 echo "all $PASS checks passed"

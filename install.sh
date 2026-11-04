@@ -226,16 +226,31 @@ for rel in $DESTS; do
   hit="$(linked_dest "$rel")"
   [ -z "$hit" ] || case " $LINKED " in *" $hit "*) ;; *) LINKED="${LINKED:+$LINKED }$hit" ;; esac
 done
+# One summary [FAIL] (count and the first few, each with what it is), not a
+# line per file: a partly linked worktree can have a dozen of them.
 if [ -n "$LINKED" ]; then
+  n=0 shown=""
   for hit in $LINKED; do
+    n=$((n + 1))
+    [ "$n" -le 3 ] || continue
     if [ "$(readlink "$TARGET_DIR/$hit")" = "$TARGET_DIR/$hit" ] || [ "$(readlink "$TARGET_DIR/$hit")" = "${hit##*/}" ]; then
-      fail "$hit is a link to itself (left by an older link-worktree repair): restore it as a regular file, then re-run install.sh"
+      what="a link to itself, left by an older link-worktree repair"
     elif [ ! -e "$TARGET_DIR/$hit" ]; then
-      fail "$hit is a broken or looping link ($(readlink "$TARGET_DIR/$hit")): restore it as a regular file or directory, then re-run install.sh"
+      what="a broken or looping link to $(readlink "$TARGET_DIR/$hit")"
     else
-      fail "$hit is a link to $(readlink "$TARGET_DIR/$hit"): install.sh would copy harness files through it into another place — make it a regular file or directory of this project, then re-run install.sh"
+      what="a link to $(readlink "$TARGET_DIR/$hit")"
     fi
+    shown="${shown:+$shown; }$hit ($what)"
   done
+  [ "$n" -le 3 ] || shown="$shown; and $((n - 3)) more"
+  gd="$(git -C "$TARGET_DIR" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  gcd="$(cd "$TARGET_DIR" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P || true)"
+  if [ -n "$gd" ] && [ -n "$gcd" ] && [ ! "$gd" -ef "$gcd" ]; then
+    hint="this is a linked git worktree: run install.sh in its main checkout instead — it re-links its worktrees"
+  else
+    hint="make each one a regular file or directory of this project, then re-run install.sh"
+  fi
+  fail "$n harness path(s) are links, install.sh would copy harness files through them into another place: $shown. $hint"
   exit 1
 fi
 
