@@ -148,6 +148,15 @@ parameters are defaulted, so an older `sync_postgres.sh` keeps working; a newer
 one against a mirror without them syncs every row without the lean fields and
 `[WARN]`s once.
 
+**Mirror deployed before scope surfaces existed?** Run
+`db/migrations/0006_scope_surfaces.sql` once (feature `out_of_scope`, session
+`surfaces`/`surfaces_required`; sessions already in the mirror get
+`surfaces_required = false`), then re-apply `db/rpc/upsert_feature.sql` and
+`db/rpc/upsert_session.sql` (each drops its previous signature first). The new
+parameters are defaulted, so an older `sync_postgres.sh` keeps working; a newer
+one against a mirror without them syncs every row without the scope fields and
+`[WARN]`s once.
+
 **Mirror deployed before specs/sessions were resolved by feature local id?**
 Re-apply `db/rpc/upsert_spec.sql` and `db/rpc/upsert_session.sql` (each drops
 its previous signature first, then reloads PostgREST's schema cache). Before
