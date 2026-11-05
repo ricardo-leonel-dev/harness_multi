@@ -17,7 +17,9 @@ model; see "Hardening further" at the end.
 
 ## What runs sandboxed
 
-- Every session `lean/run.sh` opens (`lean/sandbox.sh` builds Claude Code's `--settings`).
+- Every session `lean/run.sh` opens (`lean/sandbox.sh` builds Claude Code's `--settings`; for a
+  `codex` role, `lean/adapters/codex.sh` turns the same lists into a Codex permission profile,
+  see "Codex sessions").
 - The code those sessions leave behind, when the harness runs it: the gate's suite and acceptance
   tests (`lean/gate.sh`), `run.sh freeze`, `./init.sh` and `scripts/harness.sh test` while a lean
   feature has an open session (`lean/lib.sh` `lean_sandboxed`, a `sandbox-exec` profile built by
@@ -113,6 +115,65 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
   not at all on Linux (bubblewrap).
 - `~/.cargo/config.toml` stays readable (cargo needs it): keep registry tokens in
   `~/.cargo/credentials.toml`, which is denied.
+
+## Codex sessions
+
+`lean/adapters/codex.sh` (checked against codex-cli 0.166.0 on macOS; probes and results in the
+toolkit's `progress/design_lean_flow.md` §10) runs Codex with a permission profile, `--enable
+network_proxy` and pinned approval settings, and never with `--dangerously-bypass-*`,
+`--approve-for-me` or a `danger-full-access` mode:
+
+- **Reads**: base `:read-only` (everything readable) minus `deny` on sandbox.sh's `denyRead` list:
+  the same `$HOME` entries, credentials, the lean state with the frozen manifest, Claude Code's
+  temp folder. `~/.codex` (Codex's auth) is a `$HOME` entry, so commands can't read it; Codex
+  itself, outside the sandbox, still does.
+- **Writes**: only the project and a fresh session `TMPDIR` (not `/tmp`, not the user temp dir:
+  stricter than the Claude sessions). sandbox.sh's `denyWrite` list (harness-owned files, the git
+  state) is `read`. `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`, `.claude/`
+  and `.codex/` anywhere in the project are `deny` globs: Codex accepts only `deny` on a glob, so
+  commands can't read them either (Codex loads `AGENTS.md` itself).
+- **Network**: Codex's own proxy (the experimental `network_proxy` feature): allowed hosts are
+  `lean.allowed_domains`, direct outbound connections are blocked, localhost is open
+  (`allow_local_binding`). Unix sockets: the project and sandbox.sh's local database sockets.
+- **Approvals**: `never` in both modes, interactive included: a command the sandbox blocks fails
+  back to the model, and there is no escalation a user could approve to run a command outside the
+  profile (the Claude sessions' `allowUnsandboxedCommands: false`). `approvals_reviewer = "user"`
+  is pinned so a user config can't hand approvals to a model reviewer; headless also passes
+  `--ignore-rules` (no execpolicy rule runs a command outside the sandbox).
+- **Environment**: the same secret-looking variables dropped (`lean_env_args`), Codex's own
+  `OPENAI_*` / `CODEX_*` kept for Codex, and `OPENAI_*` and `CODEX_API_KEY` removed again from the
+  commands' environment (`shell_environment_policy.exclude`, verified through `codex sandbox`); `TMPDIR`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_OPTIONAL_LOCKS=0`, empty `RUSTC_WRAPPER` / `SSH_AUTH_SOCK` set through
+  `shell_environment_policy.set`. Every proxy variable of the caller (any name ending in
+  `proxy`, any case: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, lowercase, `npm_config_*`)
+  and Codex's own `CODEX_SANDBOX*` / `CODEX_NETWORK_*` markers are unset for the check and the
+  session, so the only proxy the commands see is Codex's (Codex's own API traffic doesn't use the
+  caller's proxy either).
+- **Fails closed**: before each session `codex sandbox` runs a check with the same flags (seatbelt
+  active, a canary in the lean state unreadable and unwritable, the session `TMPDIR` writable,
+  Codex's proxy in place: `CODEX_NETWORK_PROXY_ACTIVE=1` and `HTTP(S)_PROXY` on `127.0.0.1`, which
+  only Codex can supply since the caller's are unset); a failure, a nested sandbox, or a flag or key the installed Codex doesn't know
+  refuses the session (exit 3).
+
+Gaps compared with the Claude sessions:
+
+- **Without the `network_proxy` feature the profile's network is fully open.** The adapter enables
+  it and the check refuses a session without the proxy, but the feature is experimental: a Codex
+  update that renames it fails the check (closed), one that changes its behaviour is not detected.
+- **Private addresses**: `allow_local_binding` opens the machine's LAN addresses too (verified with
+  its own `192.168.x` address), not only loopback.
+- **Not observed in a live session**: the profile was verified through `codex sandbox` (the same
+  config stack, no model). That `codex` / `codex exec` apply it identically to the model's commands
+  and to its built-in file edits (`apply_patch`), and the `codex exec --json` event format the usage
+  is parsed from, were not observed (a model call). The parser is tolerant: a missing usage gives
+  zeros and `is_error`.
+- **User and project config** (`~/.codex/config.toml`, a trusted project's `.codex/config.toml`)
+  still load: MCP servers, hooks and model providers they define run outside the profile, as in
+  the user's own Codex sessions. The project's `.codex/` is write-denied and hash-pinned.
+- **Globs are case-sensitive** as far as known: a nested `claude.md` in another case is not denied
+  (the gate still fails on it).
+- **macOS only**: the check expects `CODEX_SANDBOX=seatbelt`; elsewhere the adapter refuses.
+- No `LEAN_DENY_PORTS`: as for the Claude sessions, localhost ports can't be denied one by one.
 
 ## Hardening further
 

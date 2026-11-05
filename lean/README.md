@@ -57,7 +57,7 @@ think of.
    `append-log`ged. It never logs out.
 
 Every step refuses a name without `docs/features/<name>.md` before pinning anything.
-Steps 3–5 open an interactive session (`--headless` for `claude -p`). Close with
+Steps 3–5 open an interactive session (`--headless` for `claude -p` / `codex exec`). Close with
 `scripts/harness.sh log-out --lean --changes … --verification … --closure …`: it runs the gate
 itself against the commit the session started from (risk mode: with the manifest frozen at
 approval, and it needs the review file with its `VERDICT:` line). A feature with a mode closes only
@@ -106,7 +106,7 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `implementer` | `claude-mini` | tool for implement, normal review and fix |
-| `reviewer` | `claude:claude-haiku-5-5` | tool for the risk-mode review; must differ from the implementer |
+| `reviewer` | `claude:claude-haiku-5-5` | tool for the risk-mode review; must differ from the implementer (any tool: `claude[:<model>]`, `claude-mini`, `codex[:<model>]`) |
 | `risk_questions` | `backend` | list in `lean/risk-questions/`; a project's own `docs/risk-questions.md` wins |
 | `acceptance_dir` | `acceptance` | where risk-mode acceptance tests live (outside `src/` and `tests/`, so the planner may write them) |
 | `allowed_domains` | `[]` | hosts the sandboxed sessions may reach besides localhost |
@@ -126,4 +126,11 @@ points at a wrapper that adds `--single-process`, since Claude Code's sandbox wo
 register its rendezvous service (the gate runs the browser unwrapped).
 
 Tools: `claude[:<model>]`, `claude-mini` (the user's fish function, which holds the MiniMax
-credentials). `codex` is designed (design §10) but not built.
+credentials), `codex[:<model>]` (Codex CLI, `lean/adapters/codex.sh`: interactive `codex`, headless
+`codex exec --json`, whose events become the same result JSON with tokens, duration and
+`is_error`; Codex reports no cost). The Codex sessions run in a Codex permission profile built from
+the same lists as the Claude sandbox (reads denied, writes only in the project and a fresh
+`TMPDIR`, network through Codex's proxy: localhost and `lean.allowed_domains`); the adapter first
+confirms it with `codex sandbox` and refuses to start when it can't (macOS only). Differences from
+the Claude sandbox: [`SECURITY.md`](SECURITY.md) "Codex sessions". `lean/adapters/codex.sh <project>
+check - <file> -` runs only that check.
