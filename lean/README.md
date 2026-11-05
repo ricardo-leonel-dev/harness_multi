@@ -24,7 +24,9 @@ think of.
 0. **Create** the feature with its mode: `scripts/harness.sh add-feature --name <name> … --mode
    normal|risk [--approval]` (or `set-mode` on a pending one). `--approval` makes a normal feature
    wait for the user's approval too; risk always does.
-1. **Plan**: the planner follows `lean/instructions/planning.md`. When approval applies, the leader
+1. **Plan**: the planner starts with `lean/run.sh brief <name> <keyword...>` (read-only, one call: the
+   feature, the planning rules, the risk questions, an earlier plan, the docs' headings, the project's
+   files and the keyword matches) and follows `lean/instructions/planning.md`. When approval applies, the leader
    runs `scripts/harness.sh approve-plan <name> --by <name>` right after the user approves; `claim`
    refuses until then. In risk mode that also hashes the acceptance tests into
    `<lean state>/frozen/<name>.sha` (and the database), outside the project (see "Sandbox" > "State").

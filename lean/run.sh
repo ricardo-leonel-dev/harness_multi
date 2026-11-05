@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # run.sh — the lean flow's steps, one sandboxed session each.
 #
+#   lean/run.sh brief     <name> [keyword...]   before planning: what the planner reads, in one call
 #   lean/run.sh freeze    <name>   risk mode, after the plan is approved: hash the acceptance tests
 #   lean/run.sh implement <name>   implementer session (MiniMax by default)
 #   lean/run.sh review    <name>   normal: implementer's tool, one pass, may fix once
@@ -23,10 +24,59 @@
 set -euo pipefail
 
 LEAN_DIR="$(cd "$(dirname "$0")" && pwd)"
-usage() { sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 step="${1:-}"; name="${2:-}"
 [ -n "$step" ] && [ -n "$name" ] || usage
 shift 2
+
+# brief <name> [keyword...] — everything the planner reads before writing the plan, in one
+# call: the feature, the planning rules, the risk questions, an earlier plan, the project's
+# files and the lines matching each keyword. Read-only; runs before the document exists, so
+# nothing is pinned. Long sections are capped: read further with sed -n on the paths shown.
+if [ "$step" = brief ]; then
+  case "$name" in *[!A-Za-z0-9_-]*) echo "feature name must be letters, digits, _ or -" >&2; exit 2 ;; esac
+  [ -f .harness.json ] || { echo "run lean/run.sh from a project with a .harness.json" >&2; exit 2; }
+  LEAN_DIR="$(cd "$(dirname "$0")" && pwd)"
+  section() { printf '\n===== %s =====\n' "$1"; }
+  cap() { awk -v n="$1" 'NR<=n {print} END {if (NR>n) printf "... (%d more lines)\n", NR-n}'; }
+  section "feature"
+  feat=$(ls state/features/*-"$name".md 2>/dev/null | head -1 || true)
+  if [ -n "$feat" ]; then
+    awk '/^## Agent usage/ {exit} {print}' "$feat"
+  else
+    echo "(no snapshot in state/features/ — run scripts/harness.sh status)"
+  fi
+  [ -f "docs/features/$name.md" ] && echo "(a plan already exists: docs/features/$name.md)"
+  section "project"
+  echo "dir: $(pwd)   git prefix: $(git rev-parse --show-prefix 2>/dev/null || true)"
+  jq -r '"verify_command: \(.verify_command // "-")", "lean: \(.lean // {} | tojson)"' .harness.json
+  section "planning rules ($LEAN_DIR/instructions/planning.md)"
+  cat "$LEAN_DIR/instructions/planning.md"
+  qlist=$(jq -r '.lean.risk_questions // "backend"' .harness.json)
+  qfile="docs/risk-questions.md"; [ -f "$qfile" ] || qfile="$LEAN_DIR/risk-questions/$qlist.md"
+  section "risk questions ($qfile)"
+  cat "$qfile" 2>/dev/null || echo "(missing)"
+  example=$(ls -t docs/features/*.md 2>/dev/null | grep -v '\.review\.md$' | grep -vxF "docs/features/$name.md" | head -1 || true)
+  section "earlier plan (format example): ${example:-none}"
+  [ -z "$example" ] || cap 70 < "$example"
+  section "docs headings (read a section with sed -n '<from>,<to>p')"
+  for f in docs/architecture.md docs/conventions.md docs/verification.md; do
+    [ -f "$f" ] && { grep -n '^#' "$f" || true; } | sed "s|^|$f:|" | cap 40
+  done
+  section "files (tracked and untracked, project dir)"
+  { git ls-files -co --exclude-standard -- . 2>/dev/null || true; } | { grep -vE '^(state|progress|harness|lean|scripts)/|(^|/)(AGENTS|CLAUDE)\.md$|^\.(claude|codex|agents)/' || true; } | cap 200
+  # Untracked files are searched too (a feature's new files), but never a dotfile or anything
+  # under a dot-folder (.env and the like hold secrets) nor a key/credential-looking file.
+  for kw in "$@"; do
+    section "matches: $kw"
+    git grep --untracked -n -I -i -F -e "$kw" -- . ':!state' ':!progress' ':!harness' ':!lean' ':!scripts' \
+      ':(exclude,glob)**/.*' ':(exclude,glob)**/.*/**' ':(exclude,glob)**/*.pem' ':(exclude,glob)**/*.key' \
+      ':(exclude,glob)**/*secret*' ':(exclude,glob)**/*credential*' 2>/dev/null \
+      | cut -c1-200 | cap 25 || true
+  done
+  exit 0
+fi
+
 headless=0; base=""
 while [ $# -gt 0 ]; do
   case "$1" in
