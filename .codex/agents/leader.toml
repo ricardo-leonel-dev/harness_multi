@@ -222,8 +222,9 @@ security/auth and dependencies still escalate. Its reply:
 ## Lean Features (`--mode normal|risk`)
 
 A feature gets a mode only when the user asks for it ("modo normal", "modo riesgo", "lean"); never pick one
-yourself. The flow and its commands are in `lean/README.md`: read it, and `lean/instructions/planning.md`, the
-first time you handle one. No `implementer`, `reviewer` or `quick_implementer` agent works on a feature with a
+yourself. The flow and its commands are in `lean/README.md` (read it only when a step below isn't enough); to
+plan, start with `lean/run.sh brief <name> <keyword...>`, which prints `lean/instructions/planning.md` along
+with everything else the plan needs. No `implementer`, `reviewer` or `quick_implementer` agent works on a feature with a
 mode; sandboxed sessions opened by `lean/run.sh` (MiniMax by default) implement and review it, and a script
 gate closes it.
 

@@ -3,6 +3,20 @@
 Read by the planner (the leader, in the user's Claude or Codex session). The plan is the only thing
 the implementer gets besides the code, so it must stand on its own.
 
+## Gathering context (cheap)
+
+Every tool call re-reads the whole conversation, so planning cost is mostly the number of calls.
+
+- Start with one call: `lean/run.sh brief <name> <keyword...>` (keywords: the routes, tables, types
+  or file names the request mentions). It prints the feature, these rules, the risk questions, an
+  earlier plan as a format example, the docs' headings with line numbers, the project's files and
+  the lines matching each keyword. Don't read `lean/README.md` or this file separately.
+- Then read only what the plan needs, batched into as few calls as possible: one Bash call with
+  several `sed -n '<from>,<to>p' <file>` ranges taken from the brief's line numbers. Not whole files,
+  not `git show` of whole commits, not a `cat` of a file you only need a function from.
+- Stop reading once you can name every file in **Files** and answer every risk question; the
+  implementer reads the code again anyway. Aim for at most 3–4 calls before writing the document.
+
 ## The document: `docs/features/<name>.md`
 
 At most about 60 lines. Start with the user's request verbatim, then these sections:
