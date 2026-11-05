@@ -8,10 +8,13 @@
 #                                  risk:   reviewer's tool (another model), report only
 #   lean/run.sh fix       <name>   the failed checks (and, in risk mode, the review findings)
 #   lean/run.sh gate      <name>   the closing checks (lean/gate.sh)
+#   lean/run.sh chain     <name>   every step above, headless, in one call; a compact summary
+#                                  (--step-minutes N caps each step; never logs out)
 #
 # Options: --headless (claude -p instead of an interactive session; the result JSON is
 # kept under the project's lean state, lean/lib.sh), --base <rev> (gate base; default the
-# open harness session's recorded BASE for this feature, else HEAD).
+# open harness session's recorded BASE for this feature, else HEAD), --step-minutes <N>
+# (chain only; default .harness.json::lean.step_minutes, else 30).
 # Run from the project directory. A feature is in risk mode once it has been frozen.
 # Every step first checks that docs/features/<name>.md exists (nothing is pinned otherwise),
 # then checks the harness-owned files against the hashes pinned for the feature
@@ -24,7 +27,7 @@
 set -euo pipefail
 
 LEAN_DIR="$(cd "$(dirname "$0")" && pwd)"
-usage() { sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 step="${1:-}"; name="${2:-}"
 [ -n "$step" ] && [ -n "$name" ] || usage
 shift 2
@@ -77,11 +80,12 @@ if [ "$step" = brief ]; then
   exit 0
 fi
 
-headless=0; base=""
+headless=0; base=""; step_minutes=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --headless) headless=1; shift ;;
-    --base) base="$2"; shift 2 ;;
+    --base) [ $# -ge 2 ] || usage; base="$2"; shift 2 ;;
+    --step-minutes) [ $# -ge 2 ] && [ "$step" = chain ] || usage; step_minutes="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; usage ;;
   esac
 done
@@ -100,7 +104,16 @@ doc="docs/features/$name.md"
 [ -f "$doc" ] || { echo "no feature document: $doc (plan it first: lean/instructions/planning.md)" >&2; exit 2; }
 lean_adopt_legacy "$project"
 state=$(lean_state_dir "$project")
+# Before chain.sh is sourced: the leader's shell runs it unsandboxed, so a trusted file
+# changed since the pin must stop it here, not at its first step.
 lean_check_trusted "$project" "$name" || exit 3
+if [ "$step" = chain ]; then
+  # shellcheck source=chain.sh
+  . "$LEAN_DIR/chain.sh"
+  set +e   # lean_chain checks every status itself and reports the failing step
+  lean_chain
+  exit $?
+fi
 # Pin the trusted files' hashes before the feature's first session, unless `harness.sh claim`
 # already did: later steps refuse to run once a trusted file changed. Sessions can't read or
 # write the state.
