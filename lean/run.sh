@@ -11,7 +11,7 @@
 #   lean/run.sh chain     <name>   every step above, headless, in one call; a compact summary
 #                                  (--step-minutes N caps each step; never logs out)
 #
-# Options: --headless (claude -p instead of an interactive session; the result JSON is
+# Options: --headless (claude -p / codex exec instead of an interactive session; the result JSON is
 # kept under the project's lean state, lean/lib.sh), --base <rev> (gate base; default the
 # open harness session's recorded BASE for this feature, else HEAD), --step-minutes <N>
 # (chain only; default .harness.json::lean.step_minutes, else 30).
@@ -22,8 +22,8 @@
 #
 # Roles come from .harness.json::lean: implementer (default "claude-mini"), reviewer
 # (default "claude:claude-haiku-5-5"), risk_questions (default "backend"), acceptance_dir
-# (default "acceptance"), allowed_domains (default none). A tool is "claude[:<model>]" or
-# "claude-mini"; "codex" is designed (progress/design_lean_flow.md §10) but not built.
+# (default "acceptance"), allowed_domains (default none). A tool is "claude[:<model>]",
+# "claude-mini" or "codex[:<model>]" (lean/adapters/<tool>.sh).
 set -euo pipefail
 
 LEAN_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -144,7 +144,8 @@ open_session() {
     claude) adapter=claude; model=- ;;
     claude:*) adapter=claude; model="${tool#claude:}" ;;
     claude-mini) adapter=claude-mini; model=- ;;
-    codex*) echo "the codex adapter is designed but not built yet (progress/design_lean_flow.md §10)" >&2; exit 2 ;;
+    codex) adapter=codex; model=- ;;
+    codex:?*) adapter=codex; model="${tool#codex:}" ;;
     *) echo "unknown tool: $tool" >&2; exit 2 ;;
   esac
   mkdir -p "$runs"
