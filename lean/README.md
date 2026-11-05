@@ -42,6 +42,20 @@ think of.
    was first pinned (`<lean state>/lean/<name>/nested.sha`: e.g. an npm package that ships a
    `.claude/` folder); risk mode: the frozen tests unchanged and passing.
 
+7. **Chain** (instead of 2–6, when the steps should run unattended): `lean/run.sh chain <name>
+   [--base <rev>] [--step-minutes N]` runs them headless in one call, each as its own `run.sh
+   <step> --headless` (so each keeps its checks): normal: implement → review → gate; risk: freeze →
+   implement → review → gate (verdict `changes` goes straight to fix). A failed gate, or a risk
+   verdict `changes`, gets one fix and a last gate. It stops at the first failure (a step exiting
+   non-zero or past its cap, a result JSON missing or with `is_error`, a risk review without a
+   `VERDICT:` line or that changed files) and refuses to start when the plan awaits approval or a
+   risk feature has no frozen manifest. Output: one line per step (duration, turns, cost), the
+   final gate's headings (the full report and every step's log stay under `<lean state>/lean/`),
+   `git status --short`, then `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`; exit 0 only on
+   PASS. Each step is capped at `--step-minutes` (default `lean.step_minutes`, else 30): its
+   process group is killed and the step fails. With the harness, each step's result is
+   `append-log`ged. It never logs out.
+
 Every step refuses a name without `docs/features/<name>.md` before pinning anything.
 Steps 3–5 open an interactive session (`--headless` for `claude -p`). Close with
 `scripts/harness.sh log-out --lean --changes … --verification … --closure …`: it runs the gate
@@ -99,6 +113,7 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 | `allowed_read` | `[]` | paths (`~` expanded, `..` normalised, links resolved) the sessions and the gate may read in `$HOME` besides the toolchain list; an entry reaching credentials or the lean state is refused whole |
 | `deny_ports` | `[]` | TCP ports (integers 1-65535) the gate's profile denies on every address besides `LEAN_DENY_PORTS` in `sandbox.sh` (the mirror's 54329 and 3001); an invalid entry fails the profile build |
 | `allowed_mach` | `[]` | mach service names the gate's commands may look up besides `LEAN_MACH_ALLOW` in `sandbox.sh` (`LEAN_MACH_NEVER` is refused: LaunchServices, Apple Events, the pasteboard, securityd, `cfprefsd.agent`, …); Chromium's own rendezvous service (`org.chromium.Chromium.MachPortRendezvousServer.<pid>`) is always allowed |
+| `step_minutes` | `30` | `run.sh chain`'s cap per step, in minutes (`--step-minutes` wins) |
 | `env_passthrough` | `[]` | secret-looking environment variables (`DATABASE_URL`, `NPM_TOKEN`, …) the sessions and the gate's commands keep |
 
 Frontends tested with Karma (or another headless-browser runner): Google Chrome can't start in the

@@ -60,7 +60,7 @@ If the task names a feature (number or name), pass it to the `implementer` so it
 | `docs/{architecture,conventions,verification}.md` | Project's definition of good work, style, verification | Before implementing / verifying |
 | `docs/specs.md` | SDD guide: lifecycle, EARS, scope limit, traceability | Any `sdd=1` feature |
 | `specs/<name>/{requirements,design,tasks}.md` | Spec content (git-tracked, authored) | Implementing/reviewing `sdd=1` |
-| `lean/README.md`, `docs/features/<name>.md` | Lean flow: modes, steps, gate; a lean feature's plan | A feature with a mode |
+| `lean/run.sh brief <name> <keyword...>`, `docs/features/<name>.md` | Lean flow: `brief` prints the planning rules and the feature's context in one call (run it, don't read `lean/README.md` or `planning.md` first); a lean feature's plan. `lean/README.md` is reference only | A feature with a mode |
 | `CHECKPOINTS.md` | Objective end-state criteria | Self-assessment, review |
 | `.claude/agents/`, `.codex/agents/` | leader, implementer, reviewer, spec_author definitions | Orchestrating |
 | `src/`, `tests/` | Application code and tests | Implementing |
