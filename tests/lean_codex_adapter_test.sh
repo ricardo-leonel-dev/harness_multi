@@ -18,7 +18,8 @@
 #      kept for Codex but excluded from the commands.
 #   5. run.sh: `codex` / `codex:<model>` for implementer and reviewer; risk mode still refuses
 #      the same tool in both roles; an unknown tool is refused.
-#   6. chain with a codex implementer: CHAIN: PASS, turns on the step line, no cost.
+#   6. chain with a codex implementer (no lean.reviewer: it reviews too): CHAIN: PASS, turns on
+#      the step line, no cost.
 #
 # Usage: bash tests/lean_codex_adapter_test.sh   (exits non-zero on the first failure)
 
@@ -94,6 +95,12 @@ esac
 exit 0
 SH
 chmod +x "$WORK/bin/codex"
+# Fail closed: the real claude adapters stay in use, so a step routed to claude (or to the
+# claude-mini fish function) must hit these stubs and fail loudly, never a real model CLI.
+for cli in claude fish; do
+  printf '#!/usr/bin/env bash\necho "real CLI called from a test: %s $*" >&2\nexit 99\n' "$cli" > "$WORK/bin/$cli"
+  chmod +x "$WORK/bin/$cli"
+done
 export PATH="$WORK/bin:$PATH"
 
 reset() { rm -rf "$CALLS"; mkdir -p "$CALLS"; unset STUB_SANDBOX STUB_EVENTS STUB_EXEC_RC STUB_EXEC_SCRIPT; }
@@ -288,7 +295,9 @@ grep -q 'unknown tool: codex:' "$WORK/out" || die "unknown tool message: $(cat "
 pass "run.sh: reviewer codex (no -m) in risk mode; same tool in both roles refused across tools; 'codex:' refused"
 
 echo "6. chain with a codex implementer"
+# No lean.reviewer: the normal review opens on the implementer's tool (codex).
 P="$WORK/p3"; new_project "$P" codex claude:other
+jq 'del(.lean.reviewer)' "$P/.harness.json" > "$WORK/h" && mv "$WORK/h" "$P/.harness.json"
 reset
 export STUB_EXEC_SCRIPT='grep -q todo src/app.txt && printf "done\n" > src/app.txt; true'
 (cd "$P" && bash "$TOOLKIT_DIR/lean/run.sh" chain f) > "$WORK/out" 2>&1 || die "chain with codex: $(cat "$WORK/out")"

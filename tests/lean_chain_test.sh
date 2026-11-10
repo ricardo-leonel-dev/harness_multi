@@ -17,6 +17,9 @@
 #   5. the per-step cap (lean.step_minutes, --step-minutes) kills the step's processes and
 #      reports it.
 #   6. a lean/chain.sh changed after the pin is refused before run.sh sources it.
+#   7. who opens the review: normal mode uses lean.reviewer when set (any adapter, may fix,
+#      even the implementer's tool), else the implementer; fix stays on the implementer; risk
+#      mode without lean.reviewer uses its default.
 #
 # Usage: bash tests/lean_chain_test.sh   (exits non-zero on the first failure)
 
@@ -37,18 +40,25 @@ export LEAN_CLAUDE_TMP="$WORK/no-claude-tmp"
 # runs $SCN/<step> in the project when present (it may set IS_ERROR / NO_RESULT), and writes
 # a result JSON like claude -p's.
 L="$WORK/lean"; cp -R "$TOOLKIT_DIR/lean" "$L"
-export CALLS="$WORK/calls" SCN="$WORK/scn"
+# Every adapter (claude, claude-mini, codex) gets the stub; it also records "<step> <adapter>:<model>"
+# in $TOOLS, so a test can tell which tool opened each session. The codex one writes
+# total_cost_usd null, as the real adapter does.
+export CALLS="$WORK/calls" SCN="$WORK/scn" TOOLS="$WORK/tools"
 cat > "$L/adapters/claude.sh" <<'SH'
 #!/usr/bin/env bash
-project="$1" result="${6:-}"
+project="$1" model="$3" result="${6:-}"
+adapter=$(basename "$0" .sh)
 st=$(basename "$result"); st="${st#*.}"; st="${st%%.*}"
 echo "$st" >> "$CALLS"
+echo "$st $adapter:$model" >> "$TOOLS"
 cd "$project" || exit 1
 IS_ERROR=false NO_RESULT=""
 [ -f "$SCN/$st" ] && . "$SCN/$st"
-[ -n "$NO_RESULT" ] || printf '{"is_error":%s,"num_turns":3,"total_cost_usd":0.25}\n' "$IS_ERROR" > "$result"
+cost=0.25; [ "$adapter" != codex ] || cost=null
+[ -n "$NO_RESULT" ] || printf '{"is_error":%s,"num_turns":3,"total_cost_usd":%s}\n' "$IS_ERROR" "$cost" > "$result"
 SH
 chmod +x "$L/adapters/claude.sh"
+cp "$L/adapters/claude.sh" "$L/adapters/claude-mini.sh"; cp "$L/adapters/claude.sh" "$L/adapters/codex.sh"
 
 # new_project <dir> [harness] — a git repository whose suite passes once src/app.txt says done.
 new_project() {
@@ -81,7 +91,11 @@ SH
   g -C "$p" init -q && g -C "$p" add -A && g -C "$p" commit -qm base || die "project setup: $p"
 }
 scn() { mkdir -p "$SCN"; printf '%s\n' "$2" > "$SCN/$1"; }
-reset() { rm -rf "$SCN" "$CALLS"; : > "$CALLS"; }
+reset() { rm -rf "$SCN" "$CALLS" "$TOOLS"; : > "$CALLS"; : > "$TOOLS"; }
+tools() { tr '\n' ',' < "$TOOLS" | sed 's/,$//'; }
+# lean_conf <project> <jq filter> — edit the project's .harness.json (before its first step: the
+# pin covers it).
+lean_conf() { jq "$2" "$1/.harness.json" > "$WORK/h" && mv "$WORK/h" "$1/.harness.json"; }
 chain() { (cd "$P" && bash "$L/run.sh" chain f "$@") > "$WORK/out" 2>&1; }
 out() { cat "$WORK/out"; }
 calls() { tr '\n' ' ' < "$CALLS" | sed 's/ $//'; }
@@ -93,6 +107,7 @@ reset; scn implement 'printf "done\n" > src/app.txt'
 chain || die "normal pass should exit 0: $(out)"
 [ "$(steps)" = "implement:ok review:ok gate:ok" ] || die "normal order: $(steps) / $(out)"
 [ "$(calls)" = "implement review" ] || die "normal sessions: $(calls)"
+[ "$(tools)" = "implement claude:-,review claude:other" ] || die "normal review opens with lean.reviewer when set: $(tools)"
 [ "$(tail -1 "$WORK/out")" = "CHAIN: PASS" ] || die "last line: $(out)"
 grep -q '^implement ok .* turns=3 cost=\$0.25' "$WORK/out" || die "step line with turns and cost: $(out)"
 grep -q '^  ALL CHECKS PASS' "$WORK/out" && grep -q '^  full report: ' "$WORK/out" || die "gate summary: $(out)"
@@ -141,6 +156,7 @@ chain || die "risk pass: $(out)"
 [ "$(steps)" = "freeze:ok implement:ok review:ok gate:ok" ] || die "risk order: $(steps) / $(out)"
 grep -q '^freeze .*(before implementing: 1 fail)' "$WORK/out" && grep -q '^review .*verdict=approve' "$WORK/out" || die "risk details: $(out)"
 grep -q '^lean chain: f (risk mode' "$WORK/out" && [ "$(tail -1 "$WORK/out")" = "CHAIN: PASS" ] || die "risk header/last: $(out)"
+[ "$(tools)" = "implement claude:-,review claude:other" ] || die "risk review opens with lean.reviewer: $(tools)"
 pass "risk: freeze -> implement -> review -> gate"
 
 g -C "$P" checkout -q -- src/app.txt
@@ -249,5 +265,45 @@ rm -f "$(bash -c '. "$1/lib.sh"; lean_state_dir "$2"' _ "$L" "$P")/lean/f/truste
 rc=0; (cd "$P" && bash lean/run.sh chain f) > "$WORK/out" 2>&1 || rc=$?
 [ "$rc" = 7 ] && [ -e "$WORK/chain.marker" ] || die "unpinned, the changed chain.sh should run (rc $rc): $(out)"
 pass "a chain.sh changed after the pin is refused before it is sourced (exit 3, nothing ran)"
+
+echo "7. who opens the review"
+# Normal mode, lean.reviewer unset: the implementer reviews, as before.
+P="$WORK/w1"; new_project "$P"; lean_conf "$P" 'del(.lean.reviewer)'
+reset; scn implement 'printf "done\n" > src/app.txt'
+chain || die "normal without lean.reviewer: $(out)"
+[ "$(tools)" = "implement claude:-,review claude:-" ] || die "unset lean.reviewer: the implementer reviews: $(tools)"
+pass "normal: without lean.reviewer the implementer's tool opens the review"
+
+# Normal mode, a reviewer on another adapter: codex reviews (and may fix: the gate passes on its
+# change), fix stays on the implementer; each step's line still reads its result JSON (no cost
+# from codex).
+P="$WORK/w2"; new_project "$P"; lean_conf "$P" '.lean = {implementer: "claude-mini", reviewer: "codex:gpt-x"}'
+reset; scn review 'printf "done\n" > src/app.txt'
+chain || die "normal with a codex reviewer that fixes: $(out)"
+[ "$(steps)" = "implement:ok review:ok gate:ok" ] || die "codex review order: $(steps) / $(out)"
+[ "$(tools)" = "implement claude-mini:-,review codex:gpt-x" ] || die "codex reviewer: $(tools)"
+grep -Eq '^review +ok +[0-9]+m[0-9]+s turns=3$' "$WORK/out" || die "codex review line (turns, no cost): $(out)"
+grep -q '^total: .*cost \$0.25' "$WORK/out" || die "total cost counts the claude-mini step only: $(out)"
+g -C "$P" checkout -q -- src/app.txt
+reset; scn fix 'printf "done\n" > src/app.txt'
+chain || die "normal with a codex reviewer, fix round: $(out)"
+[ "$(tools)" = "implement claude-mini:-,review codex:gpt-x,fix claude-mini:-" ] || die "fix stays on the implementer: $(tools)"
+pass "normal: lean.reviewer (codex:<model>) opens the review and may fix; fix stays on the implementer"
+
+# Normal mode, the reviewer set to the implementer's tool: no "must differ" refusal.
+P="$WORK/w3"; new_project "$P"; lean_conf "$P" '.lean.reviewer = "claude"'
+reset; scn implement 'printf "done\n" > src/app.txt'
+chain || die "normal with reviewer = implementer must run: $(out)"
+[ "$(tools)" = "implement claude:-,review claude:-" ] || die "same tool in normal mode: $(tools)"
+pass "normal: a reviewer equal to the implementer is accepted (the must-differ check is risk only)"
+
+# Risk mode, lean.reviewer unset: the default reviewer, as before.
+P="$WORK/w4"; new_project "$P"; lean_conf "$P" 'del(.lean.reviewer)'
+(cd "$P" && bash "$L/run.sh" freeze f) > "$WORK/freeze.out" 2>&1 || die "freeze by hand: $(cat "$WORK/freeze.out")"
+reset; scn implement 'printf "done\n" > src/app.txt'
+scn review 'printf "fine\nVERDICT: approve\n" > docs/features/f.review.md'
+chain || die "risk with the default reviewer: $(out)"
+[ "$(tools)" = "implement claude:-,review claude:claude-haiku-5-5" ] || die "risk default reviewer: $(tools)"
+pass "risk: without lean.reviewer the default claude:claude-haiku-5-5 reviews"
 
 echo "lean_chain_test: $PASS passed"

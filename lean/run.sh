@@ -4,7 +4,7 @@
 #   lean/run.sh brief     <name> [keyword...]   before planning: what the planner reads, in one call
 #   lean/run.sh freeze    <name>   risk mode, after the plan is approved: hash the acceptance tests
 #   lean/run.sh implement <name>   implementer session (MiniMax by default)
-#   lean/run.sh review    <name>   normal: implementer's tool, one pass, may fix once
+#   lean/run.sh review    <name>   normal: lean.reviewer if set, else the implementer; one pass, may fix once
 #                                  risk:   reviewer's tool (another model), report only
 #   lean/run.sh fix       <name>   the failed checks (and, in risk mode, the review findings)
 #   lean/run.sh gate      <name>   the closing checks (lean/gate.sh)
@@ -21,7 +21,8 @@
 # (lean/lib.sh lean_check_trusted) and refuses when one changed.
 #
 # Roles come from .harness.json::lean: implementer (default "claude-mini"), reviewer
-# (default "claude:claude-haiku-5-5"), risk_questions (default "backend"), acceptance_dir
+# (risk review: default "claude:claude-haiku-5-5", must differ from the implementer; normal
+# review: only when set, else the implementer), risk_questions (default "backend"), acceptance_dir
 # (default "acceptance"), allowed_domains (default none). A tool is "claude[:<model>]",
 # "claude-mini" or "codex[:<model>]" (lean/adapters/<tool>.sh).
 set -euo pipefail
@@ -126,7 +127,9 @@ fi
 lean_pin "$project" "$name" || { echo "could not pin the feature's hashes in $state/lean/$name" >&2; exit 2; }
 conf() { jq -r "$1" .harness.json; }
 implementer=$(conf '.lean.implementer // "claude-mini"')
-reviewer=$(conf '.lean.reviewer // "claude:claude-haiku-5-5"')
+# The reviewer: risk mode always has one (default below); normal mode only when it is set.
+reviewer_set=$(conf '.lean.reviewer // empty')
+reviewer="${reviewer_set:-claude:claude-haiku-5-5}"
 questions=$(conf '.lean.risk_questions // "backend"')
 acc_dir=$(conf '.lean.acceptance_dir // "acceptance"'); acc_dir="${acc_dir%/}"
 
@@ -232,7 +235,7 @@ case "$step" in
 
 $report"
       [ "$headless" = 1 ] && prompt+=$'\n\n'"$no_human"
-      open_session "$implementer" "$prompt"
+      open_session "${reviewer_set:-$implementer}" "$prompt"
     else
       [ "$reviewer" != "$implementer" ] || { echo "risk mode: the reviewer must be another model than the implementer ($reviewer)" >&2; exit 2; }
       before=$(tree_fingerprint)
