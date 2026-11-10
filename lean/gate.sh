@@ -63,21 +63,17 @@ base_sha=$(git rev-parse --verify --quiet "$base^{commit}" 2>/dev/null) \
 head_sha=$(git rev-parse --verify --quiet HEAD 2>/dev/null || true)
 prefix=$(git rev-parse --show-prefix 2>/dev/null || true)
 top=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-# z_lines — NUL-separated names on stdin, one per line; a name holding a newline is printed
-# quoted (printf %q), so it stays one line, matches no listed path and fails the check it is in
-# (check 6 fails on it anyway).
-z_lines() {
-  local n
-  while IFS= read -r -d '' n; do
-    case "$n" in *$'\n'*) printf '%q\n' "$n" ;; *) printf '%s\n' "$n" ;; esac
-  done
-}
+# z_lines — NUL-separated names on stdin, one per line (lean/lib.sh lean_z_lines); a name holding
+# a newline is printed quoted, so it stays one line, matches no listed path and fails the check
+# it is in (check 6 fails on it anyway).
+z_lines() { lean_z_lines; }
 # collect_changes — every changed or untracked, non-ignored file of the repository, from its
-# root (git diff --no-relative); split into the ones inside the project (changed_rel,
-# relative to it) and the ones outside it (changed_outside, from the root).
+# root (lean/lib.sh lean_repo_changes, also behind lean/chain.sh's close line); split into the
+# ones inside the project (changed_rel, relative to it) and the ones outside it
+# (changed_outside, from the root).
 collect_changes() {
   local root
-  root=$( { git diff -z --no-relative --name-only "$base"; git -C "$top" ls-files -z --others --exclude-standard; } | z_lines | sed '/^$/d' | sort -u)
+  root=$(lean_repo_changes "$base")
   changed_rel=$(awk -v p="$prefix" 'p == "" || index($0, p) == 1 { print substr($0, length(p) + 1) }' <<<"$root")
   changed_outside=$(awk -v p="$prefix" 'p != "" && index($0, p) != 1' <<<"$root")
 }

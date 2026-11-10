@@ -339,3 +339,22 @@ lean_sandboxed() {
     *) echo "lean: ${LEAN_SANDBOX:-lean_sandbox_prepare did not run}" >&2; return 125 ;;
   esac
 }
+
+# lean_z_lines — NUL-separated names on stdin, one per line; a name holding a newline is printed
+# quoted (printf %q), so it stays one line and matches no listed path.
+lean_z_lines() {
+  local n
+  while IFS= read -r -d '' n; do
+    case "$n" in *$'\n'*) printf '%q\n' "$n" ;; *) printf '%s\n' "$n" ;; esac
+  done
+}
+
+# lean_repo_changes <base> — every changed (against <base>) or untracked, non-ignored file of
+# the current directory's repository, from its root (git diff --no-relative), sorted, one per
+# line. lean/gate.sh checks this set; lean/chain.sh lists it in its close line.
+lean_repo_changes() {
+  local top
+  top=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  { git diff -z --no-relative --name-only "$1"; git -C "$top" ls-files -z --others --exclude-standard; } \
+    | lean_z_lines | sed '/^$/d' | sort -u
+}

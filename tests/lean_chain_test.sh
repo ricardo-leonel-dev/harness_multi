@@ -11,7 +11,9 @@
 #      VERDICT line, a review that changed files, or a reviewer that is the implementer,
 #      stops at review.
 #   4. with scripts/harness.sh: a risk feature without its manifest and a plan awaiting
-#      approval are refused before any step; each step is append-logged.
+#      approval are refused before any step; each step is append-logged; a PASS prints a
+#      `next:` log-out --lean line (the gate's files, shell-quoted) right before CHAIN: PASS,
+#      never without the harness or on FAIL.
 #   5. the per-step cap (lean.step_minutes, --step-minutes) kills the step's processes and
 #      reports it.
 #   6. a lean/chain.sh changed after the pin is refused before run.sh sources it.
@@ -96,6 +98,7 @@ grep -q '^implement ok .* turns=3 cost=\$0.25' "$WORK/out" || die "step line wit
 grep -q '^  ALL CHECKS PASS' "$WORK/out" && grep -q '^  full report: ' "$WORK/out" || die "gate summary: $(out)"
 grep -q "M src/app.txt$" "$WORK/out" || die "git status: $(out)"
 grep -q 'log-out' "$CALLS" && die "chain must not log out"
+grep -q '^next:' "$WORK/out" && die "no next: line without scripts/harness.sh: $(out)"
 pass "normal: implement -> review -> gate, CHAIN: PASS, exit 0"
 
 g -C "$P" checkout -q -- src/app.txt
@@ -113,6 +116,7 @@ chain && die "a fix that doesn't help must fail: $(out)"
 [ "$(tail -1 "$WORK/out")" = "CHAIN: FAIL at gate (gate failed)" ] || die "fail line: $(out)"
 grep -q '^  SUITE FAILS:' "$WORK/out" || die "gate heading: $(out)"
 grep -q 'app_test expects done' "$WORK/out" && die "the chain must not print the gate's full report: $(out)"
+grep -q '^next:' "$WORK/out" && die "no next: line on FAIL: $(out)"
 grep -q 'app_test expects done' "$(sed -n 's/^  full report: //p' "$WORK/out")" || die "the full report should be in the gate log"
 [ "$(wc -l < "$WORK/out")" -le 20 ] || die "output should stay compact: $(out)"
 pass "normal: fix runs at most once; the gate's report stays in its log (output $(wc -l < "$WORK/out" | tr -d ' ') lines)"
@@ -185,6 +189,28 @@ chain || die "normal with the harness: $(out)"
 grep -q '^lean chain: implement ok .* turns=3' "$WORK/applog" && grep -q '^lean chain: review ok' "$WORK/applog" \
   && grep -q '^lean chain: gate ok' "$WORK/applog" && grep -qx 'lean chain: PASS' "$WORK/applog" || die "append-log: $(cat "$WORK/applog")"
 pass "risk without a manifest and a pending approval are refused before any step; each step is append-logged"
+
+# On PASS with the harness: the log-out --lean line to run, before the last line, listing the
+# files the gate checked (relative to the project, shell-quoted; progress/ and state/ left out).
+# Names with a space or a quote only pass the gate under docs/features/ (its **Files** list
+# holds plain paths), so the plan's notes there carry them.
+g -C "$P" checkout -q -- src/app.txt
+reset; scn implement 'printf "done\n" > src/app.txt; echo a > "docs/features/f notes.md"; echo b > "docs/features/f'"'"'s.md"; mkdir -p progress/f state; echo h > progress/f/impl.md; echo s > state/x.md'
+chain || die "harness pass with more files: $(out)"
+[ "$(tail -1 "$WORK/out")" = "CHAIN: PASS" ] || die "CHAIN: PASS stays the last line: $(out)"
+next=$(sed -n 's/^next: //p' "$WORK/out")
+[ "$(tail -2 "$WORK/out" | head -1)" = "next: $next" ] || die "the next: line comes right before CHAIN: PASS: $(out)"
+case "$next" in
+  'scripts/harness.sh log-out --lean --changes '*' --verification "lean chain PASS: implement, review, gate ok, gate ALL CHECKS PASS" --closure "<fill in>"') ;;
+  *) die "next: line shape: $next" ;;
+esac
+# Its --changes, read back the way the user's shell would, is exactly the gate's set.
+got=$(eval "set -- ${next%% --verification*}"'; shift 3; for a; do [ "$a" = --changes ] || printf "%s\n" "$a"; done')
+want=$(printf '%s\n' "docs/features/f notes.md" "docs/features/f's.md" src/app.txt)
+[ "$got" = "$want" ] || die "next: --changes should be the gate's files, quoted: got [$got] from: $next"
+grep -q 'progress/\|state/' <<<"$next" && die "progress/ and state/ stay out of --changes: $next"
+rm -rf "$P/progress" "$P/state" "$P/docs/features/f notes.md" "$P/docs/features/f's.md"
+pass "on PASS with the harness a next: line holds the log-out --lean command for the gate's files, quoted"
 
 echo "5. per-step time cap"
 g -C "$P" checkout -q -- src/app.txt

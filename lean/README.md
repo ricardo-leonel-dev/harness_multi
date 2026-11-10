@@ -52,7 +52,9 @@ think of.
    risk feature has no frozen manifest. Output: one line per step (duration, turns, cost), the
    final gate's headings (the full report and every step's log stay under `<lean state>/lean/`),
    `git status --short`, then `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`; exit 0 only on
-   PASS. Each step is capped at `--step-minutes` (default `lean.step_minutes`, else 30): its
+   PASS. On PASS with the harness, a `next:` line before it holds the `log-out --lean` command to
+   run: `--changes` lists the files the gate checked (quoted), only `--closure` is left to fill
+   in. Each step is capped at `--step-minutes` (default `lean.step_minutes`, else 30): its
    process group is killed and the step fails. With the harness, each step's result is
    `append-log`ged. It never logs out.
 
@@ -60,8 +62,8 @@ Every step refuses a name without `docs/features/<name>.md` before pinning anyth
 Steps 3–5 open an interactive session (`--headless` for `claude -p` / `codex exec`). Close with
 `scripts/harness.sh log-out --lean --changes … --verification … --closure …`: it runs the gate
 itself against the commit the session started from (risk mode: with the manifest frozen at
-approval, and it needs the review file with its `VERDICT:` line). A feature with a mode closes only
-this way; `set-mode <name> none` before any review puts it back on the reviewer path.
+approval, and it needs the review file with its `VERDICT:` line); that gate's suite run stands in
+for `./init.sh`, so none is needed first. A feature with a mode closes only this way; `set-mode <name> none` before any review puts it back on the reviewer path.
 
 ## Sandbox
 
