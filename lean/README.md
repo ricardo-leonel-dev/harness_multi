@@ -11,7 +11,7 @@ Design and evidence: `progress/design_lean_flow.md`, `progress/explore_benchmark
 
 | Mode | Use it for | What the planner writes | Review |
 | --- | --- | --- | --- |
-| normal | most features | `docs/features/<name>.md` | implementer's model, fresh session, one pass, may fix once |
+| normal | most features | `docs/features/<name>.md` | `lean.reviewer`'s model when set, else the implementer's; fresh session, one pass, may fix once |
 | risk | concurrency, money, permissions, migrations | the document **and** frozen acceptance tests in `acceptance/<name>.test.*` | another model, report only, `VERDICT:` line |
 
 Measured (Opus plans, MiniMax implements): normal mode cost the least of every method tried (about 2
@@ -115,8 +115,8 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `implementer` | `claude-mini` | tool for implement, normal review and fix |
-| `reviewer` | `claude:claude-haiku-5-5` | tool for the risk-mode review; must differ from the implementer (any tool: `claude[:<model>]`, `claude-mini`, `codex[:<model>]`) |
+| `implementer` | `claude-mini` | tool for implement and fix, and for the normal review when `reviewer` is not set |
+| `reviewer` | `claude:claude-haiku-5-5` (risk only) | tool for the review (any tool: `claude[:<model>]`, `claude-mini`, `codex[:<model>]`). Risk mode: report only, must differ from the implementer. Normal mode: used only when set (no default; unset, the implementer reviews), same review as the implementer's (one pass, may fix once), may equal the implementer |
 | `risk_questions` | `backend` | list in `lean/risk-questions/`; a project's own `docs/risk-questions.md` wins |
 | `acceptance_dir` | `acceptance` | where risk-mode acceptance tests live (outside `src/` and `tests/`, so the planner may write them) |
 | `allowed_domains` | `[]` | hosts the sandboxed sessions may reach besides localhost |
