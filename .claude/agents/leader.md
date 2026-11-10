@@ -231,7 +231,11 @@ gate closes it.
 3. **Approve** (risk, or `--approval`): show the user the document (and the tests) and stop. Only after they
    approve it in this conversation, `approve-plan <name> --by <name>` (same name rules as `approve-spec`); in
    risk mode it freezes the tests. Changes before approval: edit the plan, show it again.
-4. **Claim** the session yourself: `claim --agent "leader (lean flow, <your model name>)" <name>`.
+   When the plan is ready (approved, or no approval needed), end your answer telling the user to
+   implement it from a fresh session (`/clear` or a new one): "implementa la feature <n>". The steps
+   then run on a small context instead of everything planning read.
+4. **Claim** the session yourself, only after any approval: `claim --agent "leader (lean flow, <your
+   model name>)" <name>`.
 5. **Steps**: give the user the commands (`lean/run.sh freeze|implement|review|fix|gate <name>`, run from the
    project) — by default the user runs them by hand. Run them yourself only when the user asks you to chain
    the steps or to implement the feature end to end; then make ONE call, `lean/run.sh chain <name>` (never the

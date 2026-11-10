@@ -47,8 +47,11 @@ default `acceptance/`), one file per feature, `<name>.test.<ext>`:
 - Check, through the public interface, every acceptance criterion and every decision and risk answer
   that can be observed from outside (concurrency included: real concurrent requests, not mocks).
 - Write them against behavior, not against names the implementer will choose.
-- Run them once: they must fail now, for the right reason (the feature is missing), not because of a
-  syntax or setup error.
+- Don't run them: `lean/run.sh freeze <name>`, right after approval, runs them and shows which fail.
+  They must fail for the right reason (the feature is missing); when freeze shows a syntax or setup
+  error instead, fix the tests and ask for approval again.
 
-Change no other file. Then the feature's plan is ready for approval (risk mode) and for
-`lean/run.sh freeze <name>` (risk mode, after approval), then `lean/run.sh implement <name>`.
+Change no other file. Don't `claim` before the plan is approved, and don't read earlier reports in
+`progress/` unless the brief points at one. Then the feature's plan is ready for approval (risk
+mode) and for `lean/run.sh freeze <name>` (risk mode, after approval), then `lean/run.sh implement
+<name>`.

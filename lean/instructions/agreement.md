@@ -24,6 +24,10 @@ project runs them when the feature closes.
   Add tests for what the feature changes.
 - Change only the files listed under **Files**. If another one is truly needed, add it to that list
   with a short reason.
+- Never delete, rewrite or migrate existing rows in a database by hand (`psql`, scripts, ad hoc
+  SQL), even local ones: only the migrations and tests the feature adds may change data. When
+  existing data stops a migration or a test, stop and say so in your final message, with the query
+  that finds the rows; the user decides.
 - Finish with the full test suite passing. Do not commit or push.
 
 ## Reviewing
