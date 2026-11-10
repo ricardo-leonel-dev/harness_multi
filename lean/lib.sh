@@ -142,6 +142,42 @@ lean_env_names() {
   fi
 }
 
+# Secret files: basenames (any case) the sessions run.sh opens must not read (lean/sandbox.sh
+# denies them to sessions only: the gate's profile keeps them readable, suites load .env) and
+# lean/run.sh brief leaves out of its search. LEAN_SECRET_KEEP: the .env templates, which hold
+# names without values, stay readable. A folder whose name matches is denied whole.
+LEAN_SECRET_NAMES='.env .env.* *.pem *.key *.p12 *.pfx *secret* *credential*'
+LEAN_SECRET_KEEP='.env.example .env.sample .env.template'
+# Folders lean_secret_files doesn't enter: the git state and installed dependencies (third-party
+# code: their credential-provider modules and CA bundles must stay readable, and they are large).
+LEAN_SECRET_SKIP_DIRS='.git node_modules bower_components .venv venv .tox vendor Pods target .gradle'
+# The names also denied by glob anywhere in the project, for files that appear after the session
+# starts: only names no template has (a glob can't leave .env.example out: Claude Code's Read
+# rules and Codex take no exception to a deny) and none a dependency ships (*.pem: CA bundles).
+LEAN_SECRET_GLOBS='.env .env.local .env.*.local *.key *.p12 *.pfx'
+
+# lean_secret_files <dir> [<skip path>] — the files and folders under <dir> (not <dir> itself)
+# whose basename matches LEAN_SECRET_NAMES but not LEAN_SECRET_KEEP, any case, NUL-terminated,
+# as found (links not followed; a matching folder is listed and not entered). LEAN_SECRET_SKIP_DIRS
+# and <skip path> (with what it holds) are not entered; a folder holding <skip path> is entered
+# but never listed (a project inside a repository folder named like a secret stays readable).
+lean_secret_files() (
+  set -f   # the names are patterns for find, not for the shell
+  local dir="$1" skip="${2:-}" n match=() keep=() prune=() hold=() d
+  for n in $LEAN_SECRET_NAMES; do match+=(-o -iname "$n"); done
+  for n in $LEAN_SECRET_KEEP; do keep+=(-o -iname "$n"); done
+  for n in $LEAN_SECRET_SKIP_DIRS; do prune+=(-o -name "$n"); done
+  if [ -n "$skip" ]; then
+    prune+=(-o -path "$skip")
+    d=$(dirname "$skip")
+    while [ "$d" != "$dir" ] && [ "$d" != / ] && [ "$d" != . ]; do hold+=(-o -path "$d"); d=$(dirname "$d"); done
+  fi
+  [ -d "$dir" ] || return 0
+  find "$dir" -mindepth 1 \( -type d \( "${prune[@]:1}" \) -prune \) \
+    -o \( -false ${hold[@]+"${hold[@]}"} \) \
+    -o \( \( "${match[@]:1}" \) ! \( "${keep[@]:1}" \) \( -type d -prune -print0 -o -print0 \) \) 2>/dev/null
+)
+
 # lean_env_drop <project> [<keep regex>] — the exported variables to drop, NUL-terminated:
 # the names matching LEAN_SECRET_ENV (connection strings such as DATABASE_URL too), except
 # those listed in .harness.json::lean.env_passthrough and those matching <keep regex>.

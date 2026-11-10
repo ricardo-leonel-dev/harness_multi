@@ -69,12 +69,18 @@ if [ "$step" = brief ]; then
   section "files (tracked and untracked, project dir)"
   { git ls-files -co --exclude-standard -- . 2>/dev/null || true; } | { grep -vE '^(state|progress|harness|lean|scripts)/|(^|/)(AGENTS|CLAUDE)\.md$|^\.(claude|codex|agents)/' || true; } | cap 200
   # Untracked files are searched too (a feature's new files), but never a dotfile or anything
-  # under a dot-folder (.env and the like hold secrets) nor a key/credential-looking file.
+  # under a dot-folder (.env and the like hold secrets) nor a secret-looking file or folder
+  # (lean/lib.sh LEAN_SECRET_NAMES, the list the sessions' sandbox denies).
+  # shellcheck source=lib.sh
+  . "$LEAN_DIR/lib.sh"
+  secret_specs=()
+  set -f
+  for n in $LEAN_SECRET_NAMES; do secret_specs+=(":(exclude,glob,icase)**/$n" ":(exclude,glob,icase)**/$n/**"); done
+  set +f
   for kw in "$@"; do
     section "matches: $kw"
     git grep --untracked -n -I -i -F -e "$kw" -- . ':!state' ':!progress' ':!harness' ':!lean' ':!scripts' \
-      ':(exclude,glob)**/.*' ':(exclude,glob)**/.*/**' ':(exclude,glob)**/*.pem' ':(exclude,glob)**/*.key' \
-      ':(exclude,glob)**/*secret*' ':(exclude,glob)**/*credential*' 2>/dev/null \
+      ':(exclude,glob)**/.*' ':(exclude,glob)**/.*/**' "${secret_specs[@]}" 2>/dev/null \
       | cut -c1-200 | cap 25 || true
   done
   exit 0

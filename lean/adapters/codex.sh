@@ -16,7 +16,8 @@
 #   - base `:read-only`, then `write` on the project and a fresh session TMPDIR only (no
 #     /tmp, no user temp dir), `read` on sandbox.sh's write-denied paths (harness-owned
 #     files, the git state), `deny` on its read-denied paths ($HOME entries but the carve-outs,
-#     credentials, the lean state with the frozen manifest), and `deny` globs on CLAUDE.md,
+#     credentials, the lean state with the frozen manifest, the secret files in the project and
+#     its repository and the LEAN_SECRET_GLOBS globs: lean/lib.sh), and `deny` globs on CLAUDE.md,
 #     CLAUDE.local.md, AGENTS.md, AGENTS.override.md, .claude/ and .codex/ anywhere in the
 #     project (Codex only accepts `deny` on globs: those are unreadable to commands too;
 #     Codex itself still loads AGENTS.md);
@@ -30,8 +31,9 @@
 # --approve-for-me, a `danger-full-access` sandbox or profile.
 #
 # Fail closed: before the session, `codex sandbox` runs a self-check with the same flags
-# (seatbelt active, a canary in the lean state unreadable and unwritable, the session TMPDIR
-# writable, Codex's network proxy in place). Every proxy variable of the caller (any name
+# (seatbelt active, a canary in the lean state unreadable and unwritable, the first secret file
+# found in the project, if any, unreadable, the session TMPDIR writable, Codex's network proxy in
+# place). Every proxy variable of the caller (any name
 # ending in "proxy", any case) and Codex's own sandbox/proxy markers are unset for the check
 # and the session, so a loopback HTTPS_PROXY inside can only come from Codex's proxy: an
 # inherited one (a local Proxyman/Charles/mitmproxy) can't pass the check with the network
@@ -115,13 +117,17 @@ cmd=(env ${unset_args[@]+"${unset_args[@]}"} "${env_args[@]}" TMPDIR="$session_t
 check='[ "${CODEX_SANDBOX:-}" = seatbelt ] || { echo "seatbelt is not active"; exit 1; }
 if (echo x > "$1/written") 2>/dev/null; then echo "a write outside the project went through"; exit 1; fi
 if cat "$1/canary" >/dev/null 2>&1; then echo "the lean state is readable"; exit 1; fi
+if [ -n "$3" ] && cat "$3" >/dev/null 2>&1; then echo "a secret file in the project is readable: $3"; exit 1; fi
 ( : > "$2/lean-check" ) 2>/dev/null || { echo "the session TMPDIR is not writable"; exit 1; }
 [ "${CODEX_NETWORK_PROXY_ACTIVE:-}" = 1 ] || { echo "no network proxy (outbound network would be open)"; exit 1; }
 for v in "${HTTPS_PROXY:-}" "${HTTP_PROXY:-}"; do
   case "$v" in http://127.0.0.1:*) ;; *) echo "no network proxy (outbound network would be open)"; exit 1 ;; esac
 done
 echo LEAN-CODEX-SANDBOX-OK'
-out=$(cd "$project" && "${cmd[@]}" sandbox "${common[@]}" -- /bin/sh -c "$check" sh "$canary" "$session_tmp" 2>&1 < /dev/null) || true
+# A secret file the profile must deny (lean/lib.sh lean_secret_files; a regular file).
+secret=""
+while IFS= read -r -d '' f; do [ -L "$f" ] || [ ! -f "$f" ] || { secret="$f"; break; }; done < <(lean_secret_files "$project")
+out=$(cd "$project" && "${cmd[@]}" sandbox "${common[@]}" -- /bin/sh -c "$check" sh "$canary" "$session_tmp" "$secret" 2>&1 < /dev/null) || true
 if [ "$(printf '%s\n' "$out" | tail -1)" != LEAN-CODEX-SANDBOX-OK ]; then
   echo "lean: the Codex sandbox could not be confirmed, refusing to start: $(printf '%s\n' "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)" >&2
   exit 3

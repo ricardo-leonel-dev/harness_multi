@@ -550,6 +550,9 @@ for d in "$HOME/.cargo/credentials.toml" "$HOME/.gradle/gradle.properties" "$HOM
 done
 while IFS= read -r a; do
   while IFS= read -r d; do
+    # The project's secret files and globs lie inside the project's allowRead by design:
+    # Claude Code re-emits a deny inside an allowed folder after the allow (its macOS builder).
+    case "$d/" in "$R4"/*) continue ;; esac
     case "$d/" in "$a"/*) [ "$d" = "$a" ] || die "allowRead $a holds the denied $d" ;; esac
   done <<<"$deny7"
 done < <(jq -r '.sandbox.filesystem.allowRead[]' <<<"$S7")

@@ -45,6 +45,20 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
   them again after its allows, and the session settings keep folders holding them out of `allowRead`.
   `/Volumes`, `/Users/Shared`, the per-user cache dir, other projects' transcripts and Claude Code's
   temp folder (`/private/tmp/claude-<uid>`: other sessions' scratchpads) are denied too.
+- **Secret files in the project.** Sessions (not the gate: suites load `.env`) can't read files or
+  folders named `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*secret*` or
+  `*credential*` (any case) in the project or the rest of its repository, except the templates
+  `.env.example`, `.env.sample`, `.env.template` (`lean/lib.sh` `LEAN_SECRET_*`, the list
+  `run.sh brief` also leaves out of its search). Those present when the session starts are denied
+  by path (`denyRead`, a link also by its target, and a `Read(...)` deny rule, which also keeps
+  them out of Grep and Glob); `.env`, `.env.local`, `.env.*.local`, `*.key`, `*.p12` and `*.pfx`
+  are denied by glob anywhere in the project too, for files that appear later. Claude Code's macOS
+  sandbox takes globs in `denyRead` (turned into a seatbelt regex; checked in the bundled profile
+  builder of Claude Code 2.1.318, not in a live session) and also refuses to rename or hard-link
+  a denied path or rename the folders above it (a new file with a glob name may be created, and
+  stays unreadable); the Codex profile gets the same list as
+  `deny` entries (verified with `codex sandbox`, codex-cli 0.166.0: reads, writes, renames and
+  hard links refused) and its self-check fails closed if the first secret file found is readable.
 - **Secrets in the environment.** Sessions and the gate's commands start without variables whose
   names look like secrets (tokens, passwords, keys, `*_URL`/`*_URI`/`*_DSN` connection strings,
   `SSH_AUTH_SOCK`, git config and npm auth passed through the environment; proxy URLs lose their
@@ -113,6 +127,18 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
   JSON and by applying their rules with `sandbox-exec`, not against Claude Code's own runtime (its
   handling of `allowRead` inside `denyRead`, `denyWrite` on a missing path, `allowUnixSockets`), and
   not at all on Linux (bubblewrap).
+- **Secret files: what is left.** A file with a secret name that appears mid-session and isn't
+  in the glob list (`.env.production`, `*.pem`, `*secret*`, `*credential*`) is readable: a glob
+  can't leave the templates out (Claude Code's Read rules and Codex take no exception to a
+  deny), and `*.pem`, `*secret*` and `*credential*` would also deny dependencies' CA bundles and
+  credential-provider modules. Folders not searched at session start (`LEAN_SECRET_SKIP_DIRS`:
+  `node_modules`, `.venv`, `venv`, `vendor`, `target`, …) hold no denied path but the globs. A
+  secret under any other name (`config/prod.yml`, `appsettings.json`), a tracked secret file's
+  content in the git objects (`git show HEAD:.env`) and secrets a session's own test prints are
+  not covered. A source file or folder named like a secret (`src/secretStore.ts`) is unreadable to
+  sessions too; there is no setting to open one (rename it, or don't run that feature in lean
+  mode). Codex sessions can't create files with the glob names (a test writing `server.key` into
+  the project fails there, not in the gate); Claude sessions likely can, but can't read them back.
 - `~/.cargo/config.toml` stays readable (cargo needs it): keep registry tokens in
   `~/.cargo/credentials.toml`, which is denied.
 
@@ -125,7 +151,7 @@ network_proxy` and pinned approval settings, and never with `--dangerously-bypas
 
 - **Reads**: base `:read-only` (everything readable) minus `deny` on sandbox.sh's `denyRead` list:
   the same `$HOME` entries, credentials, the lean state with the frozen manifest, Claude Code's
-  temp folder. `~/.codex` (Codex's auth) is a `$HOME` entry, so commands can't read it; Codex
+  temp folder, the project's secret files and globs. `~/.codex` (Codex's auth) is a `$HOME` entry, so commands can't read it; Codex
   itself, outside the sandbox, still does.
 - **Writes**: only the project and a fresh session `TMPDIR` (not `/tmp`, not the user temp dir:
   stricter than the Claude sessions). sandbox.sh's `denyWrite` list (harness-owned files, the git

@@ -79,6 +79,14 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
   (a worktree's `harness.db`, `scripts/`… pointing into the main worktree; an untracked, non-ignored
   link stays unreadable and is named on stderr). Those targets and git directories also get a
   `Read` allow rule, so Claude Code's Read tool follows the links without asking. Credentials never open.
+  Secret files in the project and the rest of its repository (`.env`, `.env.*`, `*.pem`, `*.key`,
+  `*.p12`, `*.pfx`, `*secret*`, `*credential*`, any case; not `.env.example` / `.sample` /
+  `.template`; `node_modules`, `.venv`, `vendor` and the like not searched: `lean/lib.sh`
+  `LEAN_SECRET_*`) are unreadable to sessions: by path when the session starts, plus `.env`,
+  `.env.local`, `.env.*.local`, `*.key`, `*.p12`, `*.pfx` by glob for later ones, for commands
+  and for the Read/Grep tools (Codex: `deny`). Sessions can't rename them either (Codex sessions can't create them). The
+  gate, `./init.sh` and `harness.sh test` still read them (suites load `.env`); so does a test a
+  session runs, which then sees no `.env`.
 - **Writes.** Only in the project and the temp dir; the harness-owned files, the git state and
   `CLAUDE.md` / `.claude/` anywhere are write-denied, and the harness-owned files' hashes are pinned
   per feature (a changed one stops the next step: delete `<lean state>/lean/<name>/trusted.sha` to
