@@ -11,12 +11,15 @@
 # with the harness, a feature whose plan approval is pending is refused before any step.
 # Stops at the first failure: a step exiting non-zero or past its time cap, a session whose
 # result JSON is missing or says is_error, a risk review without a VERDICT line or one that
-# changed files. Fix runs at most once. Never logs out: the caller runs ./init.sh and
-# `scripts/harness.sh log-out --lean` itself.
+# changed files. Fix runs at most once. Never logs out: the caller runs
+# `scripts/harness.sh log-out --lean` itself (its own gate run is the suite run it needs).
 #
 # Output: one line per step (result, duration, turns and cost from the result JSON), the final
-# gate's headings only, where the full logs are, `git status --short`, and a last line
-# `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`. Exit 0 only on PASS.
+# gate's headings only, where the full logs are, `git status --short`, on PASS with
+# scripts/harness.sh present a `next:` line holding the log-out --lean command to run (its
+# --changes: the files the gate checked, lean/lib.sh lean_repo_changes, relative to the
+# project, quoted for the shell, progress/ and state/ left out; only --closure to fill in),
+# and a last line `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`. Exit 0 only on PASS.
 #
 # Per-step cap: --step-minutes N (decimals allowed), else .harness.json::lean.step_minutes,
 # else 30. On expiry the step's process group gets TERM, then KILL 5 s later (perl: stock
@@ -53,6 +56,31 @@ lean_chain_run() {
   ' "$secs" "$@" < /dev/null > "$out" 2>&1
 }
 
+# lean_chain_quote <word> — the word as is when it only holds characters no shell expands,
+# else single-quoted (a ' inside written '\'').
+lean_chain_quote() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_./@%+:,-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# lean_chain_close_line <steps> — the `next:` line: the log-out --lean command for the files the
+# gate checked (base as run.sh's gate step resolves it: --base, else the session's, else HEAD).
+lean_chain_close_line() {
+  local b="$base" prefix f files=""
+  [ -n "$b" ] || b=$(bash scripts/harness.sh session-base "$name" 2>/dev/null || true)
+  b="${b:-HEAD}"
+  prefix=$(git rev-parse --show-prefix 2>/dev/null || true)
+  while IFS= read -r f; do
+    [ -n "$f" ] && files="$files $(lean_chain_quote "$f")"
+  done < <(lean_repo_changes "$b" 2>/dev/null \
+    | awk -v p="$prefix" 'p == "" || index($0, p) == 1 { print substr($0, length(p) + 1) }' \
+    | { grep -vE '^(progress|state)/' || true; })
+  printf 'next: scripts/harness.sh log-out --lean%s --verification "lean chain PASS: %s ok, gate ALL CHECKS PASS" --closure "<fill in>"\n' \
+    "${files:+ --changes$files}" "$1"
+}
+
 # lean_chain_mode — "risk", "normal", or a refusal on stderr (exit 1). Risk mode is the frozen
 # manifest, as for every step; with the harness its status also tells a risk feature whose
 # plan is not approved (no manifest yet) and a normal one waiting for approval.
@@ -71,7 +99,7 @@ lean_chain_mode() {
 
 lean_chain() {
   local mode="" secs mins logs gate_log="" fixed=0 n=0 total=0 cost_total="" verdict="" last_rc=0
-  local fail_step="" fail_reason=""
+  local fail_step="" fail_reason="" ran=""
   local -a lines=()
   mins="${step_minutes:-$(jq -r '.lean.step_minutes // 30' .harness.json 2>/dev/null || echo 30)}"
   [[ "$mins" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "--step-minutes / lean.step_minutes must be a number of minutes: $mins" >&2; return 2; }
@@ -126,6 +154,7 @@ lean_chain() {
         fail_reason="the reviewer changed files (it must only report)"
       fi
     fi
+    ran="${ran:+$ran, }$st$([ -z "$fail_reason" ] || [ "$st" != gate ] || echo ' failed')"
     lines+=("$(printf '%-9s %-4s %7s%s%s' "$st" "$([ -z "$fail_reason" ] && echo ok || echo fail)" "$(fmt_dur "$dur")" "$info" "$extra")")
     note "$st $([ -z "$fail_reason" ] && echo ok || echo "fail ($fail_reason)") $(fmt_dur "$dur")$info$extra"
     if [ -n "$fail_reason" ]; then fail_step="$st"; return 1; fi
@@ -171,6 +200,7 @@ lean_chain() {
   { git status --short 2>/dev/null || true; } | awk 'NR <= 30 { print "  " $0 } END { if (NR > 30) printf "  ... (%d more)\n", NR - 30 }'
   if [ -z "$fail_step" ]; then
     note "PASS"
+    [ ! -f scripts/harness.sh ] || lean_chain_close_line "$ran"
     echo "CHAIN: PASS"
     return 0
   fi

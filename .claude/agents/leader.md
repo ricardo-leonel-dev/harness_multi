@@ -239,7 +239,9 @@ gate closes it.
    prints one line per step and a last `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`. Report a FAIL
    to the user as printed; don't open the logs unless they ask.
 6. **Close**: when the user says the steps are done (or the chain printed `CHAIN: PASS`), run
-   `./init.sh`, then `log-out --lean --changes … --verification "<gate result>" --closure "<summary>"`.
+   `log-out --lean --changes … --verification "<gate result>" --closure "<summary>"` — after a chain PASS,
+   its `next:` line is that command with only `--closure` to fill in. No `./init.sh` first: the gate it runs
+   is the suite run on the code being closed.
    This is the one log-out you run: the gate is a script, not your judgment. A refusal means another `fix`
    round, never a workaround; to send the feature down the reviewer path instead, the user decides and
    `set-mode <name> none` must run before any verdict is recorded.

@@ -204,7 +204,8 @@
 #                                              the suite runs under the sessions' sandbox rules (lean/gate.sh);
 #                                              docs/features/<name>.review.md has a VERDICT line and the reviewer
 #                                              changed no files. A refusal is logged (LEAN: refused) and means "fix";
-#                                              a pass records review_status 'lean', then the ./init.sh check applies
+#                                              a pass records review_status 'lean'; the gate's suite run stands in
+#                                              for ./init.sh (only a failed ./init.sh in the session still refuses)
 #   hold <reason...>                          stop the active session (rejected escalation): it keeps the slot,
 #                                              so claim refuses other features and log-out refuses this one
 #   unhold [reason...]                        the user releases a held session (block also releases it)
@@ -2559,8 +2560,12 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[
   fi
 
   # Whoever ran it, the full suite must have passed on exactly the code being
-  # closed: a change after the reviewer's ./init.sh needs another run.
-  case "$(init_verdict "$sid")" in
+  # closed: a change after the reviewer's ./init.sh needs another run. On the
+  # lean path the gate above has just run verify_command on this tree and
+  # passed (it refuses without one), so a missing or stale ./init.sh is no gap.
+  local init_state; init_state=$(init_verdict "$sid")
+  case "$init_state" in missing|stale) [ "$review_status" != lean ] || init_state=pass ;; esac
+  case "$init_state" in
     pass) ;;
     none) warn "no verify_command in .harness.json: closing without a test suite" ;;
     missing) fail "cannot log out session $sid: ./init.sh has not run in this session — run it and log out once it is green"; exit 1 ;;

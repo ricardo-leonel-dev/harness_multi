@@ -18,7 +18,8 @@
 #      feature only when lean/gate.sh passes and HEAD is still the session base
 #      (lean/run.sh gate defaults to that base: session-base), logging each refusal; it
 #      refuses a changed lean/gate.sh, and its suite runs sandboxed; a feature with a mode
-#      refuses the plain and --quick log-out.
+#      refuses the plain and --quick log-out. The gate's suite run stands in for ./init.sh:
+#      no run in the session (normal) or a stale one (risk) doesn't refuse; a failed one does (6).
 #   5. Risk mode also needs the review report, a reviewer that changed nothing,
 #      the frozen acceptance tests untouched and the ~/.cache manifest unchanged; claim
 #      writes the risk manifest again; ./init.sh runs the suite sandboxed while the feature
@@ -254,19 +255,21 @@ out=$(RUN gate n2) && die "run.sh gate should fail on a moved HEAD: $out"
 grep -q 'HEAD MOVED' <<<"$out" || die "run.sh gate moved-HEAD message: $out"
 g reset -q --soft HEAD~1
 out=$(RUN gate n2) || die "run.sh gate on the base should pass: $out"
-out=$(lean_out) && die "closing without ./init.sh in the session"
-grep -q 'lean gate passed' <<<"$out" && grep -q 'init.sh has not run' <<<"$out" || die "gate pass then init refusal expected: $out"
 [ "$(syncs)" = "$refused_from" ] || die "a refused close (plain, --quick, --lean) must not sync the mirror"
-H record-init pass >/dev/null
+[ -z "$(q "SELECT entry FROM session_log_entries WHERE entry LIKE '[harness] INIT: %' AND session_id=(SELECT id FROM session_log WHERE closed_at IS NULL);")" ] \
+  || die "n2's session should have no ./init.sh run for the check below"
 before=$(syncs)
-out=$(lean_out) || die "a clean change with the removed assertion listed should close: $out"
+# No ./init.sh in the session: the gate log-out --lean just ran is the suite run on this tree.
+out=$(lean_out) || die "a clean change with the removed assertion listed should close without a ./init.sh run: $out"
+grep -q 'lean gate passed' <<<"$out" || die "the close should report the gate pass: $out"
+grep -q 'init.sh' <<<"$out" && die "log-out --lean must not ask for ./init.sh: $out"
 [ "$(syncs)" = $((before + 1)) ] || die "log-out --lean should sync the mirror once"
 [ "$(q "SELECT review_status || '|' || reviewed_by FROM session_log WHERE feature_id=(SELECT id FROM features WHERE name='n2');")" = "lean|harness (lean gate)" ] \
   || die "review_status should be lean"
 grep -q 'LEAN: passed (mode normal) — ALL CHECKS PASS' <<<"$(q "SELECT entry FROM session_log_entries;")" || die "the pass and the gate's last line must be logged"
 [ "$(q "SELECT status FROM features WHERE name='n2';")" = done ] || die "n2 should be done"
 g add -A && g commit -qm n2 >/dev/null
-pass "log-out --lean refuses each failing check (logged) and closes once the gate and ./init.sh pass"
+pass "log-out --lean refuses each failing check (logged) and closes once the gate passes, no ./init.sh run needed"
 
 echo "5. log-out --lean, risk mode"
 rm "$CACHE/frozen/r1.sha"   # lost (or the project moved): claim writes it again from the database
@@ -300,8 +303,8 @@ g checkout -q -- acceptance/r1.test.sh
 g checkout -q -- acceptance/r1.test.sh                    # the files are intact; only the manifest was rewritten
 refused 'someone rewrote it' "rewritten ~/.cache manifest"
 (cd "$P" && shasum -a 256 acceptance/r1.test.sh > "$CACHE/frozen/r1.sha")
-H record-init pass >/dev/null
-out=$(lean_out) || die "risk mode with everything in order should close: $out"
+# The ./init.sh pass above is stale (the review report changed since): the gate's run stands in.
+out=$(lean_out) || die "risk mode with everything in order should close (a stale ./init.sh pass is no gap): $out"
 [ "$(q "SELECT status FROM features WHERE name='r1';")" = done ] || die "r1 should be done"
 if [ "$have_sbx" = 1 ]; then
   grep -q '^\[WARN\].*lean gate: lean/sandbox.sh --seatbelt: lean.allowed_domains is set' <<<"$out" \
@@ -348,8 +351,9 @@ pass "set-mode refuses after a reviewer verdict or on hold; --lean refuses reque
 
 H claim x2 >/dev/null && H set-surfaces src >/dev/null || die "claim x2"
 printf 'hello x2\n' > "$P/src/app.txt"
-out=$(lean_out) && die "x2 closing without ./init.sh"
-grep -q 'lean gate passed' <<<"$out" || die "x2 gate should pass first: $out"
+H record-init fail >/dev/null   # a red ./init.sh in the session still refuses, even after a gate pass
+out=$(lean_out) && die "x2 closing after a failed ./init.sh"
+grep -q 'lean gate passed' <<<"$out" && grep -q 'the last ./init.sh failed' <<<"$out" || die "x2 gate pass then failed-init refusal expected: $out"
 printf 'unreviewed\n' > "$P/src/other.txt"
 H set-mode x2 none >/dev/null || die "set-mode x2 none"
 [ -z "$(q "SELECT review_status FROM session_log WHERE feature_id=(SELECT id FROM features WHERE name='x2');")" ] \
