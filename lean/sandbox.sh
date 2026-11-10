@@ -13,7 +13,10 @@
 # as written or resolved, is refused whole and named on stderr); the targets of the top-level
 # symlinks git tracks (committed at HEAD, unchanged) or ignores, and the project's git
 # directories; this project's own Claude Code folder. Credentials (the `protected` list below)
-# never open, and the seatbelt profile denies them again after its allows. Outside $HOME:
+# never open, and the seatbelt profile denies them again after its allows. The session settings
+# (not --seatbelt, which the gate uses: suites load .env) also deny the secret files in the
+# project and its repository (lean/lib.sh LEAN_SECRET_NAMES by path, LEAN_SECRET_GLOBS by
+# glob). Outside $HOME:
 # /Volumes, /Users/Shared, the per-user cache dir and Claude Code's temp folder
 # (/private/tmp/claude-<uid>; LEAN_CLAUDE_TMP replaces it, for tests) are denied; the session
 # settings re-open that folder's entry named after this project (the session's own outputs).
@@ -41,6 +44,8 @@
 # SSH_AUTH_SOCK empty. Secret-looking variables are dropped by the callers (lean/lib.sh
 # lean_env_args).
 set -euo pipefail
+# shellcheck source=lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib.sh"   # LEAN_SECRET_* and lean_secret_files
 
 # real_path <path> — the resolved path, or nothing when it does not exist.
 real_path() {
@@ -373,7 +378,44 @@ settings=$(to_json ${private[@]+"${private[@]}"} | jq -c \
       permissions: { allow: [ $targets[] | "Read(/\(.))", "Read(/\(.)/**)" ],
                      deny: ([ $private[] | select(. as $p | ($claude_tmps | any(.[]; . == $p)) | not) | "Read(/\(.)/**)", "Edit(/\(.)/**)" ] + $edit_deny) }
     }')
-if [ "$seatbelt" = 0 ]; then printf '%s\n' "$settings"; exit 0; fi
+if [ "$seatbelt" = 0 ]; then
+  # Secret files (lean/lib.sh LEAN_SECRET_NAMES: .env, .env.*, keys, *secret*, *credential*; not
+  # the .env templates), for the sessions only: the gate's profile below is built before them and
+  # keeps them readable (suites load .env). Those in the project and in the rest of its
+  # repository now, by path (a link also by its target), plus LEAN_SECRET_GLOBS anywhere under
+  # them for files that appear later; each also as a Read deny rule (Read, Grep and Glob).
+  secret_paths=() secret_globs=() roots=("$project")
+  [ -z "$project_real" ] || [ "$project_real" = "$project" ] || roots+=("$project_real")
+  add_secret() {
+    local p="$1" r
+    case " ${secret_paths[*]-} " in *" $p "*) ;; *) secret_paths+=("$p") ;; esac
+    [ -L "$p" ] || return 0
+    r=$(real_path "$p"); [ -n "$r" ] && ! holds_project "$r" || return 0
+    case " ${secret_paths[*]-} " in *" $r "*) ;; *) secret_paths+=("$r") ;; esac
+  }
+  while IFS= read -r -d '' f; do
+    case "$f" in *$'\n'*) continue ;; esac
+    add_secret "$f"
+    [ "${#roots[@]}" = 1 ] || add_secret "$project_real/${f#"$project"/}"
+  done < <(lean_secret_files "$project")
+  if [ -n "$top" ] && [ "$top" != "$project" ] && [ "$top" != "$project_real" ] \
+     && [ "$top" != "$HOME" ] && [ "$top" != / ] && holds_project "$top"; then
+    inner="$project"; under "$project" "$top" || inner="$project_real"
+    while IFS= read -r -d '' f; do
+      case "$f" in *$'\n'*) continue ;; esac
+      add_secret "$f"
+    done < <(lean_secret_files "$top" "$inner")
+    roots+=("$top")
+  fi
+  set -f
+  for root in "${roots[@]}"; do for n in $LEAN_SECRET_GLOBS; do secret_globs+=("$root/**/$n"); done; done
+  set +f
+  settings=$(jq -c --argjson paths "$(to_json ${secret_paths[@]+"${secret_paths[@]}"})" \
+    --argjson globs "$(to_json "${secret_globs[@]}")" '
+    .sandbox.filesystem.denyRead += $paths + $globs
+    | .permissions.deny += [$paths[] | "Read(/\(.))", "Read(/\(.)/**)"] + [$globs[] | "Read(/\(.))"]' <<<"$settings")
+  printf '%s\n' "$settings"; exit 0
+fi
 
 # The seatbelt profile (a later rule wins): reads as above, then the hard re-denies (after the
 # allows, so an allowed toolchain folder doesn't reopen its credentials) and Claude Code's temp
