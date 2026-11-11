@@ -19,7 +19,9 @@
 #   6. a lean/chain.sh changed after the pin is refused before run.sh sources it.
 #   7. who opens the review: normal mode uses lean.reviewer when set (any adapter, may fix,
 #      even the implementer's tool), else the implementer; fix stays on the implementer; risk
-#      mode without lean.reviewer uses its default.
+#      mode without lean.reviewer uses its default; the object form {normal, risk} picks one
+#      per mode (a missing key falls back, .risk = implementer is refused); any other type
+#      exits 2 naming the key before a session opens.
 #
 # Usage: bash tests/lean_chain_test.sh   (exits non-zero on the first failure)
 
@@ -305,5 +307,51 @@ scn review 'printf "fine\nVERDICT: approve\n" > docs/features/f.review.md'
 chain || die "risk with the default reviewer: $(out)"
 [ "$(tools)" = "implement claude:-,review claude:claude-haiku-5-5" ] || die "risk default reviewer: $(tools)"
 pass "risk: without lean.reviewer the default claude:claude-haiku-5-5 reviews"
+
+# lean.reviewer per mode: {"normal": ..., "risk": ...}, each key optional. (The string form
+# serving both modes is covered above: n1 and r1 both review with "claude:other".)
+# risk_chain <project> — freeze it, then a passing risk chain.
+risk_chain() {
+  (cd "$1" && bash "$L/run.sh" freeze f) > "$WORK/freeze.out" 2>&1 || die "freeze by hand: $(cat "$WORK/freeze.out")"
+  reset; scn implement 'printf "done\n" > src/app.txt'
+  scn review 'printf "fine\nVERDICT: approve\n" > docs/features/f.review.md'
+  chain
+}
+P="$WORK/o1"; new_project "$P"; lean_conf "$P" '.lean.reviewer = {normal: "codex:n", risk: "claude:r"}'
+reset; scn implement 'printf "done\n" > src/app.txt'
+chain || die "object reviewer, normal: $(out)"
+[ "$(tools)" = "implement claude:-,review codex:n" ] || die "object reviewer, normal key: $(tools)"
+P="$WORK/o2"; new_project "$P"; lean_conf "$P" '.lean.reviewer = {normal: "codex:n", risk: "claude:r"}'
+risk_chain "$P" || die "object reviewer, risk: $(out)"
+[ "$(tools)" = "implement claude:-,review claude:r" ] || die "object reviewer, risk key: $(tools)"
+pass "object lean.reviewer: normal mode uses .normal, risk mode uses .risk"
+
+P="$WORK/o3"; new_project "$P"; lean_conf "$P" '.lean.reviewer = {risk: "claude:r"}'
+reset; scn implement 'printf "done\n" > src/app.txt'
+chain || die "object with risk only, normal: $(out)"
+[ "$(tools)" = "implement claude:-,review claude:-" ] || die "no .normal: the implementer reviews: $(tools)"
+P="$WORK/o4"; new_project "$P"; lean_conf "$P" '.lean.reviewer = {normal: "codex:n", risk: ""}'
+risk_chain "$P" || die "object with normal only, risk: $(out)"
+[ "$(tools)" = "implement claude:-,review claude:claude-haiku-5-5" ] || die "no .risk: the default reviews: $(tools)"
+pass "object lean.reviewer: a missing/empty key falls back (normal: implementer, risk: claude:claude-haiku-5-5)"
+
+P="$WORK/o5"; new_project "$P"; lean_conf "$P" '.lean.reviewer = {normal: "codex:n", risk: "claude"}'
+risk_chain "$P" && die "object .risk = implementer must fail: $(out)"
+[ "$(steps)" = "freeze:ok implement:ok review:fail" ] || die "object same reviewer: $(steps) / $(out)"
+tail -1 "$WORK/out" | grep -q '^CHAIN: FAIL at review (exit 2: risk mode: the reviewer must be another model' || die "object same reviewer line: $(out)"
+pass "object lean.reviewer: .risk equal to the implementer is refused"
+
+n=0
+for bad in '3' '["claude"]' '{normal: "claude", other: "x"}' '{risk: 1}' '{normal: null}' 'false'; do
+  n=$((n + 1)); P="$WORK/bad$n"; new_project "$P"; lean_conf "$P" ".lean.reviewer = $bad"
+  reset
+  rc=0; chain || rc=$?
+  [ "$rc" = 2 ] || die "invalid lean.reviewer $bad: chain exit $rc, want 2: $(out)"
+  grep -q 'invalid .harness.json::lean.reviewer' "$WORK/out" || die "invalid lean.reviewer $bad: message: $(out)"
+  [ ! -s "$CALLS" ] || die "invalid lean.reviewer $bad: no session may open: $(calls)"
+  rc=0; (cd "$P" && bash "$L/run.sh" review f --headless) > "$WORK/out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] && grep -q 'invalid .harness.json::lean.reviewer' "$WORK/out" || die "invalid lean.reviewer $bad: review step rc $rc: $(out)"
+done
+pass "invalid lean.reviewer (number, array, unknown key, non-string value, false): exit 2 naming the key, no session"
 
 echo "lean_chain_test: $PASS passed"

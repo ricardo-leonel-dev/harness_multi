@@ -4,8 +4,8 @@
 #   lean/run.sh brief     <name> [keyword...]   before planning: what the planner reads, in one call
 #   lean/run.sh freeze    <name>   risk mode, after the plan is approved: hash the acceptance tests
 #   lean/run.sh implement <name>   implementer session (MiniMax by default)
-#   lean/run.sh review    <name>   normal: lean.reviewer if set, else the implementer; one pass, may fix once
-#                                  risk:   reviewer's tool (another model), report only
+#   lean/run.sh review    <name>   normal: lean.reviewer(.normal) if set, else the implementer; one pass, may fix once
+#                                  risk:   lean.reviewer(.risk), another model; report only
 #   lean/run.sh fix       <name>   the failed checks (and, in risk mode, the review findings)
 #   lean/run.sh gate      <name>   the closing checks (lean/gate.sh)
 #   lean/run.sh chain     <name>   every step above, headless, in one call; a compact summary
@@ -20,9 +20,10 @@
 # then checks the harness-owned files against the hashes pinned for the feature
 # (lean/lib.sh lean_check_trusted) and refuses when one changed.
 #
-# Roles come from .harness.json::lean: implementer (default "claude-mini"), reviewer
-# (risk review: default "claude:claude-haiku-5-5", must differ from the implementer; normal
-# review: only when set, else the implementer), risk_questions (default "backend"), acceptance_dir
+# Roles come from .harness.json::lean: implementer (default "claude-mini"), reviewer (a tool
+# for both modes, or {"normal": <tool>, "risk": <tool>} with each key optional; risk review:
+# default "claude:claude-haiku-5-5", must differ from the implementer; normal review: only
+# when set, else the implementer; any other shape exits 2), risk_questions (default "backend"), acceptance_dir
 # (default "acceptance"), allowed_domains (default none). A tool is "claude[:<model>]",
 # "claude-mini" or "codex[:<model>]" (lean/adapters/<tool>.sh).
 set -euo pipefail
@@ -114,6 +115,20 @@ state=$(lean_state_dir "$project")
 # Before chain.sh is sourced: the leader's shell runs it unsandboxed, so a trusted file
 # changed since the pin must stop it here, not at its first step.
 lean_check_trusted "$project" "$name" || exit 3
+# lean.reviewer: a tool for both modes, or {"normal": <tool>, "risk": <tool>} (each key
+# optional; an empty value counts as unset). Anything else stops every step here, the chain
+# included, instead of guessing. The defaults are applied below.
+reviewer_parsed=$(jq -r '.lean.reviewer as $r
+  | if $r == null then "ok\n\n"
+    elif ($r | type) == "string" then "ok\n\($r)\n\($r)"
+    elif ($r | type) == "object" and (($r | keys) - ["normal", "risk"] | length) == 0
+         and all($r[]; type == "string") then "ok\n\($r.normal // "")\n\($r.risk // "")"
+    else "invalid" end' .harness.json 2>/dev/null) || reviewer_parsed=invalid
+{ read -r reviewer_ok; read -r reviewer_normal_set; read -r reviewer_risk_set; } <<<"$reviewer_parsed" || true
+[ "$reviewer_ok" = ok ] || {
+  echo "invalid .harness.json::lean.reviewer: use a tool string (both modes) or an object with optional string keys \"normal\" and \"risk\" (got: $(jq -c '.lean.reviewer' .harness.json 2>/dev/null || echo unreadable))" >&2
+  exit 2
+}
 if [ "$step" = chain ]; then
   # shellcheck source=chain.sh
   . "$LEAN_DIR/chain.sh"
@@ -127,9 +142,10 @@ fi
 lean_pin "$project" "$name" || { echo "could not pin the feature's hashes in $state/lean/$name" >&2; exit 2; }
 conf() { jq -r "$1" .harness.json; }
 implementer=$(conf '.lean.implementer // "claude-mini"')
-# The reviewer: risk mode always has one (default below); normal mode only when it is set.
-reviewer_set=$(conf '.lean.reviewer // empty')
-reviewer="${reviewer_set:-claude:claude-haiku-5-5}"
+# The reviewers (lean.reviewer, parsed above): risk mode always has one (default below);
+# normal mode only when it is set, else the implementer reviews.
+reviewer_normal="${reviewer_normal_set:-$implementer}"
+reviewer="${reviewer_risk_set:-claude:claude-haiku-5-5}"
 questions=$(conf '.lean.risk_questions // "backend"')
 acc_dir=$(conf '.lean.acceptance_dir // "acceptance"'); acc_dir="${acc_dir%/}"
 
@@ -235,7 +251,7 @@ case "$step" in
 
 $report"
       [ "$headless" = 1 ] && prompt+=$'\n\n'"$no_human"
-      open_session "${reviewer_set:-$implementer}" "$prompt"
+      open_session "$reviewer_normal" "$prompt"
     else
       [ "$reviewer" != "$implementer" ] || { echo "risk mode: the reviewer must be another model than the implementer ($reviewer)" >&2; exit 2; }
       before=$(tree_fingerprint)
