@@ -142,6 +142,8 @@ else
       sandbox) ok "lean feature $LEAN_FEATURE is open: the verification command runs under its sessions' sandbox rules"
                run_verify() { lean_sandboxed "$PWD" "$VERIFY_COMMAND"; } ;;
       unsandboxed:*) warn "lean feature $LEAN_FEATURE is open, but the verification command runs UNSANDBOXED (${LEAN_SANDBOX#unsandboxed: })" ;;
+      session:*) fail "lean feature $LEAN_FEATURE is open, ${LEAN_SANDBOX#session: }"
+         run_verify() { echo "not run: ${LEAN_SANDBOX}"; return 1; } ;;
       *) fail "lean feature $LEAN_FEATURE is open and its sandbox can't run here (${LEAN_SANDBOX#broken: }): run ./init.sh outside any sandbox, or set LEAN_GATE_UNSANDBOXED=1"
          run_verify() { echo "not run: ${LEAN_SANDBOX}"; return 1; } ;;
     esac

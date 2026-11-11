@@ -69,7 +69,10 @@ settings=$(jq -c --arg c "printf '%s\\n' $env_lines >> \"\$CLAUDE_ENV_FILE\"" \
 # shellcheck source=../lib.sh
 . "$LEAN_DIR/lib.sh"
 lean_env_args "$project" '^(ANTHROPIC_|CLAUDE_)' || exit 1
-cmd=(env "${LEAN_ENV_ARGS[@]}" "${cmd[@]}")
+# LEAN_SESSION=1 marks the session (lean/lib.sh lean_in_session): ./init.sh, harness.sh test and
+# the gate refuse to run the suite inside it, and ignore LEAN_GATE_UNSANDBOXED there (lean_env_args
+# already drops that variable from the session).
+cmd=(env "${LEAN_ENV_ARGS[@]}" LEAN_SESSION=1 "${cmd[@]}")
 
 cd "$project"
 case "$mode" in
@@ -78,7 +81,16 @@ case "$mode" in
       --append-system-prompt-file "$system_file" "$prompt" ;;
   headless)
     [ -n "$result" ] || { echo "headless needs a result file" >&2; exit 2; }
-    "${cmd[@]}" -p "$prompt" ${model_args[@]+"${model_args[@]}"} --settings "$settings" --permission-mode bypassPermissions \
+    # LEAN_MAX_TURNS (run.sh, from lean.max_turns): claude -p's turn cap (--max-turns, a hidden
+    # flag of Claude Code that only works with --print). When reached, the result JSON says
+    # subtype "error_max_turns" and is_error.
+    turn_args=()
+    case "${LEAN_MAX_TURNS:-}" in
+      '') ;;
+      *[!0-9]*|0*) echo "LEAN_MAX_TURNS must be a positive integer: $LEAN_MAX_TURNS" >&2; exit 2 ;;
+      *) turn_args=(--max-turns "$LEAN_MAX_TURNS") ;;
+    esac
+    "${cmd[@]}" -p "$prompt" ${model_args[@]+"${model_args[@]}"} ${turn_args[@]+"${turn_args[@]}"} --settings "$settings" --permission-mode bypassPermissions \
       --append-system-prompt-file "$system_file" --output-format json < /dev/null > "$result" ;;
   *) echo "mode must be interactive or headless" >&2; exit 2 ;;
 esac

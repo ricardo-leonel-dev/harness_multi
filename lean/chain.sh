@@ -10,7 +10,8 @@
 # Risk mode needs the frozen manifest (approve-plan, or freeze by hand without the harness);
 # with the harness, a feature whose plan approval is pending is refused before any step.
 # Stops at the first failure: a step exiting non-zero or past its time cap, a session whose
-# result JSON is missing or says is_error, a risk review without a VERDICT line or one that
+# result JSON is missing or says is_error (subtype error_max_turns: "max turns (<n>) reached",
+# the cap run.sh logged from lean.max_turns), a risk review without a VERDICT line or one that
 # changed files. Fix runs at most once. Never logs out: the caller runs
 # `scripts/harness.sh log-out --lean` itself (its own gate run is the suite run it needs).
 #
@@ -100,7 +101,7 @@ lean_chain_mode() {
 }
 
 lean_chain() {
-  local mode="" secs mins logs gate_log="" fixed=0 n=0 total=0 cost_total="" verdict="" last_rc=0
+  local mode="" secs mins logs cap gate_log="" fixed=0 n=0 total=0 cost_total="" verdict="" last_rc=0
   local fail_step="" fail_reason="" ran="" usage_before
   usage_before=$(lean_usage_count "$project" "$name" 2>/dev/null || echo 0)
   local -a lines=()
@@ -135,11 +136,15 @@ lean_chain() {
       implement|review|fix)
         res=$(sed -n 's/^\[lean\] result: //p' "$log" | tail -1)
         if [ -n "$res" ] && parsed=$(jq -r 'select(type == "object")
-             | "\(.is_error) \(.num_turns // "-") \(.total_cost_usd // "-")"' "$res" 2>/dev/null) && [ -n "$parsed" ]; then
+             | "\(.is_error) \(.num_turns // "-") \(.total_cost_usd // "-") \(.subtype // "-" | tostring | gsub("\\s"; "_"))"' "$res" 2>/dev/null) && [ -n "$parsed" ]; then
           set -- $parsed
           info=" turns=$2"
           [ "$3" = - ] || { info="$info cost=\$$(printf '%.2f' "$3")"
             cost_total=$(awk -v a="${cost_total:-0}" -v b="$3" 'BEGIN { printf "%.2f", a + b }'); }
+          if [ -z "$fail_reason" ] && [ "$4" = error_max_turns ]; then
+            cap=$(sed -n 's/^\[lean\] max turns: //p' "$log" | tail -1)
+            fail_reason="max turns${cap:+ ($cap)} reached"
+          fi
           [ -n "$fail_reason" ] || [ "$1" != true ] || fail_reason="the session reported is_error"
         elif [ -z "$fail_reason" ]; then
           fail_reason="no result JSON from the session${res:+ ($res)}"

@@ -25,7 +25,9 @@
 # for both modes, or {"normal": <tool>, "risk": <tool>} with each key optional; risk review:
 # default "claude:claude-haiku-5-5", must differ from the implementer; normal review: only
 # when set, else the implementer; any other shape exits 2), risk_questions (default "backend"), acceptance_dir
-# (default "acceptance"), allowed_domains (default none). A tool is "claude[:<model>]",
+# (default "acceptance"), allowed_domains (default none), max_turns ({"implement","review","fix"}:
+# a headless claude session's turn cap, default 120 / 40 / 60; anything but positive integers
+# exits 2). A tool is "claude[:<model>]",
 # "claude-mini" or "codex[:<model>]" (lean/adapters/<tool>.sh).
 set -euo pipefail
 
@@ -143,6 +145,15 @@ reviewer_parsed=$(jq -r '.lean.reviewer as $r
   echo "invalid .harness.json::lean.reviewer: use a tool string (both modes) or an object with optional string keys \"normal\" and \"risk\" (got: $(jq -c '.lean.reviewer' .harness.json 2>/dev/null || echo unreadable))" >&2
   exit 2
 }
+# lean.max_turns: {"implement": n, "review": n, "fix": n}, each optional, an integer 1..10000:
+# the turn cap of a headless session of that step (claude -p --max-turns; Codex has none).
+# Anything else stops every step here, the chain included, before any session.
+jq -e '.lean.max_turns as $m
+  | $m == null or (($m | type) == "object" and (($m | keys) - ["implement", "review", "fix"] | length) == 0
+      and all($m[]; type == "number" and . >= 1 and . <= 10000 and . == floor))' .harness.json >/dev/null 2>&1 || {
+  echo "invalid .harness.json::lean.max_turns: use an object with optional keys \"implement\", \"review\", \"fix\", each an integer from 1 to 10000 (got: $(jq -c '.lean.max_turns' .harness.json 2>/dev/null || echo unreadable))" >&2
+  exit 2
+}
 if [ "$step" = chain ]; then
   # shellcheck source=chain.sh
   . "$LEAN_DIR/chain.sh"
@@ -174,6 +185,8 @@ question_file="docs/risk-questions.md"
 [ -f "$question_file" ] || { echo "no risk-question list: $question_file" >&2; exit 2; }
 
 log() { echo "[lean] $*" >&2; }
+# max_turns_default <step> — the turn cap of a headless step when lean.max_turns has no key for it.
+max_turns_default() { case "$1" in implement) echo 120 ;; fix) echo 60 ;; *) echo 40 ;; esac; }
 
 # open_session <tool> <prompt> — one session on <tool>, with the working agreement (and
 # the risk-mode rules) appended to its system prompt.
@@ -198,11 +211,18 @@ open_session() {
   local t0=$SECONDS rc=0 mode_name=normal
   [ "$risk" = 0 ] || mode_name=risk
   if [ "$headless" = 1 ]; then
-    local result; result="$runs/$name.$step.$(date +%Y%m%d%H%M%S).json"
-    "$LEAN_DIR/adapters/$adapter.sh" "$project" headless "$model" "$system" "$prompt" "$result" || true
+    local result max_turns; result="$runs/$name.$step.$(date +%Y%m%d%H%M%S).json"
+    # The step's turn cap (lean.max_turns, validated above): claude -p --max-turns; the codex
+    # adapter has no such flag and ignores it (the chain's step minutes still apply).
+    max_turns=$(jq -r --arg s "$step" --argjson d "$(max_turns_default "$step")" '.lean.max_turns[$s] // $d' .harness.json)
+    log "max turns: $max_turns"
+    LEAN_MAX_TURNS="$max_turns" "$LEAN_DIR/adapters/$adapter.sh" "$project" headless "$model" "$system" "$prompt" "$result" || true
     lean_usage_record "$project" "$name" "$step" "$mode_name" "$adapter" "$model" "$((SECONDS - t0))" "$result" || true
     log "result: $result"
-    jq -c '{is_error, num_turns, duration_ms, total_cost_usd}' "$result" 2>/dev/null >&2 || true
+    jq -c '{is_error, subtype, num_turns, duration_ms, total_cost_usd}' "$result" 2>/dev/null >&2 || true
+    if [ "$(jq -r '.subtype // empty' "$result" 2>/dev/null)" = error_max_turns ]; then
+      log "max turns ($max_turns) reached: the session stopped before finishing"
+    fi
   else
     "$LEAN_DIR/adapters/$adapter.sh" "$project" interactive "$model" "$system" "$prompt" || rc=$?
     lean_usage_record "$project" "$name" "$step" "$mode_name" "$adapter" "$model" "$((SECONDS - t0))" - || true
@@ -210,13 +230,17 @@ open_session() {
   fi
 }
 
-run_gate() {
-  # The default base: what log-out --lean checks against (scripts/harness.sh session-base,
-  # write-denied to sessions and hash-checked above).
+# resolve_base — the gate's base: --base, else what log-out --lean checks against
+# (scripts/harness.sh session-base, write-denied to sessions and hash-checked above), else HEAD.
+resolve_base() {
   if [ -z "$base" ] && [ -f scripts/harness.sh ]; then
     base=$(bash scripts/harness.sh session-base "$name" 2>/dev/null || true)
   fi
   base="${base:-HEAD}"
+}
+
+run_gate() {
+  resolve_base
   local args=(--base "$base")
   [ "$risk" = 1 ] && args+=(--frozen "$frozen")
   "$LEAN_DIR/gate.sh" "$project" "$name" "${args[@]}"
@@ -230,6 +254,8 @@ tree_fingerprint() {
 }
 
 no_human="No human is available during this step: do not ask questions; decide, note it in the document, and finish. Do not commit or push."
+# What every session stays out of (the working agreement's "Boundaries", repeated in the prompt).
+bounds="Boundaries: do not read lean/, harness/, the harness's own scripts (scripts/harness.sh, scripts/lib.sh, scripts/snapshot.sh, scripts/sync_postgres.sh, scripts/notion_*.sh), init.sh, .harness.json, progress/, state/, ~/.cache, other features' documents or specs/; the files under **Files**, the code and tests they touch and any file this prompt names are always fine to read; do not run ./init.sh, lean/gate.sh, scripts/harness.sh or the full test suite (the gate runs them after this session, outside it; LEAN_GATE_UNSANDBOXED has no effect here). Run the feature's own tests and targeted checks; the project's docs/ are fine to read."
 
 case "$step" in
   freeze)
@@ -253,6 +279,7 @@ case "$step" in
     case "$LEAN_SANDBOX" in
       unsandboxed:*) log "[WARN] the acceptance tests run UNSANDBOXED (${LEAN_SANDBOX#unsandboxed: })" ;;
       broken:*) echo "${LEAN_SANDBOX#broken: }: the acceptance tests did not run (LEAN_GATE_UNSANDBOXED=1 runs them unsandboxed)" >&2; exit 2 ;;
+      session:*) echo "${LEAN_SANDBOX#session: }: the acceptance tests did not run" >&2; exit 2 ;;
     esac
     # shellcheck disable=SC2086
     out=$(lean_sandboxed "$project" "$verify $(echo $files)" 2>&1 || true)
@@ -261,13 +288,20 @@ case "$step" in
   implement)
     prompt="Implement the feature documented in $doc, as the working agreement in your instructions describes."
     [ "$risk" = 1 ] && prompt+=" Its acceptance tests are frozen."
+    prompt+=$'\n\n'"$bounds"
     [ "$headless" = 1 ] && prompt+=" $no_human"
     open_session "$implementer" "$prompt"
     ;;
   review)
+    resolve_base
     report=$(run_gate || true)
+    base_rev=$(git rev-parse --verify -q "$base^{commit}" 2>/dev/null || echo "$base")
+    # The review's whole scope; the boundaries keep it from auditing the harness.
+    scope="Review only: the change (git diff $base_rev, plus the untracked files git status --short lists), the files under **Files** in $doc, and $doc itself"
+    [ "$risk" = 0 ] || scope+=", and the risk questions in $question_file"
+    scope+=". $bounds The checks below already ran the full suite; the gate runs again after you."
     if [ "$risk" = 0 ]; then
-      prompt="Review the uncommitted changes for the feature documented in $doc, as the working agreement in your instructions describes (\"Reviewing\"). Results of the automatic checks:
+      prompt="Review the uncommitted changes for the feature documented in $doc, as the working agreement in your instructions describes (\"Reviewing\"). $scope Results of the automatic checks:
 
 $report"
       [ "$headless" = 1 ] && prompt+=$'\n\n'"$no_human"
@@ -275,7 +309,7 @@ $report"
     else
       [ "$reviewer" != "$implementer" ] || { echo "risk mode: the reviewer must be another model than the implementer ($reviewer)" >&2; exit 2; }
       before=$(tree_fingerprint)
-      prompt="Review the uncommitted changes for the feature documented in $doc, as the risk-mode rules in your instructions describe (\"Reviewing (risk mode)\"): report only, in $review_file, ending with the VERDICT line. Results of the automatic checks:
+      prompt="Review the uncommitted changes for the feature documented in $doc, as the risk-mode rules in your instructions describe (\"Reviewing (risk mode)\"): report only, in $review_file, ending with the VERDICT line. $scope Results of the automatic checks:
 
 $report"
       [ "$headless" = 1 ] && prompt+=$'\n\n'"$no_human"
@@ -301,6 +335,7 @@ $report"
 
 $report"
     fi
+    prompt+=$'\n\n'"$bounds Rerun the tests the report names as failing, not the whole suite."
     [ "$headless" = 1 ] && prompt+=$'\n\n'"$no_human"
     open_session "$implementer" "$prompt"
     ;;

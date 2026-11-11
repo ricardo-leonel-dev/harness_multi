@@ -378,6 +378,16 @@ done
 has exec 'shell_environment_policy.exclude=["OPENAI_*","CODEX_API_KEY"]' || die "the commands lose OPENAI_* / CODEX_API_KEY"
 argv_of exec | grep -q '^shell_environment_policy\.set\.TMPDIR="/.*/lean-session\.[^/]*/"$' || die "the commands' TMPDIR is the session folder"
 pass "environment: secrets dropped, passthrough kept, OPENAI_* kept for Codex but excluded from commands"
+# The session marker and LEAN_GATE_UNSANDBOXED (exported for this whole test): the marker is set
+# for codex and its commands, the bypass never reaches either. codex exec has no turn cap.
+reset
+LEAN_MAX_TURNS=40 "$A" "$P" headless - "$WORK/system.md" x "$WORK/e.json" >/dev/null 2>&1 || die "marker run"
+e=$(env_of exec)
+printf '%s\n' "$e" | grep -q '^LEAN_GATE_UNSANDBOXED=' && die "LEAN_GATE_UNSANDBOXED must not reach a codex session"
+printf '%s\n' "$e" | grep -qx 'LEAN_SESSION=1' || die "codex gets LEAN_SESSION=1"
+has exec 'shell_environment_policy.set.LEAN_SESSION="1"' || die "the commands get LEAN_SESSION=1"
+argv_of exec | grep -q -- '--max-turns' && die "codex exec has no --max-turns: $(argv_of exec | tr '\n' ' ')"
+pass "environment: LEAN_SESSION=1 set, LEAN_GATE_UNSANDBOXED dropped, no turn cap flag for codex"
 
 echo "5. run.sh roles"
 P="$WORK/p2"; new_project "$P" codex:gpt-impl codex:gpt-impl

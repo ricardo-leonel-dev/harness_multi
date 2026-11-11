@@ -110,6 +110,17 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
   no inherited descriptor above 2; when they end, whatever is left in their process group is killed
   and the report carries a `[WARN]`.
 - **One gate at a time** per project (`lean_run_lock`), with stale locks taken over.
+- **No unsandboxed runs from a session.** `LEAN_GATE_UNSANDBOXED=1` is for the caller's own gate
+  run (and the toolkit's tests), never for a session: `lean_env_args` drops it from every session
+  and from the commands the gate runs, the adapters set `LEAN_SESSION=1` (Codex: also for its
+  commands, `shell_environment_policy.set`), and `lean_sandbox_prepare` (`lean/lib.sh`
+  `lean_in_session`) treats as a session either that marker or a lean state it can't list
+  ("Operation not permitted": the sessions' sandbox denies it, so unsetting the marker doesn't
+  help). There it returns `session:` and nothing runs: the gate fails with `SANDBOX UNAVAILABLE`,
+  `./init.sh` and `harness.sh test` fail while a lean feature is open, `run.sh freeze` exits 2,
+  whatever `LEAN_GATE_UNSANDBOXED` says. A leader that runs the gate from inside another sandbox
+  denying `~/.cache/harness` is taken for a session too (it could not run the gate's profile
+  there anyway).
 
 ## Known limits
 
@@ -125,12 +136,16 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
   included). Claude Code's sandbox can't deny a single localhost port, and macOS refuses a nested
   `sandbox-exec`; the mirror's credentials stay out of the session (environment stripped,
   `docker-compose.yml` unreadable). The gate denies `LEAN_DENY_PORTS` and `lean.deny_ports`.
+- **Session detection can be dodged**: a session that unsets `LEAN_SESSION` and points `HOME`
+  elsewhere isn't detected, so `LEAN_GATE_UNSANDBOXED=1` works there. Accepted: that run stays inside
+  the session's own sandbox, and the threat model is mistakes, not a hostile model.
 - **`lean.allowed_domains`**: seatbelt can't filter by host name, so the gate's outbound network is
   open while it is set (a `[WARN]` says so).
 - **Processes that leave the process group** (a new session or process group: `setsid`, `setpgid`)
   are not looked for.
 - **macOS only for the gate's profile**: without `sandbox-exec` (Linux) the gate's commands run
-  unsandboxed, with a `[WARN]`; `LEAN_GATE_UNSANDBOXED=1` does the same on request.
+  unsandboxed, with a `[WARN]`; `LEAN_GATE_UNSANDBOXED=1` does the same on request (outside a
+  session only: see "No unsandboxed runs from a session").
 - **Only verified on macOS, through `sandbox-exec`.** The session settings were checked as generated
   JSON and by applying their rules with `sandbox-exec`, not against Claude Code's own runtime (its
   handling of `allowRead` inside `denyRead`, `denyWrite` on a missing path, `allowUnixSockets`), and

@@ -221,6 +221,9 @@ lean_env_args() {
       LEAN_ENV_ARGS+=(-u "$n")
     fi
   done < <(lean_env_names)
+  # LEAN_GATE_UNSANDBOXED never reaches a session or the commands the gate runs: it is the
+  # caller's choice for its own gate run, not something session-written code should see.
+  LEAN_ENV_ARGS+=(-u LEAN_GATE_UNSANDBOXED)
   LEAN_ENV_ARGS+=(${set[@]+"${set[@]}"} RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER= GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_GLOBAL=/dev/null)
 }
 
@@ -285,15 +288,33 @@ lean_run_lock() {
 }
 lean_run_unlock() { rm -rf "$(lean_state_dir "$1")/tmp/run.lock"; }
 
+# lean_in_session <project> — true inside a session run.sh opened: the adapters set
+# LEAN_SESSION=1 in its environment, and, should a command unset that, the project's lean state
+# (which the sessions' sandbox denies) refuses to be listed ("Operation not permitted").
+lean_in_session() {
+  local state err
+  [ "${LEAN_SESSION:-}" != 1 ] || return 0
+  state=$(lean_state_dir "$1" 2>/dev/null) || return 1
+  err=$(LC_ALL=C ls -- "$state" 2>&1 >/dev/null) && return 1
+  case "$err" in *"not permitted"*) return 0 ;; esac
+  return 1
+}
+
+# LEAN_SESSION_REFUSAL — why nothing runs when lean_sandbox_prepare finds itself in a session.
+LEAN_SESSION_REFUSAL="inside a lean session: the full suite, ./init.sh and the gate run after the session, outside it (LEAN_GATE_UNSANDBOXED is ignored here); run the feature's own tests directly"
+
 # lean_sandbox_prepare <project> — decides how lean_sandboxed runs commands for the
 # project's open lean feature and sets LEAN_SANDBOX: "sandbox" (LEAN_PROFILE holds the seatbelt profile),
-# "unsandboxed: <why>" (no sandbox-exec, or LEAN_GATE_UNSANDBOXED=1) or "broken: <why>"
-# (sandbox-exec is there but can't apply the profile, e.g. when already inside a sandbox).
+# "unsandboxed: <why>" (no sandbox-exec, or LEAN_GATE_UNSANDBOXED=1), "broken: <why>"
+# (sandbox-exec is there but can't apply the profile, e.g. when already inside a sandbox) or
+# "session: <why>" (inside a lean session, lean_in_session: nothing runs, and
+# LEAN_GATE_UNSANDBOXED=1 is ignored; it is for the gate and the tests run from outside).
 # LEAN_SANDBOX_WARN holds sandbox.sh's [WARN] lines (allowed_domains opening the network):
 # every caller prints them.
 lean_sandbox_prepare() {
   local err why
   LEAN_PROFILE="" LEAN_SANDBOX_WARN=""
+  if lean_in_session "$1"; then LEAN_SANDBOX="session: $LEAN_SESSION_REFUSAL"; return 0; fi
   if [ "${LEAN_GATE_UNSANDBOXED:-}" = 1 ]; then LEAN_SANDBOX="unsandboxed: LEAN_GATE_UNSANDBOXED=1"; return 0; fi
   if ! command -v sandbox-exec >/dev/null 2>&1; then
     LEAN_SANDBOX="unsandboxed: no sandbox-exec on this platform ($(uname -s))"; return 0
@@ -399,7 +420,8 @@ lean_usage_record() {
          then ([$t.in - $t.cr, 0] | max) else $t.in end) as $in
       | [($t.m | if . == "" then "-" else gsub("[\t\n]"; " ") end), (.num_turns | num), ($in | num), ($t.cr | num),
          ($t.cw | num), ($t.out | num), (.total_cost_usd | if type == "number" then tostring else "-" end),
-         (if .is_error == true then "is_error" else "" end)] | join("\t")' "$res" 2>/dev/null | head -1) || parsed=""
+         (if .subtype == "error_max_turns" then "max_turns"
+          elif .is_error == true then "is_error" else "" end)] | join("\t")' "$res" 2>/dev/null | head -1) || parsed=""
     if [ -n "$parsed" ]; then
       IFS=$'\t' read -r jmodel turns in cr cw out cost note <<<"$parsed" || true
       [ "${jmodel:--}" = - ] || model="$jmodel"
