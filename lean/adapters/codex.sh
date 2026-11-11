@@ -13,6 +13,18 @@
 #   LEAN_MAX_TURNS is ignored here; the chain's step minutes still apply.
 # check: only the sandbox self-check below, then exit 0 (nothing is sent to a model).
 #
+# LEAN_RUNNER=m3 (lean/adapters/codex-m3.sh, the `codex-m3` tool) runs the same session on MiniMax:
+# `--profile ${LEAN_CODEX_M3_PROFILE:-minimax}` right after the subcommand (what the user's
+# codex-m3 fish function adds: Codex layers <Codex home>/<profile>.config.toml, which holds the
+# MiniMax provider and key, over the user config; every -c below is a session flag, layered above
+# it). The model argument is ignored (the profile picks it). Not through `fish -c codex-m3`: fish
+# would load the user's fish config (its exported variables would undo the environment dropping
+# below) and start codex by its PATH name, a link the profile can't follow (see the binary below),
+# not the resolved binary the self-check proves. The sandbox self-check runs with the profile too
+# (the real Codex home); the prompt probe runs without it (a temp CODEX_HOME has no profile file,
+# and it only checks that no AGENTS.md is loaded). The result JSON says tool "codex-m3" and the
+# model Codex's events report, else the profile name.
+#
 # The sandbox is a Codex permission profile built from lean/sandbox.sh's lists (verified with
 # codex-cli 0.166.0 on macOS, progress/design_lean_flow.md §10):
 #   - base `:read-only`, then `write` on the project and a fresh session TMPDIR only (no
@@ -65,6 +77,14 @@ case "$mode" in interactive|headless|check) ;; *) echo "mode must be interactive
 [ "$mode" != headless ] || [ -n "$result" ] || { echo "headless needs a result file" >&2; exit 2; }
 project="$(cd "$project" && pwd)"
 command -v codex >/dev/null 2>&1 || { echo "lean: codex is not on PATH" >&2; exit 2; }
+tool=codex profile_args=() model_fallback=""
+if [ "${LEAN_RUNNER:-}" = m3 ]; then
+  tool=codex-m3 model=- model_fallback="${LEAN_CODEX_M3_PROFILE:-minimax}"
+  case "$model_fallback" in
+    ''|-*|*[!A-Za-z0-9_.-]*) echo "lean: LEAN_CODEX_M3_PROFILE must be a Codex profile name (letters, digits, _ . -): $model_fallback" >&2; exit 2 ;;
+  esac
+  profile_args=(--profile "$model_fallback")
+fi
 # shellcheck source=../lib.sh
 . "$LEAN_DIR/lib.sh"
 
@@ -169,7 +189,8 @@ done
 # through shell_environment_policy above); LEAN_GATE_UNSANDBOXED is already dropped (lean_env_args).
 cmd=(env ${unset_args[@]+"${unset_args[@]}"} "${env_args[@]}" TMPDIR="$session_tmp/" SSH_AUTH_SOCK= LEAN_SESSION=1 "$codex_bin")
 
-# Self-check: the same profile, applied by `codex sandbox` (no model).
+# Self-check: the same profile, applied by `codex sandbox` (no model), with codex-m3's config
+# profile layered as in the session.
 check='[ "${CODEX_SANDBOX:-}" = seatbelt ] || { echo "seatbelt is not active"; exit 1; }
 if (echo x > "$1/written") 2>/dev/null; then echo "a write outside the project went through"; exit 1; fi
 if cat "$1/canary" >/dev/null 2>&1; then echo "the lean state is readable"; exit 1; fi
@@ -187,7 +208,7 @@ echo LEAN-CODEX-SANDBOX-OK'
 # A secret file the profile must deny (lean/lib.sh lean_secret_files; a regular file).
 secret=""
 while IFS= read -r -d '' f; do [ -L "$f" ] || [ ! -f "$f" ] || { secret="$f"; break; }; done < <(lean_secret_files "$project")
-out=$(cd "$project" && "${cmd[@]}" sandbox "${common[@]}" -- /bin/sh -c "$check" sh "$canary" "$session_tmp" "$secret" "$codex_bin" "$codex_home_denied" 2>&1 < /dev/null) || true
+out=$(cd "$project" && "${cmd[@]}" sandbox ${profile_args[@]+"${profile_args[@]}"} "${common[@]}" -- /bin/sh -c "$check" sh "$canary" "$session_tmp" "$secret" "$codex_bin" "$codex_home_denied" 2>&1 < /dev/null) || true
 if [ "$(printf '%s\n' "$out" | tail -1)" != LEAN-CODEX-SANDBOX-OK ]; then
   echo "lean: the Codex sandbox could not be confirmed, refusing to start: $(printf '%s\n' "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)" >&2
   exit 3
@@ -195,7 +216,8 @@ fi
 rm -rf "$canary"   # before exec (interactive), which skips the EXIT trap
 # Prompt probe: Codex builds the session's prompt with the same flags in the project, locally
 # (no model, no credentials: a temp CODEX_HOME, no API key, proxies to a closed port). It must
-# succeed and load no AGENTS.md.
+# succeed and load no AGENTS.md. Without codex-m3's config profile: its file is in the real Codex
+# home, not the temp one, and the -c flags that turn the project docs off sit above it anyway.
 probe_home="$session_tmp/codex-probe-home"
 mkdir -p "$probe_home"
 rc=0
@@ -221,24 +243,26 @@ model_args=()
 cd "$project"
 case "$mode" in
   interactive)
-    exec "${cmd[@]}" "${common[@]}" -c 'approval_policy="never"' -c "developer_instructions=$system_toml" \
+    exec "${cmd[@]}" ${profile_args[@]+"${profile_args[@]}"} "${common[@]}" -c 'approval_policy="never"' -c "developer_instructions=$system_toml" \
       ${model_args[@]+"${model_args[@]}"} -C "$project" "$prompt" ;;
   headless)
     events="${result%.json}.events.jsonl" last="${result%.json}.last.txt"
     start=$(perl -MTime::HiRes=time -e 'printf "%d", time * 1000')
     rc=0
-    "${cmd[@]}" exec "${common[@]}" -c 'approval_policy="never"' -c "developer_instructions=$system_toml" \
+    "${cmd[@]}" exec ${profile_args[@]+"${profile_args[@]}"} "${common[@]}" -c 'approval_policy="never"' -c "developer_instructions=$system_toml" \
       --ignore-rules ${model_args[@]+"${model_args[@]}"} -C "$project" --json -o "$last" "$prompt" \
       < /dev/null > "$events" || rc=$?
     end=$(perl -MTime::HiRes=time -e 'printf "%d", time * 1000')
     # The events, read tolerantly (a line that isn't a JSON object is skipped).
     jq -R 'fromjson? | select(type == "object")' "$events" | jq -s \
       --argjson rc "$rc" --argjson ms "$((end - start))" --rawfile last <(cat "$last" 2>/dev/null || true) \
-      --arg events "$events" '
+      --arg events "$events" --arg tool "$tool" --arg mfb "$model_fallback" '
       def n: if type == "number" then . else 0 end;
       ([.[] | select(.type == "turn.completed") | .usage // {}]) as $u
       | ([.[] | select(.type == "turn.failed" or .type == "error")]) as $errs
-      | {type: "result", tool: "codex",
+      | ([.[] | (.model?, .item?.model?, .thread?.model?) | strings | select(length > 0)][0]
+         // (if $mfb == "" then null else $mfb end)) as $model
+      | {type: "result", tool: $tool, model: $model,
          is_error: ($rc != 0 or ($errs | length) > 0 or ($u | length) == 0),
          duration_ms: $ms,
          num_turns: ([.[] | select(.type == "item.completed")] | length),

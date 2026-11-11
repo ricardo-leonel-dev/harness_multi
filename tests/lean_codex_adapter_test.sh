@@ -28,6 +28,12 @@
 #      the same tool in both roles; an unknown tool is refused.
 #   6. chain with a codex implementer (no lean.reviewer: it reviews too): CHAIN: PASS, turns on
 #      the step line, no cost.
+#   7. codex-m3 (lean/adapters/codex-m3.sh): the resolved codex binary with --profile minimax
+#      (LEAN_CODEX_M3_PROFILE overrides, an invalid name refused) on the session and the sandbox
+#      check, never through fish; every protection of 1-4 unchanged; the prompt probe without the
+#      profile; the model argument ignored; result/usage rows say codex-m3 and the reported model,
+#      else minimax, no cost; run.sh accepts it as a string and per mode; risk mode refuses it in
+#      both roles and next to claude-mini (both MiniMax); "codex-m3:<model>" is unknown.
 #
 # Usage: bash tests/lean_codex_adapter_test.sh   (exits non-zero on the first failure)
 
@@ -436,5 +442,99 @@ grep -q '^implement ok .* turns=3$' "$WORK/out" && grep -q '^review    ok .* tur
 grep -q '^total: .*cost' "$WORK/out" && die "no cost total when Codex reports none: $(cat "$WORK/out")"
 [ "$(n_calls exec)" = 2 ] || die "implement and review ran on codex: $(ls "$CALLS")"
 pass "chain: codex implementer, implement -> review -> gate, CHAIN: PASS"
+
+echo "7. codex-m3"
+M3="$TOOLKIT_DIR/lean/adapters/codex-m3.sh"
+P="$WORK/p4"; new_project "$P" codex-m3 claude:other
+printf '# orchestrator instructions\n' > "$P/AGENTS.md"; g -C "$P" add AGENTS.md && g -C "$P" commit -qm agents || die "project setup: AGENTS.md"
+# first2 <kind> — the first two arguments after the subcommand (interactive: the first two).
+first2() { argv_of "$1" | if [ "$1" = interactive ]; then cat; else sed 1d; fi | head -2 | tr '\n' ' '; }
+reset
+"$M3" "$P" interactive some-model "$WORK/system.md" "Implement docs/features/f.md" > "$WORK/out" 2>&1 || die "codex-m3 interactive: $(cat "$WORK/out")"
+grep -q 'real CLI called' "$WORK/out" && die "codex-m3 must not go through fish: $(cat "$WORK/out")"
+[ "$(n_calls sandbox)" = 1 ] && [ "$(n_calls debug)" = 1 ] && [ "$(n_calls interactive)" = 1 ] || die "check, probe, session: $(ls "$CALLS")"
+[ "$(first2 interactive)" = "--profile minimax " ] || die "the session starts with --profile minimax: $(first2 interactive)"
+[ "$(first2 sandbox)" = "--profile minimax " ] || die "the sandbox check layers the profile too: $(first2 sandbox)"
+has debug --profile && die "the prompt probe runs without the profile (temp CODEX_HOME): $(argv_of debug | head -3)"
+case "$(cat "$CALLS/debug.codex_home")" in */lean-session.*/codex-probe-home) ;; *) die "probe CODEX_HOME: $(cat "$CALLS/debug.codex_home")" ;; esac
+env_of debug | grep -qx 'OPENAI_API_KEY=' || die "the probe carries no API key"
+has interactive -m && die "codex-m3 ignores the model argument: $(argv_of interactive | tr '\n' ' ')"
+[ "$(cat "$(ls "$CALLS"/*.interactive.self)")" = "$WORK/bin/codex" ] || die "the session starts the resolved binary: $(cat "$CALLS"/*.interactive.self)"
+for a in --enable network_proxy 'default_permissions="lean"' 'permissions.lean.extends=":read-only"' 'approval_policy="never"' \
+         'approvals_reviewer="user"' 'project_doc_max_bytes=0' 'project_doc_fallback_filenames=[]' \
+         'shell_environment_policy.exclude=["OPENAI_*","CODEX_API_KEY"]' 'shell_environment_policy.set.LEAN_SESSION="1"' -C "$P"; do
+  has interactive "$a" || die "codex-m3 interactive argv lacks $a"
+done
+no_bypass interactive; no_bypass sandbox
+[ "$(sandbox_flags sandbox)" = "$(sandbox_flags interactive)" ] && [ "$(sandbox_flags debug)" = "$(sandbox_flags interactive)" ] \
+  || die "codex-m3: check and probe use the session's flags"
+fs=$(fs_table interactive)
+for kv in "\"$P\"=\"write\"" "\"$P/.git\"=\"read\"" "\"$HOME/Documents\"=\"deny\"" "\"$P/**/AGENTS.md\"=\"deny\"" "\"$P/**/.codex/**\"=\"deny\""; do
+  case "$fs" in *"$kv"*) ;; *) die "codex-m3 filesystem table lacks $kv: $fs" ;; esac
+done
+pass "codex-m3 interactive: resolved codex with --profile minimax (session and check), not fish, no -m; profile, deny globs, no AGENTS.md, probe without the profile"
+
+reset
+FAKE_API_TOKEN=s1 KEEP_ME_TOKEN=k LEAN_CODEX_M3_PROFILE=mm-2 "$M3" "$P" headless gpt-x "$WORK/system.md" x "$WORK/m.json" > "$WORK/out" 2>&1 || die "codex-m3 headless: $(cat "$WORK/out")"
+[ "$(first2 exec)" = "--profile mm-2 " ] && [ "$(first2 sandbox)" = "--profile mm-2 " ] || die "LEAN_CODEX_M3_PROFILE names the profile: $(first2 exec)"
+for a in --json --ignore-rules 'approval_policy="never"'; do has exec "$a" || die "codex-m3 exec argv lacks $a"; done
+has exec -m && die "codex-m3 exec: no -m"
+e=$(env_of exec)
+printf '%s\n' "$e" | grep -q '^FAKE_API_TOKEN=' && die "codex-m3: secrets dropped"
+printf '%s\n' "$e" | grep -q '^LEAN_GATE_UNSANDBOXED=' && die "codex-m3: LEAN_GATE_UNSANDBOXED dropped"
+printf '%s\n' "$e" | grep -qx 'LEAN_SESSION=1' || die "codex-m3: LEAN_SESSION=1"
+jq -e '.tool == "codex-m3" and .model == "mm-2" and .total_cost_usd == null and .usage.input_tokens == 1200' "$WORK/m.json" >/dev/null \
+  || die "codex-m3 result JSON (no model in the events: the profile name): $(cat "$WORK/m.json")"
+reset; export STUB_EVENTS='{"type":"thread.started","thread_id":"t","model":"MiniMax-M3"}
+{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}'
+"$M3" "$P" headless - "$WORK/system.md" x "$WORK/m2.json" >/dev/null 2>&1 || die "codex-m3 headless with a model event"
+jq -e '.tool == "codex-m3" and .model == "MiniMax-M3"' "$WORK/m2.json" >/dev/null || die "the model Codex reports: $(cat "$WORK/m2.json")"
+reset
+rc=0; LEAN_CODEX_M3_PROFILE='x y' "$M3" "$P" headless - "$WORK/system.md" x "$WORK/m3.json" > "$WORK/out" 2>&1 || rc=$?
+[ "$rc" = 2 ] && grep -q 'LEAN_CODEX_M3_PROFILE must be a Codex profile name' "$WORK/out" && [ "$(ls "$CALLS" | wc -l | tr -d ' ')" = 0 ] \
+  || die "an invalid profile name is refused before any codex call: rc=$rc $(cat "$WORK/out")"
+pass "codex-m3 headless: --profile on exec and check, env rules kept, result tool codex-m3, model reported else the profile, no cost"
+
+usage_rows() { tail -n +2 "$(bash -c '. "$1/lean/lib.sh"; lean_usage_file "$2" f' _ "$TOOLKIT_DIR" "$1")" | cut -f3-7,13; }
+reset
+(cd "$P" && bash "$TOOLKIT_DIR/lean/run.sh" implement f --headless) > "$WORK/out" 2>&1 || die "run.sh implement with codex-m3: $(cat "$WORK/out")"
+[ "$(first2 exec)" = "--profile minimax " ] || die "run.sh codex-m3 -> the profile: $(first2 exec)"
+[ "$(usage_rows "$P" | tail -1)" = "$(printf 'implement\tnormal\tcodex-m3\tminimax\t3\t-')" ] || die "usage row: $(usage_rows "$P" | tail -1)"
+# Interactive: no result JSON, the row still names codex-m3 / minimax.
+reset
+(cd "$P" && bash "$TOOLKIT_DIR/lean/run.sh" implement f) > "$WORK/out" 2>&1 || die "run.sh interactive codex-m3: $(cat "$WORK/out")"
+[ "$(usage_rows "$P" | tail -1)" = "$(printf 'implement\tnormal\tcodex-m3\tminimax\t-\t-')" ] || die "interactive usage row: $(usage_rows "$P" | tail -1)"
+# Per-mode object: the normal review on codex-m3, the implementer on claude (its stub must not run).
+P="$WORK/p5"; new_project "$P" claude:impl codex-m3
+jq '.lean.reviewer = {normal: "codex-m3", risk: "claude:other"}' "$P/.harness.json" > "$WORK/h" && mv "$WORK/h" "$P/.harness.json"
+reset
+(cd "$P" && bash "$TOOLKIT_DIR/lean/run.sh" review f --headless) > "$WORK/out" 2>&1 || die "normal review on codex-m3: $(cat "$WORK/out")"
+[ "$(n_calls exec)" = 1 ] && [ "$(first2 exec)" = "--profile minimax " ] || die "per-mode reviewer codex-m3: $(ls "$CALLS")"
+[ "$(usage_rows "$P" | tail -1 | cut -f1-3)" = "$(printf 'review\tnormal\tcodex-m3')" ] || die "review usage row: $(usage_rows "$P")"
+pass "run.sh: codex-m3 as implementer (string) and as the normal reviewer (per mode); usage rows codex-m3 / minimax, cost -"
+
+# Risk mode: codex-m3 in both roles, or next to claude-mini (both MiniMax), is refused before any session.
+P="$WORK/p6"; new_project "$P" codex-m3 codex-m3
+(cd "$P" && bash "$TOOLKIT_DIR/lean/run.sh" freeze f) > "$WORK/out" 2>&1 || die "freeze: $(cat "$WORK/out")"
+st6="$(bash -c '. "$1/lean/lib.sh"; lean_state_dir "$2"' _ "$TOOLKIT_DIR" "$P")/lean/f/trusted.sha"
+for pair in 'codex-m3 codex-m3' 'codex-m3 {"risk":"codex-m3"}' 'claude-mini codex-m3' 'codex-m3 claude-mini'; do
+  read -r i r <<<"$pair"
+  jq --arg i "$i" --argjson r "$(jq -R 'fromjson? // .' <<<"$r")" '.lean.implementer = $i | .lean.reviewer = $r' "$P/.harness.json" > "$WORK/h" && mv "$WORK/h" "$P/.harness.json"
+  rm -f "$st6"; reset
+  (cd "$P" && bash "$TOOLKIT_DIR/lean/run.sh" review f --headless) > "$WORK/out" 2>&1 && die "risk: $pair must be refused"
+  grep -q 'risk mode: the reviewer must be another model than the implementer' "$WORK/out" || die "risk $pair message: $(cat "$WORK/out")"
+  [ "$(n_calls exec)" = 0 ] && [ "$(n_calls sandbox)" = 0 ] || die "risk $pair: no session"
+done
+grep -q 'both run MiniMax' "$WORK/out" || die "the MiniMax pair is named: $(cat "$WORK/out")"
+jq '.lean.implementer = "codex-m3" | .lean.reviewer = "codex"' "$P/.harness.json" > "$WORK/h" && mv "$WORK/h" "$P/.harness.json"
+rm -f "$st6"; reset
+STUB_EXEC_SCRIPT='printf "ok\nVERDICT: approve\n" > docs/features/f.review.md' \
+  bash -c 'cd "$1" && bash "$2/lean/run.sh" review f --headless' _ "$P" "$TOOLKIT_DIR" > "$WORK/out" 2>&1 || die "risk: codex reviewing codex-m3: $(cat "$WORK/out")"
+has exec --profile && die "the plain codex reviewer runs without the MiniMax profile"
+jq '.lean.implementer = "codex-m3:big"' "$P/.harness.json" > "$WORK/h" && mv "$WORK/h" "$P/.harness.json"
+rm -f "$st6"; reset
+(cd "$P" && bash "$TOOLKIT_DIR/lean/run.sh" implement f --headless) > "$WORK/out" 2>&1 && die "codex-m3:<model> must be refused"
+grep -q 'unknown tool: codex-m3:big' "$WORK/out" || die "codex-m3:<model> message: $(cat "$WORK/out")"
+pass "risk mode: codex-m3 in both roles (string or per mode) and next to claude-mini refused; plain codex may review it; codex-m3:<model> unknown"
 
 echo "all $PASS checks passed"
