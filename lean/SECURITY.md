@@ -44,7 +44,15 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
   whole when either form is protected), and not inside an allowed toolchain folder: the profile denies
   them again after its allows, and the session settings keep folders holding them out of `allowRead`.
   `/Volumes`, `/Users/Shared`, the per-user cache dir, other projects' transcripts and Claude Code's
-  temp folder (`/private/tmp/claude-<uid>`: other sessions' scratchpads) are denied too.
+  temp folder (`/private/tmp/claude-<uid>`: other sessions' scratchpads) are denied too. The
+  session settings re-open that folder's entry named after the project (as written and resolved):
+  Claude Code writes each Bash command's stdout and stderr to a file there, and seatbelt checks an
+  `fstat` on that inherited descriptor against the file's path, so with the entry denied `cat`
+  fails (`stdout: Operation not permitted`) and node aborts. When the entry is missing (the first
+  session from the project after a reboot cleared `/tmp`) `lean/sandbox.sh` creates it (mode
+  700, as Claude Code does), and `lean/adapters/claude.sh` refuses to start a session whose
+  settings deny the folder without re-opening an entry. The entry is shared by every Claude Code
+  session started from the project (the leader's scratchpad included), not by other projects.
 - **Secret files in the project.** Sessions (not the gate: suites load `.env`) can't read files or
   folders named `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*secret*` or
   `*credential*` (any case) in the project or the rest of its repository, except the templates
