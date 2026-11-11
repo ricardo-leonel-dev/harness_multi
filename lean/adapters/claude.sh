@@ -25,6 +25,16 @@ if [ "${LEAN_RUNNER:-}" = mini ]; then
   model_args=()
 fi
 settings="$("$LEAN_DIR/sandbox.sh" "$project")"
+# Claude Code writes each Bash command's stdout to a file in its temp folder's entry for this
+# project; with the folder denied and that entry not re-opened, every command that checks its
+# stdout fails (cat, node). Refused here instead of a session that burns its calls on it.
+if jq -e --arg root "$(cd "${LEAN_CLAUDE_TMP:-/tmp/claude-$(id -u)}" 2>/dev/null && pwd -P)" \
+     '$root != "" and (.sandbox.filesystem.denyRead | index($root))
+      and ([.sandbox.filesystem.allowRead[] | select(startswith($root + "/"))] | length == 0)' \
+     <<<"$settings" >/dev/null; then
+  echo "lean: Claude Code's temp folder has no entry for $project the session could use (its Bash output would be unreadable); start any Claude Code session in the project once, or check the folder's permissions" >&2
+  exit 1
+fi
 # Claude Code points the sandboxed Bash's TMPDIR at its own temp folder, which the sandbox
 # denies (other sessions' scratchpads), so linkers and test runners fail there. A SessionStart
 # hook re-exports TMPDIR to a fresh folder of this session's in the user temp dir (writable),

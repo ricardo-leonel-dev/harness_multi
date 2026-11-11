@@ -19,7 +19,8 @@
 # glob). Outside $HOME:
 # /Volumes, /Users/Shared, the per-user cache dir and Claude Code's temp folder
 # (/private/tmp/claude-<uid>; LEAN_CLAUDE_TMP replaces it, for tests) are denied; the session
-# settings re-open that folder's entry named after this project (the session's own outputs).
+# settings re-open that folder's entry named after this project (the session's own outputs,
+# its Bash commands' stdout among them; created when missing).
 #
 # Writes: the project and the temp dir. Inside the project the harness-owned paths
 # (LEAN_DENY_WRITE) and the git state (.git, the git dir, the common dir) are write-denied by
@@ -166,7 +167,18 @@ if [ -n "$r" ] && [ -d "$r" ]; then
   if [ -n "$inside" ]; then echo "lean/sandbox.sh: $r stays readable ($inside is inside it or holds it)" >&2
   else
     claude_tmps=("$r")
-    [ ! -d "$r/$own_slug" ] || claude_open=("$r/$own_slug")
+    # Claude Code sends each Bash command's output to a file in that entry (<slug>/<session>/
+    # tasks/<id>.output, the command's stdout and stderr). Seatbelt checks an fstat on the
+    # inherited descriptor against the file's path, so with the entry denied `cat` fails
+    # ("stdout: Operation not permitted") and node aborts at start. The entry is missing on the
+    # first session from the project after /tmp was cleared (a reboot): the session settings
+    # create it (mode 700, as Claude Code does) so it can be re-opened. Named after the project
+    # as written and resolved (Claude Code names it after its working directory, resolved).
+    for s in "$own_slug" ${project_real:+"$(printf '%s' "$project_real" | sed 's/[^a-zA-Z0-9]/-/g')"}; do
+      case " ${claude_open[*]-} " in *" $r/$s "*) continue ;; esac
+      [ "$seatbelt" = 1 ] || [ -d "$r/$s" ] || mkdir -m 700 "$r/$s" 2>/dev/null || true
+      [ ! -d "$r/$s" ] || claude_open+=("$r/$s")
+    done
   fi
 fi
 
