@@ -358,3 +358,100 @@ lean_repo_changes() {
   { git diff -z --no-relative --name-only "$1"; git -C "$top" ls-files -z --others --exclude-standard; } \
     | lean_z_lines | sed '/^$/d' | sort -u
 }
+
+# Usage report: <state>/lean/<name>/usage.tsv, append-only, one row per session run.sh opens
+# (implement, review, fix; headless or interactive, chained or by hand). Columns:
+#   at feature step mode tool model turns input cache_read cache_write output seconds cost_usd note
+# From the result JSON the adapter wrote (claude -p's, or codex.sh's in the same shape):
+# model = the keys of claude's modelUsage, most output first (else the configured model,
+# "default" when none), turns = num_turns (Codex: completed items), tokens summed over modelUsage when present (it
+# counts subagents too), else from usage. input is the uncached input for every tool: Codex
+# reports the cached tokens inside input_tokens, so they are subtracted. cost_usd only as the
+# CLI reports it (total_cost_usd); "-" for Codex (none) and claude-mini (Claude Code's estimate
+# at Anthropic prices, not what MiniMax bills). No price table anywhere. A field the JSON lacks
+# is "?"; an interactive session has no result JSON: its row holds the duration only.
+# seconds: the session's wall time as run.sh measured it. Best-effort: a failure here never
+# changes a step's outcome.
+LEAN_USAGE_HEADER='at	feature	step	mode	tool	model	turns	input	cache_read	cache_write	output	seconds	cost_usd	note'
+
+lean_usage_file() { printf '%s/lean/%s/usage.tsv\n' "$(lean_state_dir "$1")" "$2"; }
+
+# lean_usage_record <project> <name> <step> <mode> <tool> <model|-> <seconds> <result_json|->
+# (- : an interactive session).
+lean_usage_record() {
+  local file tool="$5" model="$6" res="$8" parsed="" jmodel="" turns="" in="" cr="" cw="" out="" cost="" note=""
+  file=$(lean_usage_file "$1" "$2") || return 0
+  mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+  [ "$model" != - ] || model=default
+  if [ "$res" = - ]; then
+    turns=- in=- cr=- cw=- out=- cost=- note="interactive (not measured)"
+  else
+    parsed=$(jq -r 'def num: if type == "number" then (floor | tostring) else "?" end;
+      select(type == "object")
+      | (.modelUsage | if type == "object" and length > 0 then . else null end) as $mu
+      | (if $mu then {in: ([$mu[] | .inputTokens // 0] | add), cr: ([$mu[] | .cacheReadInputTokens // 0] | add),
+                      cw: ([$mu[] | .cacheCreationInputTokens // 0] | add), out: ([$mu[] | .outputTokens // 0] | add),
+                      m: ($mu | to_entries | sort_by(-(.value.outputTokens // 0)) | map(.key) | join("+"))}
+         else (.usage | if type == "object" then . else {} end) as $u
+           | {in: $u.input_tokens, cr: $u.cache_read_input_tokens, cw: $u.cache_creation_input_tokens,
+              out: $u.output_tokens, m: ""} end) as $t
+      | (if .tool == "codex" and ($t.in | type) == "number" and ($t.cr | type) == "number"
+         then ([$t.in - $t.cr, 0] | max) else $t.in end) as $in
+      | [($t.m | if . == "" then "-" else gsub("[\t\n]"; " ") end), (.num_turns | num), ($in | num), ($t.cr | num),
+         ($t.cw | num), ($t.out | num), (.total_cost_usd | if type == "number" then tostring else "-" end),
+         (if .is_error == true then "is_error" else "" end)] | join("\t")' "$res" 2>/dev/null | head -1) || parsed=""
+    if [ -n "$parsed" ]; then
+      IFS=$'\t' read -r jmodel turns in cr cw out cost note <<<"$parsed" || true
+      [ "${jmodel:--}" = - ] || model="$jmodel"
+    else
+      turns='?' in='?' cr='?' cw='?' out='?' cost='?' note="no readable result JSON"
+    fi
+    [ "$tool" != claude-mini ] || cost=-
+  fi
+  [ -s "$file" ] || printf '%s\n' "$LEAN_USAGE_HEADER" >> "$file" 2>/dev/null || return 0
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$3" "$4" \
+    "$tool" "$model" "${turns:-?}" "${in:-?}" "${cr:-?}" "${cw:-?}" "${out:-?}" "$7" "${cost:-?}" "$note" \
+    >> "$file" 2>/dev/null || return 0
+}
+
+# lean_usage_count <project> <name> — how many rows the feature has (0: none).
+lean_usage_count() {
+  local file
+  file=$(lean_usage_file "$1" "$2") || { echo 0; return 0; }
+  [ -f "$file" ] || { echo 0; return 0; }
+  awk 'NR > 1' "$file" | wc -l | tr -d ' '
+}
+
+# lean_usage_table <project> <name> [<skip>] — the feature's rows after the first <skip> as a
+# compact table: tokens in k/M, a sum row over the rows shown (a column with no number in any
+# row: "?"; the cost summed over the reported ones only), and a pointer to the skipped rows.
+# Fails, printing nothing, when there is no row to show.
+lean_usage_table() {
+  local file
+  file=$(lean_usage_file "$1" "$2") || return 1
+  [ -f "$file" ] || return 1
+  awk -F'\t' -v skip="${3:-0}" -v name="$2" '
+    function tok(x) { if (x !~ /^[0-9]+$/) return x; if (x >= 1e6) return sprintf("%.1fM", x / 1e6)
+                      if (x >= 1e3) return sprintf("%.1fk", x / 1e3); return x }
+    function dur(s) { return (s ~ /^[0-9]+$/) ? sprintf("%dm%02ds", int(s / 60), s % 60) : s }
+    function money(c) { return (c ~ /^[0-9.]+$/) ? sprintf("$%.2f", c) : c }
+    function add(i, v) { if (v ~ /^[0-9]+$/) { sum[i] += v; has[i] = 1 } }
+    function total(i) { return has[i] ? sum[i] : "?" }
+    function line(a, b, c, d, e, f, g, h, i, j, k, l) {
+      printf "  %-9s %-6s %-11s %-24s %5s %6s %7s %7s %6s %7s %6s%s\n", a, b, c, substr(d, 1, 24), e, f, g, h, i, j, k, (l == "" ? "" : "  " l)
+    }
+    NR == 1 || NR - 1 <= skip { next }
+    { n++; row[n] = $0
+      for (i = 7; i <= 12; i++) add(i, $i)
+      if ($13 ~ /^[0-9.]+$/) { cost += $13; costs++ } }
+    END {
+      if (n == 0) exit 1
+      printf "usage (%s: %d session%s%s):\n", name, n, (n == 1 ? "" : "s"),
+             (skip > 0 ? sprintf("; %d earlier: lean/run.sh usage %s", skip, name) : "")
+      line("step", "mode", "tool", "model", "turns", "in", "c.read", "c.write", "out", "time", "cost", "")
+      for (r = 1; r <= n; r++) { split(row[r], f, "\t")
+        line(f[3], f[4], f[5], f[6], f[7], tok(f[8]), tok(f[9]), tok(f[10]), tok(f[11]), dur(f[12]), money(f[13]), f[14]) }
+      line("sum", "", "", "", total(7), tok(total(8)), tok(total(9)), tok(total(10)), tok(total(11)),
+           dur(total(12)), (costs ? money(cost) : "-"), "")
+    }' "$file"
+}

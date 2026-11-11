@@ -51,14 +51,25 @@ think of.
    `VERDICT:` line or that changed files) and refuses to start when the plan awaits approval or a
    risk feature has no frozen manifest. Output: one line per step (duration, turns, cost), the
    final gate's headings (the full report and every step's log stay under `<lean state>/lean/`),
-   `git status --short`, then `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`; exit 0 only on
-   PASS. On PASS with the harness, a `next:` line before it holds the `log-out --lean` command to
+   `git status --short`, the usage table of the sessions this chain opened (step 8), then
+   `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`; exit 0 only on PASS. On PASS with the harness, a `next:` line before it holds the `log-out --lean` command to
    run: `--changes` lists the files the gate checked (quoted), only `--closure` is left to fill
    in. Each step is capped at `--step-minutes` (default `lean.step_minutes`, else 30): its
    process group is killed and the step fails. With the harness, each step's result is
    `append-log`ged. It never logs out.
+8. **Usage**: `lean/run.sh usage <name>` prints every session recorded for the feature (read-only).
+   Each session `run.sh` opens (implement, review, fix; chained or by hand) appends a row to
+   `<lean state>/lean/<name>/usage.tsv`: step, mode, tool, model, turns, input / cache-read /
+   cache-write / output tokens, wall time, cost. `run.sh` measures the wall time; the rest comes
+   from the session's result JSON: claude's `modelUsage` (model names, tokens) and
+   `total_cost_usd`; Codex's token counts, with the configured model name (its cached
+   tokens are taken out of input, so input is uncached input for every tool; Codex reports no
+   cost). Cost only as the CLI reports it, never from a price table; left out for `claude-mini`
+   (Claude Code's estimate at Anthropic prices, not MiniMax's bill). An interactive session gets
+   its duration and `interactive (not measured)`; an unreadable result, `?` fields. A step that
+   `chain` kills at `--step-minutes` records no row.
 
-Every step refuses a name without `docs/features/<name>.md` before pinning anything.
+Every step (not `usage`) refuses a name without `docs/features/<name>.md` before pinning anything.
 Steps 3–5 open an interactive session (`--headless` for `claude -p` / `codex exec`). Close with
 `scripts/harness.sh log-out --lean --changes … --verification … --closure …`: it runs the gate
 itself against the commit the session started from (risk mode: with the manifest frozen at

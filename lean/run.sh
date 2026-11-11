@@ -10,6 +10,7 @@
 #   lean/run.sh gate      <name>   the closing checks (lean/gate.sh)
 #   lean/run.sh chain     <name>   every step above, headless, in one call; a compact summary
 #                                  (--step-minutes N caps each step; never logs out)
+#   lean/run.sh usage     <name>   the feature's sessions: tool, model, turns, tokens, time, cost
 #
 # Options: --headless (claude -p / codex exec instead of an interactive session; the result JSON is
 # kept under the project's lean state, lean/lib.sh), --base <rev> (gate base; default the
@@ -29,7 +30,7 @@
 set -euo pipefail
 
 LEAN_DIR="$(cd "$(dirname "$0")" && pwd)"
-usage() { sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 step="${1:-}"; name="${2:-}"
 [ -n "$step" ] && [ -n "$name" ] || usage
 shift 2
@@ -85,6 +86,19 @@ if [ "$step" = brief ]; then
       ':(exclude,glob)**/.*' ':(exclude,glob)**/.*/**' "${secret_specs[@]}" 2>/dev/null \
       | cut -c1-200 | cap 25 || true
   done
+  exit 0
+fi
+
+# usage <name> — every session recorded for the feature (lean/lib.sh lean_usage_record), as a
+# table. Read-only; needs no document and pins nothing.
+if [ "$step" = usage ]; then
+  case "$name" in *[!A-Za-z0-9_-]*) echo "feature name must be letters, digits, _ or -" >&2; exit 2 ;; esac
+  [ -f .harness.json ] || { echo "run lean/run.sh from a project with a .harness.json" >&2; exit 2; }
+  # shellcheck source=lib.sh
+  . "$LEAN_DIR/lib.sh"
+  file=$(lean_usage_file "$(pwd)" "$name")
+  lean_usage_table "$(pwd)" "$name" || { echo "no usage recorded for $name ($file)"; exit 0; }
+  echo "rows: $file"
   exit 0
 fi
 
@@ -180,13 +194,19 @@ open_session() {
     printf '\nFeature: %s. Document: %s. Risk questions: %s.\n' "$name" "$doc" "$question_file"
     [ "$risk" = 1 ] && printf 'Frozen acceptance tests: %s\n' "$(awk '{print $2}' "$frozen" | tr '\n' ' ')"
   } > "$system"
+  # One usage row per session (lean/lib.sh lean_usage_record; best-effort).
+  local t0=$SECONDS rc=0 mode_name=normal
+  [ "$risk" = 0 ] || mode_name=risk
   if [ "$headless" = 1 ]; then
     local result; result="$runs/$name.$step.$(date +%Y%m%d%H%M%S).json"
     "$LEAN_DIR/adapters/$adapter.sh" "$project" headless "$model" "$system" "$prompt" "$result" || true
+    lean_usage_record "$project" "$name" "$step" "$mode_name" "$adapter" "$model" "$((SECONDS - t0))" "$result" || true
     log "result: $result"
     jq -c '{is_error, num_turns, duration_ms, total_cost_usd}' "$result" 2>/dev/null >&2 || true
   else
-    "$LEAN_DIR/adapters/$adapter.sh" "$project" interactive "$model" "$system" "$prompt"
+    "$LEAN_DIR/adapters/$adapter.sh" "$project" interactive "$model" "$system" "$prompt" || rc=$?
+    lean_usage_record "$project" "$name" "$step" "$mode_name" "$adapter" "$model" "$((SECONDS - t0))" - || true
+    [ "$rc" = 0 ] || exit "$rc"
   fi
 }
 
