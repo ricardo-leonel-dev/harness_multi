@@ -152,7 +152,12 @@ network_proxy` and pinned approval settings, and never with `--dangerously-bypas
 - **Reads**: base `:read-only` (everything readable) minus `deny` on sandbox.sh's `denyRead` list:
   the same `$HOME` entries, credentials, the lean state with the frozen manifest, Claude Code's
   temp folder, the project's secret files and globs. `~/.codex` (Codex's auth) is a `$HOME` entry, so commands can't read it; Codex
-  itself, outside the sandbox, still does.
+  itself, outside the sandbox, still does. The adapter starts Codex by the binary's resolved path
+  (Codex re-runs itself inside the profile, and Codex resolves the profile's paths, so a link
+  such as `~/.local/bin/codex -> ~/.codex/packages/standalone/current/...` can't be opened) and
+  makes only that binary's release folder `read` when it lies under `<Codex home>/packages/`
+  (`auth.json`, `config.toml`, sessions, logs and the rest of `~/.codex` stay denied; a binary
+  outside `$HOME` needs nothing).
 - **Writes**: only the project and a fresh session `TMPDIR` (not `/tmp`, not the user temp dir:
   stricter than the Claude sessions). sandbox.sh's `denyWrite` list (harness-owned files, the git
   state) is `read`. `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`, `.claude/`
@@ -177,6 +182,9 @@ network_proxy` and pinned approval settings, and never with `--dangerously-bypas
   caller's proxy either).
 - **Fails closed**: before each session `codex sandbox` runs a check with the same flags (seatbelt
   active, a canary in the lean state unreadable and unwritable, the session `TMPDIR` writable,
+  the codex binary runnable by that resolved path (`--version` with a temp `CODEX_HOME`), the
+  Codex home unreadable when it is under `$HOME` (a `CODEX_HOME` outside `$HOME` is not denied
+  and not checked: keep it in `~/.codex` or under `$HOME`),
   Codex's proxy in place: `CODEX_NETWORK_PROXY_ACTIVE=1` and `HTTP(S)_PROXY` on `127.0.0.1`, which
   only Codex can supply since the caller's are unset); a failure, a nested sandbox, or a flag or key the installed Codex doesn't know
   refuses the session (exit 3).

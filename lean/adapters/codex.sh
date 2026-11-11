@@ -17,7 +17,8 @@
 #     /tmp, no user temp dir), `read` on sandbox.sh's write-denied paths (harness-owned
 #     files, the git state), `deny` on its read-denied paths ($HOME entries but the carve-outs,
 #     credentials, the lean state with the frozen manifest, the secret files in the project and
-#     its repository and the LEAN_SECRET_GLOBS globs: lean/lib.sh), and `deny` globs on CLAUDE.md,
+#     its repository and the LEAN_SECRET_GLOBS globs: lean/lib.sh), `read` on the codex
+#     binary's release folder under <Codex home>/packages/ (below), and `deny` globs on CLAUDE.md,
 #     CLAUDE.local.md, AGENTS.md, AGENTS.override.md, .claude/ and .codex/ anywhere in the
 #     project (Codex only accepts `deny` on globs: those are unreadable to commands too;
 #     Codex itself still loads AGENTS.md);
@@ -32,8 +33,9 @@
 #
 # Fail closed: before the session, `codex sandbox` runs a self-check with the same flags
 # (seatbelt active, a canary in the lean state unreadable and unwritable, the first secret file
-# found in the project, if any, unreadable, the session TMPDIR writable, Codex's network proxy in
-# place). Every proxy variable of the caller (any name
+# found in the project, if any, unreadable, the session TMPDIR writable, the codex binary
+# runnable by the resolved path the session starts it with (`--version`, a temp CODEX_HOME),
+# the Codex home unreadable, Codex's network proxy in place). Every proxy variable of the caller (any name
 # ending in "proxy", any case) and Codex's own sandbox/proxy markers are unset for the check
 # and the session, so a loopback HTTPS_PROXY inside can only come from Codex's proxy: an
 # inherited one (a local Proxyman/Charles/mitmproxy) can't pass the check with the network
@@ -80,6 +82,43 @@ fs=$(jq -c --arg p "$project" --arg pr "$project_real" --arg t "$session_tmp" '
    + [$p, $pr | ., "\(.)/**/CLAUDE.md", "\(.)/**/CLAUDE.local.md", "\(.)/**/AGENTS.md",
        "\(.)/**/AGENTS.override.md", "\(.)/**/.claude/**", "\(.)/**/.codex/**"
        | select(contains("/**/")) | {key: ., value: "deny"}]) | from_entries' <<<"$settings")
+# fs_mode <path> — the access the table gives <path>: its most specific non-glob entry (Codex's
+# rule), empty when none covers it (base :read-only).
+fs_mode() {
+  jq -r --arg p "$1" '[to_entries[] | .key as $k | select(($k | contains("*") | not)
+    and ($p == $k or ($p | startswith($k + "/"))))] | max_by(.key | length) | .value // ""' <<<"$fs"
+}
+# The codex binary, by its resolved path. Codex re-runs its own executable inside the profile
+# (codex-cli 0.167 loads AGENTS.md through that helper) by the path it was started with, and a
+# link through a denied folder (~/.local/bin/codex -> ~/.codex/packages/standalone/current/...)
+# can't be followed there: Codex resolves the profile's paths, so a `read` entry on a link
+# opens only its target, never the link itself. Its release folder (the binary's folder, or
+# the one holding its bin/: bundled tools such as rg) is opened read-only when it lies under
+# <Codex home>/packages/ and the table denies it; the Codex home itself (auth.json,
+# config.toml, sessions, logs) stays denied.
+codex_bin=$(command -v codex)
+codex_bin=$(realpath "$codex_bin" 2>/dev/null \
+  || python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$codex_bin" 2>/dev/null) \
+  && [ -f "$codex_bin" ] && [ -x "$codex_bin" ] \
+  || { echo "lean: can't resolve the codex binary on PATH ($(command -v codex))" >&2; exit 2; }
+codex_release=$(dirname "$codex_bin")
+[ "$(basename "$codex_release")" != bin ] || codex_release=$(dirname "$codex_release")
+codex_homes=("${CODEX_HOME:-$HOME/.codex}" "$HOME/.codex")
+open_release=""
+for h in "${codex_homes[@]}"; do
+  for hh in "$h" "$(cd "$h" 2>/dev/null && pwd -P)"; do
+    [ -n "$hh" ] && [ "$hh" != / ] || continue
+    case "$codex_release/" in "$hh"/packages/?*/) open_release=1 ;; esac
+  done
+done
+if [ -n "$open_release" ] && [ "$(fs_mode "$codex_release")" = deny ]; then
+  fs=$(jq -c --arg r "$codex_release" '. + {($r): "read"}' <<<"$fs")
+fi
+# The Codex home the self-check proves unreadable: the first one the table denies.
+codex_home_denied=""
+for h in "${codex_homes[@]}"; do
+  [ -d "$h" ] && [ "$(fs_mode "$h")" = deny ] && { codex_home_denied="$h"; break; }
+done
 settings=$(jq -c --argjson fs "$fs" --argjson d "$domains" '. + {codex_fs: $fs, codex_domains: ($d | map({key: ., value: "allow"}) | from_entries),
   codex_socks: (.sandbox.network.allowUnixSockets | map({key: ., value: "allow"}) | from_entries)}' <<<"$settings")
 net="{enabled=true,allow_local_binding=true,domains=$(toml .codex_domains),unix_sockets=$(toml .codex_socks)}"
@@ -111,7 +150,7 @@ for a in "${LEAN_ENV_ARGS[@]}"; do
   case "$a" in *=*) ! printf '%s\n' "${a%%=*}" | grep -qiE 'proxy$' || continue ;; esac
   env_args+=("$a")
 done
-cmd=(env ${unset_args[@]+"${unset_args[@]}"} "${env_args[@]}" TMPDIR="$session_tmp/" SSH_AUTH_SOCK= codex)
+cmd=(env ${unset_args[@]+"${unset_args[@]}"} "${env_args[@]}" TMPDIR="$session_tmp/" SSH_AUTH_SOCK= "$codex_bin")
 
 # Self-check: the same profile, applied by `codex sandbox` (no model).
 check='[ "${CODEX_SANDBOX:-}" = seatbelt ] || { echo "seatbelt is not active"; exit 1; }
@@ -119,6 +158,10 @@ if (echo x > "$1/written") 2>/dev/null; then echo "a write outside the project w
 if cat "$1/canary" >/dev/null 2>&1; then echo "the lean state is readable"; exit 1; fi
 if [ -n "$3" ] && cat "$3" >/dev/null 2>&1; then echo "a secret file in the project is readable: $3"; exit 1; fi
 ( : > "$2/lean-check" ) 2>/dev/null || { echo "the session TMPDIR is not writable"; exit 1; }
+mkdir -p "$2/codex-home" && CODEX_HOME="$2/codex-home" "$4" --version >/dev/null 2>&1 \
+  || { echo "the codex binary can not run inside the profile: $4 (add its folder to .harness.json::lean.allowed_read)"; exit 1; }
+rm -rf "$2/codex-home"
+if [ -n "$5" ] && ls "$5" >/dev/null 2>&1; then echo "the Codex home is readable: $5"; exit 1; fi
 [ "${CODEX_NETWORK_PROXY_ACTIVE:-}" = 1 ] || { echo "no network proxy (outbound network would be open)"; exit 1; }
 for v in "${HTTPS_PROXY:-}" "${HTTP_PROXY:-}"; do
   case "$v" in http://127.0.0.1:*) ;; *) echo "no network proxy (outbound network would be open)"; exit 1 ;; esac
@@ -127,7 +170,7 @@ echo LEAN-CODEX-SANDBOX-OK'
 # A secret file the profile must deny (lean/lib.sh lean_secret_files; a regular file).
 secret=""
 while IFS= read -r -d '' f; do [ -L "$f" ] || [ ! -f "$f" ] || { secret="$f"; break; }; done < <(lean_secret_files "$project")
-out=$(cd "$project" && "${cmd[@]}" sandbox "${common[@]}" -- /bin/sh -c "$check" sh "$canary" "$session_tmp" "$secret" 2>&1 < /dev/null) || true
+out=$(cd "$project" && "${cmd[@]}" sandbox "${common[@]}" -- /bin/sh -c "$check" sh "$canary" "$session_tmp" "$secret" "$codex_bin" "$codex_home_denied" 2>&1 < /dev/null) || true
 if [ "$(printf '%s\n' "$out" | tail -1)" != LEAN-CODEX-SANDBOX-OK ]; then
   echo "lean: the Codex sandbox could not be confirmed, refusing to start: $(printf '%s\n' "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)" >&2
   exit 3
