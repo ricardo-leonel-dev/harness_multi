@@ -9,6 +9,8 @@
 #   allowUnsandboxedCommands: false).
 # headless: `codex exec --json`, its events turned into one result JSON at <result_json>
 #   (usage, duration, is_error, num_turns: the shape claude -p writes, total_cost_usd null).
+#   No turn cap: `codex exec` has no --max-turns (checked against codex-cli 0.167.1), so
+#   LEAN_MAX_TURNS is ignored here; the chain's step minutes still apply.
 # check: only the sandbox self-check below, then exit 0 (nothing is sent to a model).
 #
 # The sandbox is a Codex permission profile built from lean/sandbox.sh's lists (verified with
@@ -148,7 +150,8 @@ common=(--enable network_proxy
   -c 'shell_environment_policy.set.GIT_OPTIONAL_LOCKS="0"'
   -c 'shell_environment_policy.set.RUSTC_WRAPPER=""'
   -c 'shell_environment_policy.set.CARGO_BUILD_RUSTC_WRAPPER=""'
-  -c 'shell_environment_policy.set.SSH_AUTH_SOCK=""')
+  -c 'shell_environment_policy.set.SSH_AUTH_SOCK=""'
+  -c 'shell_environment_policy.set.LEAN_SESSION="1"')
 
 lean_env_args "$project" '^(OPENAI_|CODEX_)' || exit 1
 # No proxy variable of the caller reaches Codex (lean_env_args keeps them, credentials
@@ -162,7 +165,9 @@ for a in "${LEAN_ENV_ARGS[@]}"; do
   case "$a" in *=*) ! printf '%s\n' "${a%%=*}" | grep -qiE 'proxy$' || continue ;; esac
   env_args+=("$a")
 done
-cmd=(env ${unset_args[@]+"${unset_args[@]}"} "${env_args[@]}" TMPDIR="$session_tmp/" SSH_AUTH_SOCK= "$codex_bin")
+# LEAN_SESSION=1 marks the session (lean/lib.sh lean_in_session; also set for the commands
+# through shell_environment_policy above); LEAN_GATE_UNSANDBOXED is already dropped (lean_env_args).
+cmd=(env ${unset_args[@]+"${unset_args[@]}"} "${env_args[@]}" TMPDIR="$session_tmp/" SSH_AUTH_SOCK= LEAN_SESSION=1 "$codex_bin")
 
 # Self-check: the same profile, applied by `codex sandbox` (no model).
 check='[ "${CODEX_SANDBOX:-}" = seatbelt ] || { echo "seatbelt is not active"; exit 1; }

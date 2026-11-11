@@ -3314,6 +3314,8 @@ cmd_test() {
       case "$LEAN_SANDBOX" in
         sandbox) ok "lean feature $lean_feature has an open session: the tests run under its sessions' sandbox rules"; runner=lean ;;
         unsandboxed:*) warn "lean feature $lean_feature has an open session, but the tests run UNSANDBOXED (${LEAN_SANDBOX#unsandboxed: }): code its sessions wrote runs with your full permissions"; runner=lean ;;
+        session:*) fail "lean feature $lean_feature has an open session, ${LEAN_SANDBOX#session: }"
+           return 1 ;;
         *) fail "lean feature $lean_feature has an open session and its sandbox can't run here (${LEAN_SANDBOX#broken: }): run outside any sandbox, or set LEAN_GATE_UNSANDBOXED=1"
            return 1 ;;
       esac

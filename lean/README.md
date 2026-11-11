@@ -14,6 +14,15 @@ Design and evidence: `progress/design_lean_flow.md`, `progress/explore_benchmark
 | normal | most features | `docs/features/<name>.md` | `lean.reviewer` (or its `normal` key) when set, else the implementer's model; fresh session, one pass, may fix once |
 | risk | concurrency, money, permissions, migrations | the document **and** frozen acceptance tests in `acceptance/<name>.test.*` | `lean.reviewer` (or its `risk` key), else `claude:claude-haiku-5-5`; another model than the implementer, report only, `VERDICT:` line |
 
+In both modes every session stays on the feature (`lean/instructions/agreement.md` "Boundaries",
+repeated in each step's prompt): no reads of `lean/`, `harness/`, the harness's own scripts
+(`scripts/harness.sh`, `lib.sh`, ...; the project's other scripts are fine), `init.sh`,
+`.harness.json`, `progress/`, `state/`, `~/.cache` or other features' work (the plan's **Files**
+and the code they touch are always fine), and no `./init.sh`,
+gate or full suite (the gate runs them after the session; inside one they refuse, see
+`SECURITY.md`); the feature's own tests and targeted checks only. The review is scoped to `git
+diff <base>`, the plan's **Files** and the plan (risk mode: plus the risk-question file).
+
 Measured (Opus plans, MiniMax implements): normal mode cost the least of every method tried (about 2
 window points per task) with the best probe scores; risk mode was the only method robust under
 concurrency in both runs, at 5–6 window points per task. Neither catches what the planner does not
@@ -47,7 +56,7 @@ think of.
    <step> --headless` (so each keeps its checks): normal: implement → review → gate; risk: freeze →
    implement → review → gate (verdict `changes` goes straight to fix). A failed gate, or a risk
    verdict `changes`, gets one fix and a last gate. It stops at the first failure (a step exiting
-   non-zero or past its cap, a result JSON missing or with `is_error`, a risk review without a
+   non-zero or past its cap, a session past `lean.max_turns`, a result JSON missing or with `is_error`, a risk review without a
    `VERDICT:` line or that changed files) and refuses to start when the plan awaits approval or a
    risk feature has no frozen manifest. Output: one line per step (duration, turns, cost), the
    final gate's headings (the full report and every step's log stay under `<lean state>/lean/`),
@@ -84,7 +93,7 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 - **What runs sandboxed.** Every session `run.sh` opens (`lean/sandbox.sh`), and the code those
   sessions leave when the harness runs it: the gate's suite, `run.sh freeze`, `./init.sh` and
   `scripts/harness.sh test` while a lean feature is open (`sandbox-exec` on macOS; elsewhere, or with
-  `LEAN_GATE_UNSANDBOXED=1`, unsandboxed with a `[WARN]`; a `sandbox-exec` that can't apply the
+  `LEAN_GATE_UNSANDBOXED=1` (ignored inside a lean session), unsandboxed with a `[WARN]`; a `sandbox-exec` that can't apply the
   profile fails the gate instead). A `claude-mini` started by hand, or a suite you start directly,
   is not.
 - **Reads.** `$HOME` is denied but for the project, toolchains and package caches,
@@ -135,6 +144,7 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 | `deny_ports` | `[]` | TCP ports (integers 1-65535) the gate's profile denies on every address besides `LEAN_DENY_PORTS` in `sandbox.sh` (the mirror's 54329 and 3001); an invalid entry fails the profile build |
 | `allowed_mach` | `[]` | mach service names the gate's commands may look up besides `LEAN_MACH_ALLOW` in `sandbox.sh` (`LEAN_MACH_NEVER` is refused: LaunchServices, Apple Events, the pasteboard, securityd, `cfprefsd.agent`, …); Chromium's own rendezvous service (`org.chromium.Chromium.MachPortRendezvousServer.<pid>`) is always allowed |
 | `step_minutes` | `30` | `run.sh chain`'s cap per step, in minutes (`--step-minutes` wins) |
+| `max_turns` | `{"implement": 120, "review": 40, "fix": 60}` | turn cap of a headless claude / claude-mini session per step (`claude -p --max-turns`), each key optional, an integer from 1 to 10000; anything else stops every step with exit 2 before a session opens. Reached: the step fails (`chain`: `max turns (<n>) reached`), its usage row is still recorded (note `max_turns`). Codex has no such flag (`codex exec`, 0.167.1): only `step_minutes` caps it. Interactive sessions: no cap |
 | `env_passthrough` | `[]` | secret-looking environment variables (`DATABASE_URL`, `NPM_TOKEN`, …) the sessions and the gate's commands keep |
 
 Frontends tested with Karma (or another headless-browser runner): Google Chrome can't start in the

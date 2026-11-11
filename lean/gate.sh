@@ -33,8 +33,9 @@
 # The suite and the acceptance tests are code the sessions wrote: they run under the
 # sessions' sandbox rules (lean/lib.sh lean_sandboxed: sandbox-exec on macOS). Where that is not available (no sandbox-exec, or
 # LEAN_GATE_UNSANDBOXED=1) they run unsandboxed and the report says so with a [WARN] line;
-# when sandbox-exec is there but can't apply the profile (already inside a sandbox) the gate
-# fails instead. sandbox.sh's [WARN] lines (lean.allowed_domains opening the network) are
+# when sandbox-exec is there but can't apply the profile (already inside a sandbox), or the gate
+# runs inside a lean session (lean/lib.sh lean_in_session; LEAN_GATE_UNSANDBOXED is ignored
+# there), the gate fails instead. sandbox.sh's [WARN] lines (lean.allowed_domains opening the network) are
 # part of the report, so run.sh gate and log-out --lean show them. The commands run in a new
 # session without a terminal, stdin or inherited descriptors, their process group killed when
 # they end (with a [WARN] in the report when something was still running), without
@@ -123,6 +124,7 @@ lean_sandbox_prepare "$project"; sandbox="$LEAN_SANDBOX"
 [ -z "$LEAN_SANDBOX_WARN" ] || printf '%s\n' "$LEAN_SANDBOX_WARN"   # e.g. allowed_domains opens the network
 case "$sandbox" in
   unsandboxed:*) echo "[WARN] the suite and the acceptance tests run UNSANDBOXED (${sandbox#unsandboxed: }): code the sessions wrote runs with your full permissions" ;;
+  session:*) fail=1; echo "SANDBOX UNAVAILABLE: ${sandbox#session: } — the suite did not run"; sandbox="broken: lean session" ;;
   broken:*) fail=1; echo "SANDBOX UNAVAILABLE: ${sandbox#broken: } — the suite did not run (run the gate outside any sandbox, or set LEAN_GATE_UNSANDBOXED=1 to run it unsandboxed)" ;;
 esac
 # run_suite <command> — the command under the sessions' sandbox rules (or as the line above says).
