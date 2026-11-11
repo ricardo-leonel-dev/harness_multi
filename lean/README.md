@@ -11,8 +11,8 @@ Design and evidence: `progress/design_lean_flow.md`, `progress/explore_benchmark
 
 | Mode | Use it for | What the planner writes | Review |
 | --- | --- | --- | --- |
-| normal | most features | `docs/features/<name>.md` | `lean.reviewer`'s model when set, else the implementer's; fresh session, one pass, may fix once |
-| risk | concurrency, money, permissions, migrations | the document **and** frozen acceptance tests in `acceptance/<name>.test.*` | another model, report only, `VERDICT:` line |
+| normal | most features | `docs/features/<name>.md` | `lean.reviewer` (or its `normal` key) when set, else the implementer's model; fresh session, one pass, may fix once |
+| risk | concurrency, money, permissions, migrations | the document **and** frozen acceptance tests in `acceptance/<name>.test.*` | `lean.reviewer` (or its `risk` key), else `claude:claude-haiku-5-5`; another model than the implementer, report only, `VERDICT:` line |
 
 Measured (Opus plans, MiniMax implements): normal mode cost the least of every method tried (about 2
 window points per task) with the best probe scores; risk mode was the only method robust under
@@ -116,7 +116,7 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `implementer` | `claude-mini` | tool for implement and fix, and for the normal review when `reviewer` is not set |
-| `reviewer` | `claude:claude-haiku-5-5` (risk only) | tool for the review (any tool: `claude[:<model>]`, `claude-mini`, `codex[:<model>]`). Risk mode: report only, must differ from the implementer. Normal mode: used only when set (no default; unset, the implementer reviews), same review as the implementer's (one pass, may fix once), may equal the implementer |
+| `reviewer` | `claude:claude-haiku-5-5` (risk only) | tool for the review (any tool: `claude[:<model>]`, `claude-mini`, `codex[:<model>]`). Risk mode: report only, must differ from the implementer. Normal mode: used only when set (no default; unset, the implementer reviews), same review as the implementer's (one pass, may fix once), may equal the implementer. A string serves both modes; an object picks one per mode, each key optional (a missing or empty key takes that mode's fallback): `"reviewer": {"normal": "codex:gpt-5.1", "risk": "claude:claude-haiku-5-5"}`. Any other value (number, boolean, array, an object with other keys or non-string values) stops every step with exit 2 |
 | `risk_questions` | `backend` | list in `lean/risk-questions/`; a project's own `docs/risk-questions.md` wins |
 | `acceptance_dir` | `acceptance` | where risk-mode acceptance tests live (outside `src/` and `tests/`, so the planner may write them) |
 | `allowed_domains` | `[]` | hosts the sandboxed sessions may reach besides localhost |
