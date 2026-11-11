@@ -71,7 +71,7 @@ think of.
    `<lean state>/lean/<name>/usage.tsv`: step, mode, tool, model, turns, input / cache-read /
    cache-write / output tokens, wall time, cost. `run.sh` measures the wall time; the rest comes
    from the session's result JSON: claude's `modelUsage` (model names, tokens) and
-   `total_cost_usd`; Codex's token counts, with the configured model name (its cached
+   `total_cost_usd`; Codex's token counts, with the model Codex reports, else the configured one (its cached
    tokens are taken out of input, so input is uncached input for every tool; Codex reports no
    cost). Cost only as the CLI reports it, never from a price table; left out for `claude-mini`
    (Claude Code's estimate at Anthropic prices, not MiniMax's bill). An interactive session gets
@@ -94,7 +94,7 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
   sessions leave when the harness runs it: the gate's suite, `run.sh freeze`, `./init.sh` and
   `scripts/harness.sh test` while a lean feature is open (`sandbox-exec` on macOS; elsewhere, or with
   `LEAN_GATE_UNSANDBOXED=1` (ignored inside a lean session), unsandboxed with a `[WARN]`; a `sandbox-exec` that can't apply the
-  profile fails the gate instead). A `claude-mini` started by hand, or a suite you start directly,
+  profile fails the gate instead). A `claude-mini` or `codex-m3` started by hand, or a suite you start directly,
   is not.
 - **Reads.** `$HOME` is denied but for the project, toolchains and package caches,
   `lean.allowed_read`, the git directories and the targets of top-level links git tracks or ignores
@@ -136,7 +136,7 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `implementer` | `claude-mini` | tool for implement and fix, and for the normal review when `reviewer` is not set |
-| `reviewer` | `claude:claude-haiku-5-5` (risk only) | tool for the review (any tool: `claude[:<model>]`, `claude-mini`, `codex[:<model>]`). Risk mode: report only, must differ from the implementer. Normal mode: used only when set (no default; unset, the implementer reviews), same review as the implementer's (one pass, may fix once), may equal the implementer. A string serves both modes; an object picks one per mode, each key optional (a missing or empty key takes that mode's fallback): `"reviewer": {"normal": "codex:gpt-5.1", "risk": "claude:claude-haiku-5-5"}`. Any other value (number, boolean, array, an object with other keys or non-string values) stops every step with exit 2 |
+| `reviewer` | `claude:claude-haiku-5-5` (risk only) | tool for the review (any tool: `claude[:<model>]`, `claude-mini`, `codex[:<model>]`, `codex-m3`). Risk mode: report only, must be another model than the implementer (`claude-mini` and `codex-m3` are both MiniMax: one can't review the other). Normal mode: used only when set (no default; unset, the implementer reviews), same review as the implementer's (one pass, may fix once), may equal the implementer. A string serves both modes; an object picks one per mode, each key optional (a missing or empty key takes that mode's fallback): `"reviewer": {"normal": "codex:gpt-5.1", "risk": "claude:claude-haiku-5-5"}`. Any other value (number, boolean, array, an object with other keys or non-string values) stops every step with exit 2 |
 | `risk_questions` | `backend` | list in `lean/risk-questions/`; a project's own `docs/risk-questions.md` wins |
 | `acceptance_dir` | `acceptance` | where risk-mode acceptance tests live (outside `src/` and `tests/`, so the planner may write them) |
 | `allowed_domains` | `[]` | hosts the sandboxed sessions may reach besides localhost |
@@ -159,7 +159,11 @@ register its rendezvous service (the gate runs the browser unwrapped).
 Tools: `claude[:<model>]`, `claude-mini` (the user's fish function, which holds the MiniMax
 credentials), `codex[:<model>]` (Codex CLI, `lean/adapters/codex.sh`: interactive `codex`, headless
 `codex exec --json`, whose events become the same result JSON with tokens, duration and
-`is_error`; Codex reports no cost). The Codex sessions run in a Codex permission profile built from
+`is_error`; Codex reports no cost), `codex-m3` (the same Codex session on MiniMax,
+`lean/adapters/codex-m3.sh`: what the user's `codex-m3` fish function does, `--profile minimax`,
+passed to the resolved codex binary rather than through fish, so every protection below stays;
+`LEAN_CODEX_M3_PROFILE` names another profile; the model comes from the profile, its usage rows
+say `codex-m3` and the model Codex reports, else `minimax`, no cost). The Codex sessions run in a Codex permission profile built from
 the same lists as the Claude sandbox (reads denied, writes only in the project and a fresh
 `TMPDIR`, network through Codex's proxy: localhost and `lean.allowed_domains`); the adapter first
 confirms it with `codex sandbox` and refuses to start when it can't (macOS only). Differences from

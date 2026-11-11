@@ -384,8 +384,9 @@ lean_repo_changes() {
 # (implement, review, fix; headless or interactive, chained or by hand). Columns:
 #   at feature step mode tool model turns input cache_read cache_write output seconds cost_usd note
 # From the result JSON the adapter wrote (claude -p's, or codex.sh's in the same shape):
-# model = the keys of claude's modelUsage, most output first (else the configured model,
-# "default" when none), turns = num_turns (Codex: completed items), tokens summed over modelUsage when present (it
+# model = the keys of claude's modelUsage, most output first (else the model codex.sh's JSON
+# reports, else the configured model, "default" when none; codex-m3: "minimax"),
+# turns = num_turns (Codex: completed items), tokens summed over modelUsage when present (it
 # counts subagents too), else from usage. input is the uncached input for every tool: Codex
 # reports the cached tokens inside input_tokens, so they are subtracted. cost_usd only as the
 # CLI reports it (total_cost_usd); "-" for Codex (none) and claude-mini (Claude Code's estimate
@@ -403,20 +404,21 @@ lean_usage_record() {
   local file tool="$5" model="$6" res="$8" parsed="" jmodel="" turns="" in="" cr="" cw="" out="" cost="" note=""
   file=$(lean_usage_file "$1" "$2") || return 0
   mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
-  [ "$model" != - ] || model=default
+  if [ "$model" = - ]; then model=default; [ "$tool" != codex-m3 ] || model=minimax; fi
   if [ "$res" = - ]; then
     turns=- in=- cr=- cw=- out=- cost=- note="interactive (not measured)"
   else
     parsed=$(jq -r 'def num: if type == "number" then (floor | tostring) else "?" end;
       select(type == "object")
+      | (.model | if type == "string" then gsub("[\t\n]"; " ") else "" end) as $rm
       | (.modelUsage | if type == "object" and length > 0 then . else null end) as $mu
       | (if $mu then {in: ([$mu[] | .inputTokens // 0] | add), cr: ([$mu[] | .cacheReadInputTokens // 0] | add),
                       cw: ([$mu[] | .cacheCreationInputTokens // 0] | add), out: ([$mu[] | .outputTokens // 0] | add),
                       m: ($mu | to_entries | sort_by(-(.value.outputTokens // 0)) | map(.key) | join("+"))}
          else (.usage | if type == "object" then . else {} end) as $u
            | {in: $u.input_tokens, cr: $u.cache_read_input_tokens, cw: $u.cache_creation_input_tokens,
-              out: $u.output_tokens, m: ""} end) as $t
-      | (if .tool == "codex" and ($t.in | type) == "number" and ($t.cr | type) == "number"
+              out: $u.output_tokens, m: $rm} end) as $t
+      | (if (.tool == "codex" or .tool == "codex-m3") and ($t.in | type) == "number" and ($t.cr | type) == "number"
          then ([$t.in - $t.cr, 0] | max) else $t.in end) as $in
       | [($t.m | if . == "" then "-" else gsub("[\t\n]"; " ") end), (.num_turns | num), ($in | num), ($t.cr | num),
          ($t.cw | num), ($t.out | num), (.total_cost_usd | if type == "number" then tostring else "-" end),

@@ -25,7 +25,7 @@ model; see "Hardening further" at the end.
   feature has an open session (`lean/lib.sh` `lean_sandboxed`, a `sandbox-exec` profile built by
   `sandbox.sh --seatbelt` from the same rules).
 
-Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (`npm test`,
+Not sandboxed: a `claude-mini` or `codex-m3` started by hand, and a suite you start directly (`npm test`,
 `cargo test`, an IDE runner) while a lean feature is open.
 
 ## What it protects, and how
@@ -224,6 +224,20 @@ network_proxy` and pinned approval settings, and never with `--dangerously-bypas
   a closed port): it must succeed and carry no `AGENTS.md instructions`, or the session is
   refused (exit 3). A Codex update that can't open a session with the profile fails there, not
   after the model call starts.
+
+- **`codex-m3`** (`lean/adapters/codex-m3.sh`): the same adapter, the same flags and checks,
+  plus `--profile ${LEAN_CODEX_M3_PROFILE:-minimax}` on the session and on the `codex sandbox`
+  check (Codex layers `<Codex home>/minimax.config.toml`, which holds the MiniMax provider and key,
+  over the user config; the `-c` flags above are session flags, layered above it, so the profile
+  can't loosen them, and the check proves the layered result). Settings the adapter doesn't pin
+  (MCP servers, `notify`, hooks) still come from the profile, the same exposure the user's base
+  `config.toml` already has. Not through the user's `codex-m3`
+  fish function: `fish -c` loads the user's fish config, whose exported variables would come back
+  after the environment dropping, and starts codex by its `PATH` name, a link into the denied
+  Codex home rather than the resolved binary the check proves. The prompt probe runs without the
+  profile (a temp `CODEX_HOME` has no profile file; it only checks that no `AGENTS.md` loads). The
+  key stays in the Codex home, which commands can't read; nothing MiniMax-related passes through
+  the environment.
 
 Gaps compared with the Claude sessions:
 

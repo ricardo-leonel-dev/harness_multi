@@ -28,7 +28,8 @@
 # (default "acceptance"), allowed_domains (default none), max_turns ({"implement","review","fix"}:
 # a headless claude session's turn cap, default 120 / 40 / 60; anything but positive integers
 # exits 2). A tool is "claude[:<model>]",
-# "claude-mini" or "codex[:<model>]" (lean/adapters/<tool>.sh).
+# "claude-mini", "codex[:<model>]" or "codex-m3" (lean/adapters/<tool>.sh). claude-mini and
+# codex-m3 both run MiniMax: in risk mode they count as the same model.
 set -euo pipefail
 
 LEAN_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -197,6 +198,7 @@ open_session() {
     claude:*) adapter=claude; model="${tool#claude:}" ;;
     claude-mini) adapter=claude-mini; model=- ;;
     codex) adapter=codex; model=- ;;
+    codex-m3) adapter=codex-m3; model=- ;;
     codex:?*) adapter=codex; model="${tool#codex:}" ;;
     *) echo "unknown tool: $tool" >&2; exit 2 ;;
   esac
@@ -245,6 +247,10 @@ run_gate() {
   [ "$risk" = 1 ] && args+=(--frozen "$frozen")
   "$LEAN_DIR/gate.sh" "$project" "$name" "${args[@]}"
 }
+
+# model_of <tool> — what the risk-mode rule compares: the MiniMax tools (claude-mini, codex-m3) are
+# one model whatever runs them; any other tool is itself.
+model_of() { case "$1" in claude-mini|codex-m3) echo minimax ;; *) echo "$1" ;; esac; }
 
 # tree_fingerprint — hash of every tracked and untracked (not ignored) file but the review
 # file: tells whether the risk-mode reviewer changed anything.
@@ -307,7 +313,10 @@ $report"
       [ "$headless" = 1 ] && prompt+=$'\n\n'"$no_human"
       open_session "$reviewer_normal" "$prompt"
     else
-      [ "$reviewer" != "$implementer" ] || { echo "risk mode: the reviewer must be another model than the implementer ($reviewer)" >&2; exit 2; }
+      if [ "$(model_of "$reviewer")" = "$(model_of "$implementer")" ]; then
+        same="$reviewer"; [ "$reviewer" = "$implementer" ] || same="$reviewer and $implementer both run MiniMax"
+        echo "risk mode: the reviewer must be another model than the implementer ($same)" >&2; exit 2
+      fi
       before=$(tree_fingerprint)
       prompt="Review the uncommitted changes for the feature documented in $doc, as the risk-mode rules in your instructions describe (\"Reviewing (risk mode)\"): report only, in $review_file, ending with the VERDICT line. $scope Results of the automatic checks:
 
