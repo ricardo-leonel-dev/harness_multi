@@ -15,7 +15,9 @@
 # `scripts/harness.sh log-out --lean` itself (its own gate run is the suite run it needs).
 #
 # Output: one line per step (result, duration, turns and cost from the result JSON), the final
-# gate's headings only, where the full logs are, `git status --short`, on PASS with
+# gate's headings only, where the full logs are, `git status --short`, the feature's usage
+# table (the sessions this chain opened, a sum over them, and how many earlier ones
+# `run.sh usage <name>` shows: lean/lib.sh lean_usage_table), on PASS with
 # scripts/harness.sh present a `next:` line holding the log-out --lean command to run (its
 # --changes: the files the gate checked, lean/lib.sh lean_repo_changes, relative to the
 # project, quoted for the shell, progress/ and state/ left out; only --closure to fill in),
@@ -99,7 +101,8 @@ lean_chain_mode() {
 
 lean_chain() {
   local mode="" secs mins logs gate_log="" fixed=0 n=0 total=0 cost_total="" verdict="" last_rc=0
-  local fail_step="" fail_reason="" ran=""
+  local fail_step="" fail_reason="" ran="" usage_before
+  usage_before=$(lean_usage_count "$project" "$name" 2>/dev/null || echo 0)
   local -a lines=()
   mins="${step_minutes:-$(jq -r '.lean.step_minutes // 30' .harness.json 2>/dev/null || echo 30)}"
   [[ "$mins" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "--step-minutes / lean.step_minutes must be a number of minutes: $mins" >&2; return 2; }
@@ -198,6 +201,7 @@ lean_chain() {
   [ "$n" = 0 ] || echo "logs: $logs (result JSON paths in each step's log)"
   echo "git status:"
   { git status --short 2>/dev/null || true; } | awk 'NR <= 30 { print "  " $0 } END { if (NR > 30) printf "  ... (%d more)\n", NR - 30 }'
+  [ "$n" = 0 ] || lean_usage_table "$project" "$name" "$usage_before" 2>/dev/null || true
   if [ -z "$fail_step" ]; then
     note "PASS"
     [ ! -f scripts/harness.sh ] || lean_chain_close_line "$ran"

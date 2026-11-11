@@ -386,6 +386,10 @@ reset
 has exec gpt-impl && has exec -m || die "codex:<model> passes -m <model>: $(argv_of exec | head -5)"
 res=$(sed -n 's/^\[lean\] result: //p' "$WORK/out")
 jq -e '.tool == "codex" and .is_error == false' "$res" >/dev/null || die "run.sh result: $res"
+# The usage row from codex.sh's result JSON (canned events: input 1200 of which 500 cached).
+urow=$(tail -1 "$(bash -c '. "$1/lean/lib.sh"; lean_usage_file "$2" f' _ "$TOOLKIT_DIR" "$P")" | cut -f3-)
+case "$urow" in "$(printf 'implement\tnormal\tcodex\tgpt-impl\t3\t700\t500\t3\t70\t')"[0-9]*"$(printf '\t-\t')") ;;
+  *) die "usage row from codex.sh's result: $urow" ;; esac
 grep -q 'Implement the feature documented in docs/features/f.md' "$(ls "$CALLS"/*.exec.argv)" || die "the step prompt reaches codex"
 pass "run.sh: implementer codex:<model> -> codex.sh headless with -m"
 
