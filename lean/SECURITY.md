@@ -144,8 +144,9 @@ Not sandboxed: a `claude-mini` started by hand, and a suite you start directly (
 
 ## Codex sessions
 
-`lean/adapters/codex.sh` (checked against codex-cli 0.166.0 on macOS; probes and results in the
-toolkit's `progress/design_lean_flow.md` §10) runs Codex with a permission profile, `--enable
+`lean/adapters/codex.sh` (checked against codex-cli 0.166.0 and 0.167.1 on macOS; 0.166 probes in the
+toolkit's `progress/design_lean_flow.md` §10; 0.167.1 reproduced locally with `codex debug
+prompt-input`, no model call) runs Codex with a permission profile, `--enable
 network_proxy` and pinned approval settings, and never with `--dangerously-bypass-*`,
 `--approve-for-me` or a `danger-full-access` mode:
 
@@ -162,7 +163,15 @@ network_proxy` and pinned approval settings, and never with `--dangerously-bypas
   stricter than the Claude sessions). sandbox.sh's `denyWrite` list (harness-owned files, the git
   state) is `read`. `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`, `.claude/`
   and `.codex/` anywhere in the project are `deny` globs: Codex accepts only `deny` on a glob, so
-  commands can't read them either (Codex loads `AGENTS.md` itself).
+  commands can't read them either.
+- **Instructions**: the session's only instructions are the lean system prompt
+  (`developer_instructions`). Codex loads no project `AGENTS.md` / `AGENTS.override.md`
+  (`project_doc_max_bytes = 0`, `project_doc_fallback_filenames = []`): a lean session must not
+  get the harness's orchestrator instructions, and codex-cli 0.167 reads the project docs through
+  its sandboxed helper, so with the deny globs above the session failed to start ("failed to load
+  AGENTS.md instructions for environment `local`: Operation not permitted"). The user's global
+  `<Codex home>/AGENTS.md` is still loaded (Codex reads it outside the profile; 0.167 has no
+  switch for it, and the adapter can't swap `CODEX_HOME` without losing the user's login).
 - **Network**: Codex's own proxy (the experimental `network_proxy` feature): allowed hosts are
   `lean.allowed_domains`, direct outbound connections are blocked, localhost is open
   (`allow_local_binding`). Unix sockets: the project and sandbox.sh's local database sockets.
@@ -187,7 +196,11 @@ network_proxy` and pinned approval settings, and never with `--dangerously-bypas
   and not checked: keep it in `~/.codex` or under `$HOME`),
   Codex's proxy in place: `CODEX_NETWORK_PROXY_ACTIVE=1` and `HTTP(S)_PROXY` on `127.0.0.1`, which
   only Codex can supply since the caller's are unset); a failure, a nested sandbox, or a flag or key the installed Codex doesn't know
-  refuses the session (exit 3).
+  refuses the session (exit 3). Then `codex debug prompt-input` builds the session's prompt with
+  the same flags from the project, locally (no model; a temp `CODEX_HOME`, no API key, proxies to
+  a closed port): it must succeed and carry no `AGENTS.md instructions`, or the session is
+  refused (exit 3). A Codex update that can't open a session with the profile fails there, not
+  after the model call starts.
 
 Gaps compared with the Claude sessions:
 
