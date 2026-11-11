@@ -14,6 +14,10 @@
 #      proxy, a caller's own loopback proxy standing in for Codex's, a write or read of the
 #      lean state that goes through) refuses before any session (exit 3); the caller's proxy
 #      variables never reach codex.
+#   3b. codex installed behind a symlink chain into a fake ~/.codex/packages/...: its release
+#      folder is `read`, ~/.codex (auth.json, config.toml) stays denied, the session starts the
+#      resolved binary, the check runs it with a temp CODEX_HOME; a binary directly in the
+#      Codex home (no packages/ release folder) can't run inside the profile -> exit 3.
 #   4. environment: secret-looking variables dropped, lean.env_passthrough kept, OPENAI_*
 #      kept for Codex but excluded from the commands.
 #   5. run.sh: `codex` / `codex:<model>` for implementer and reviewer; risk mode still refuses
@@ -25,7 +29,7 @@
 
 set -u
 TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="$(mktemp -d)"
+WORK="$(cd "$(mktemp -d)" && pwd -P)"   # resolved: the adapter starts codex by its resolved path
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 PASS=0
@@ -46,32 +50,50 @@ A="$TOOLKIT_DIR/lean/adapters/codex.sh"
 # HTTP(S)_PROXY on loopback and CODEX_NETWORK_PROXY_ACTIVE=1; without it the caller's
 # environment passes through unchanged, as the real codex does), unless STUB_SANDBOX says
 # otherwise: fail (exit 71 like sandbox-exec), noseatbelt, noproxy (the proxy feature not
-# taking effect), open (canary left writable), readable (canary readable, not writable). exec: prints $STUB_EVENTS (default: canned events), writes the -o file, runs
+# taking effect), open (canary left writable), readable (canary readable, not writable), noexec
+# (the codex binary can't run inside the profile). Like the real profile, it applies the
+# filesystem table to the codex binary and the Codex home the check names: when the most
+# specific non-glob entry covering them is `deny`, the binary can't run and the home can't be
+# listed (a stand-in folder: the real home must stay traversable for the binary). --version: records CODEX_HOME in $CALLS/version.codex_home, nothing else. exec:
+# prints $STUB_EVENTS (default: canned events), writes the -o file, runs
 # $STUB_EXEC_SCRIPT in the current dir, exits $STUB_EXEC_RC. Otherwise (interactive): exit 0.
+# Every recorded call also keeps the path it was started by ($0) in $CALLS/<n>.<kind>.self.
 cat > "$WORK/bin/codex" <<'SH'
 #!/usr/bin/env bash
 mkdir -p "$CALLS"
+[ "${1:-}" != --version ] || { printf '%s\n' "${CODEX_HOME:-}" > "$CALLS/version.codex_home"; echo "codex-cli 0.0.0-stub"; exit 0; }
 n=$(ls "$CALLS" | grep -c '\.argv$')
 kind=interactive
 case "${1:-}" in sandbox) kind=sandbox ;; exec) kind=exec ;; esac
 printf '%s\0' "$@" > "$CALLS/$n.$kind.argv"
 env -0 > "$CALLS/$n.$kind.env"
+printf '%s' "$0" > "$CALLS/$n.$kind.self"
 case "$kind" in
   sandbox)
     [ "${STUB_SANDBOX:-}" != fail ] || { echo "sandbox-exec: sandbox_apply: Operation not permitted" >&2; exit 71; }
-    proxy=()
+    proxy=() table='{}'
     while [ $# -gt 0 ] && [ "$1" != -- ]; do
+      case "$1" in permissions.lean.filesystem=*) table=$(printf '%s' "${1#*=}" | sed 's/"="/":"/g') ;; esac
       [ "$1 ${2:-}" != "--enable network_proxy" ] || [ "${STUB_SANDBOX:-}" = noproxy ] \
         || proxy=(HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 CODEX_NETWORK_PROXY_ACTIVE=1)
       shift
     done; shift
-    # "$@" = /bin/sh -c <script> sh <canary> <session tmp>
-    canary="$5"
+    # "$@" = /bin/sh -c <script> sh <canary> <session tmp> <secret> <codex binary> <Codex home>
+    canary="$5" home="${9:-}"
+    denied() {
+      [ "$(jq -r --arg p "$1" '[to_entries[] | .key as $k | select(($k | contains("*") | not)
+        and ($p == $k or ($p | startswith($k + "/"))))] | max_by(.key | length) | .value // ""' <<<"$table")" = deny ]
+    }
+    args=("$@")
+    noexec=""
+    if [ "${STUB_SANDBOX:-}" = noexec ] || denied "$8"; then noexec="$8"; chmod a-x "$noexec"; fi
+    if [ -n "$home" ] && denied "$home"; then args[8]="$CALLS/denied-home"; mkdir -p "${args[8]}"; chmod 000 "${args[8]}"; fi
     case "${STUB_SANDBOX:-}" in open) ;; readable) chmod 555 "$canary" ;; *) chmod 000 "$canary" ;; esac
     seat=seatbelt
     [ "${STUB_SANDBOX:-}" != noseatbelt ] || seat=""
-    rc=0; env CODEX_SANDBOX="$seat" ${proxy[@]+"${proxy[@]}"} "$@" || rc=$?
-    chmod 700 "$canary"
+    rc=0; env CODEX_SANDBOX="$seat" ${proxy[@]+"${proxy[@]}"} "${args[@]}" || rc=$?
+    [ -z "$noexec" ] || chmod u+x "$noexec"
+    chmod 700 "$canary"; [ ! -d "$CALLS/denied-home" ] || chmod 700 "$CALLS/denied-home"
     exit "$rc" ;;
   exec)
     out=""; prev=""
@@ -207,7 +229,7 @@ jq -e '.is_error == true and .num_turns == 0' "$WORK/r4.json" >/dev/null || die 
 pass "headless: turn.failed, a non-zero exit or no completed turn is is_error"
 
 echo "3. fail closed"
-for mode in fail noseatbelt noproxy open readable; do
+for mode in fail noseatbelt noproxy open readable noexec; do
   for m in interactive headless; do
     reset; export STUB_SANDBOX=$mode
     rc=0; "$A" "$P" "$m" - "$WORK/system.md" "x" "$WORK/f.json" > "$WORK/out" 2>&1 || rc=$?
@@ -216,6 +238,8 @@ for mode in fail noseatbelt noproxy open readable; do
     [ "$(n_calls interactive)" = 0 ] && [ "$(n_calls exec)" = 0 ] || die "$mode/$m: no session may start"
   done
 done
+reset; export STUB_SANDBOX=noexec
+"$A" "$P" headless - "$WORK/system.md" x "$WORK/f.json" 2>&1 | grep -q 'the codex binary can not run inside the profile' || die "noexec: the reason is named"
 reset; export STUB_SANDBOX=noproxy
 "$A" "$P" headless - "$WORK/system.md" x "$WORK/f.json" 2>&1 | grep -q 'no network proxy' || die "the reason is named"
 # The caller's own loopback proxy (Proxyman, mitmproxy, ...) must not stand in for Codex's:
@@ -242,7 +266,46 @@ done
 reset
 "$A" "$P" check - "$WORK/system.md" - > "$WORK/out" 2>&1 || die "check mode: $(cat "$WORK/out")"
 grep -q 'Codex sandbox confirmed' "$WORK/out" && [ "$(n_calls interactive)" = 0 ] && [ "$(n_calls exec)" = 0 ] || die "check runs no session"
-pass "fail closed: sandbox can't apply, no seatbelt, no proxy (also with the caller's own loopback proxy), an outside write or read going through -> exit 3, no session"
+pass "fail closed: sandbox can't apply, no seatbelt, codex binary not runnable, no proxy (also with the caller's own loopback proxy), an outside write or read going through -> exit 3, no session"
+
+echo "3b. codex behind a symlink chain under ~/.codex"
+REL="$HOME/.codex/packages/standalone/releases/9.9.9-test"
+mkdir -p "$REL/bin" "$REL/codex-path" "$HOME/.local/bin" "$HOME/.codex/sessions"
+cp "$WORK/bin/codex" "$REL/bin/codex"
+ln -s releases/9.9.9-test "$HOME/.codex/packages/standalone/current"
+ln -s "$HOME/.codex/packages/standalone/current/bin/codex" "$HOME/.local/bin/codex"
+echo '{"token":"fake"}' > "$HOME/.codex/auth.json"; echo 'model = "x"' > "$HOME/.codex/config.toml"
+reset
+PATH="$HOME/.local/bin:$PATH" "$A" "$P" interactive - "$WORK/system.md" x > "$WORK/out" 2>&1 || die "codex behind links: $(cat "$WORK/out")"
+fs=$(fs_table interactive)
+for kv in "\"$REL\"=\"read\"" "\"$HOME/.codex\"=\"deny\""; do
+  case "$fs" in *"$kv"*) ;; *) die "filesystem table lacks $kv: $fs" ;; esac
+done
+# Nothing readable or writable covers auth.json or config.toml: only the release folder opens.
+opened=$(printf '%s' "$fs" | sed 's/"="/":"/g' | jq -r --arg h "$HOME/.codex" \
+  'to_entries[] | select(.value != "deny") | .key as $k | select($k == $h or ($h | startswith($k + "/")) or ($k | startswith($h + "/"))) | $k')
+[ "$opened" = "$REL" ] || die "only the release folder may open under ~/.codex: $opened"
+[ "$(cat "$(ls "$CALLS"/*.interactive.self)")" = "$REL/bin/codex" ] || die "the session starts the resolved binary: $(cat "$CALLS"/*.interactive.self)"
+case "$(cat "$CALLS/version.codex_home" 2>/dev/null)" in */lean-session.*/codex-home) ;;
+  *) die "the check runs codex --version with a temp CODEX_HOME: $(cat "$CALLS/version.codex_home" 2>/dev/null)" ;; esac
+grep -q 'denied-home' "$(ls "$CALLS"/*.sandbox.argv)" 2>/dev/null && die "test setup: the stub records argv before the stand-in"
+[ -d "$CALLS/denied-home" ] || die "the check must be handed the denied Codex home to prove it unreadable"
+pass "codex behind links: release folder read, ~/.codex denied, resolved binary started, --version with a temp CODEX_HOME"
+# A binary directly in the Codex home: no release folder under packages/ to open, so it can't
+# run inside the profile and the check refuses (the home itself is never opened).
+mkdir -p "$HOME/.codex/bin" "$WORK/bin-home"
+cp "$WORK/bin/codex" "$HOME/.codex/bin/codex"
+ln -s "$HOME/.codex/bin/codex" "$WORK/bin-home/codex"
+for m in interactive headless; do
+  reset; rc=0
+  PATH="$WORK/bin-home:$PATH" "$A" "$P" "$m" - "$WORK/system.md" x "$WORK/f.json" > "$WORK/out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] && grep -q "the codex binary can not run inside the profile: $HOME/.codex/bin/codex" "$WORK/out" \
+    || die "binary in the Codex home/$m: expected exit 3, got $rc: $(cat "$WORK/out")"
+  [ "$(n_calls interactive)" = 0 ] && [ "$(n_calls exec)" = 0 ] || die "binary in the Codex home/$m: no session may start"
+  fs_table sandbox | grep -q "\"$HOME/.codex[^\"]*\"=\"\(read\|write\)\"" && die "binary in the Codex home/$m: nothing under ~/.codex opens"
+done
+rm -rf "$HOME/.codex" "$HOME/.local" "$WORK/bin-home"
+pass "fail closed: a codex binary the profile can't run (in the Codex home itself) -> exit 3, ~/.codex never opened"
 
 echo "4. environment"
 reset

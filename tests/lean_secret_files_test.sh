@@ -182,7 +182,7 @@ A="$TOOLKIT_DIR/lean/adapters/codex.sh"
 out=$(cd "$P" && PATH="$WORK/bin:$PATH" bash "$A" "$P" check - /dev/null - 2>&1) || die "codex check: $out"
 f=$(ls "$CALLS"/*.sandbox.argv | tail -1)
 fs=$(tr '\0' '\n' < "$f" | sed -n 's/^permissions\.lean\.filesystem=//p')
-probed=$(tr '\0' '\n' < "$f" | tail -1)
+probed=$(tr '\0' '\n' < "$f" | tail -3 | head -1)   # args: ... <secret> <codex binary> <Codex home>
 case "$probed" in "$P"/*) ;; *) die "the self-check should probe a secret file of the project: $probed" ;; esac
 for k in "$P/.env" "$P/.env.local" "$P/config/app.key" "$P/x.pem" "$P/config/db_secret.yml" "$P/config/secrets" "$R/.env" \
          "$P/**/.env" "$P/**/.env.local" "$P/**/*.key" "$R/**/.env"; do
