@@ -6,14 +6,18 @@
 #   1. interactive argv: the permission profile, the network proxy, approvals by the user, the
 #      system prompt as developer_instructions, the model; no bypass flag; the profile's
 #      filesystem table (project writable, harness-owned files and .git read-only, $HOME
-#      entries and the lean state denied, instruction files denied by glob, no /tmp).
+#      entries and the lean state denied, instruction files denied by glob, no /tmp); no
+#      AGENTS.md loaded (project_doc_max_bytes=0, no fallback names) with the deny globs kept,
+#      checked by a local `codex debug prompt-input` probe (same flags, temp CODEX_HOME).
 #   2. headless: `codex exec --json`, approvals never, --ignore-rules; the result JSON
 #      (tokens summed over turns, num_turns, session_id, duration, total_cost_usd null);
 #      a failed turn or a non-zero exit is is_error; a junk line is skipped.
 #   3. fail closed: the self-check failing (sandbox can't apply, no seatbelt, no network
 #      proxy, a caller's own loopback proxy standing in for Codex's, a write or read of the
 #      lean state that goes through) refuses before any session (exit 3); the caller's proxy
-#      variables never reach codex.
+#      variables never reach codex. The prompt probe failing (AGENTS.md denied to Codex's
+#      loader without project_doc_max_bytes=0, as codex-cli 0.167) or carrying AGENTS.md
+#      instructions refuses too.
 #   3b. codex installed behind a symlink chain into a fake ~/.codex/packages/...: its release
 #      folder is `read`, ~/.codex (auth.json, config.toml) stays denied, the session starts the
 #      resolved binary, the check runs it with a temp CODEX_HOME; a binary directly in the
@@ -64,7 +68,7 @@ mkdir -p "$CALLS"
 [ "${1:-}" != --version ] || { printf '%s\n' "${CODEX_HOME:-}" > "$CALLS/version.codex_home"; echo "codex-cli 0.0.0-stub"; exit 0; }
 n=$(ls "$CALLS" | grep -c '\.argv$')
 kind=interactive
-case "${1:-}" in sandbox) kind=sandbox ;; exec) kind=exec ;; esac
+case "${1:-}" in sandbox) kind=sandbox ;; exec) kind=exec ;; debug) kind=debug ;; esac
 printf '%s\0' "$@" > "$CALLS/$n.$kind.argv"
 env -0 > "$CALLS/$n.$kind.env"
 printf '%s' "$0" > "$CALLS/$n.$kind.self"
@@ -95,6 +99,20 @@ case "$kind" in
     [ -z "$noexec" ] || chmod u+x "$noexec"
     chmod 700 "$canary"; [ ! -d "$CALLS/denied-home" ] || chmod 700 "$CALLS/denied-home"
     exit "$rc" ;;
+  debug)
+    # `debug prompt-input` as codex-cli 0.167 does it: the project's AGENTS.md is read through
+    # the sandboxed helper, so a deny glob on it fails the session; project_doc_max_bytes=0
+    # skips it. STUB_DEBUG=fail fails anyway; STUB_DEBUG=agents loads it anyway.
+    printf '%s\n' "$CODEX_HOME" > "$CALLS/debug.codex_home"
+    a=$(printf '%s\n' "$@")
+    if [ "${STUB_DEBUG:-}" = fail ] || { [ "${STUB_DEBUG:-}" != agents ] && [ -f AGENTS.md ] \
+         && ! grep -qx 'project_doc_max_bytes=0' <<<"$a" && grep -q '/\*\*/AGENTS\.md"="deny"' <<<"$a"; }; then
+      echo 'Error: failed to load AGENTS.md instructions for environment `local`: Operation not permitted (os error 1)' >&2; exit 1
+    fi
+    if [ "${STUB_DEBUG:-}" = agents ] || { [ -f AGENTS.md ] && ! grep -qx 'project_doc_max_bytes=0' <<<"$a"; }; then
+      jq -n --arg t "# AGENTS.md instructions for $PWD" '[{type: "message", content: [{text: $t}]}]'
+    else echo '[]'; fi
+    exit 0 ;;
   exec)
     out=""; prev=""
     for a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done
@@ -125,7 +143,7 @@ for cli in claude fish; do
 done
 export PATH="$WORK/bin:$PATH"
 
-reset() { rm -rf "$CALLS"; mkdir -p "$CALLS"; unset STUB_SANDBOX STUB_EVENTS STUB_EXEC_RC STUB_EXEC_SCRIPT; }
+reset() { rm -rf "$CALLS"; mkdir -p "$CALLS"; unset STUB_SANDBOX STUB_EVENTS STUB_EXEC_RC STUB_EXEC_SCRIPT STUB_DEBUG; }
 # argv_of <kind> — the last call of that kind, one argument per line.
 argv_of() { local f; f=$(ls "$CALLS"/*."$1".argv 2>/dev/null | tail -1); [ -n "$f" ] && tr '\0' '\n' < "$f"; }
 env_of() { local f; f=$(ls "$CALLS"/*."$1".env 2>/dev/null | tail -1); [ -n "$f" ] && tr '\0' '\n' < "$f"; }
@@ -161,6 +179,7 @@ T
 }
 
 P="$WORK/p1"; new_project "$P" codex codex:other
+printf '# orchestrator instructions\n' > "$P/AGENTS.md"; g -C "$P" add AGENTS.md && g -C "$P" commit -qm agents || die "project setup: AGENTS.md"
 P_REAL=$(cd "$P" && pwd -P)
 printf 'You are the lean implementer. "Quotes" and \\ backslashes.\nSecond line.\n' > "$WORK/system.md"
 
@@ -198,6 +217,21 @@ writes=$(printf '%s' "$fs" | grep -oE '"[^"]*"="write"' | wc -l | tr -d ' ')
 [ "$writes" -le 3 ] || die "only the project (and its resolved path) and the session TMPDIR are writable: $fs"
 ls "$st/tmp" 2>/dev/null | grep -q codex-check && die "the check's canary folder must be removed"
 pass "profile: project writable, harness files and .git read-only, \$HOME entries and lean state denied, instruction globs denied, no /tmp"
+
+# No AGENTS.md reaches the session: project docs off in the session's flags, the deny globs
+# kept for commands, and the prompt probe ran with the same flags and a temp CODEX_HOME.
+for k in interactive sandbox; do
+  has $k 'project_doc_max_bytes=0' && has $k 'project_doc_fallback_filenames=[]' || die "$k: AGENTS.md loading must be off: $(argv_of $k | grep project_doc)"
+done
+for g in AGENTS.md AGENTS.override.md CLAUDE.md; do
+  case "$fs" in *"\"$P/**/$g\"=\"deny\""*) ;; *) die "the deny glob on $g must stay: $fs" ;; esac
+done
+[ "$(n_calls debug)" = 1 ] && has debug prompt-input || die "one prompt probe (codex debug prompt-input) before the session: $(ls "$CALLS")"
+[ "$(sandbox_flags debug)" = "$(sandbox_flags interactive)" ] && has debug 'project_doc_max_bytes=0' \
+  || die "the probe must use the session's flags: $(diff <(sandbox_flags debug) <(sandbox_flags interactive))"
+case "$(cat "$CALLS/debug.codex_home")" in */lean-session.*/codex-probe-home) ;; *) die "the probe runs with a temp CODEX_HOME: $(cat "$CALLS/debug.codex_home")" ;; esac
+env_of debug | grep -qx 'OPENAI_API_KEY=' || die "the probe carries no API key"
+pass "no AGENTS.md: project_doc_max_bytes=0 and no fallback names in the session and check flags, deny globs kept, a local prompt probe with the same flags and a temp CODEX_HOME"
 
 echo "2. headless"
 reset
@@ -263,9 +297,28 @@ HTTPS_PROXY=http://127.0.0.1:8888 no_proxy=x NPM_CONFIG_PROXY=http://u:p@127.0.0
 for k in sandbox exec; do
   env_of $k | grep -iE '^[^=]*proxy=|^CODEX_(SANDBOX|NETWORK_)' && die "$k: a proxy variable or Codex marker of the caller reached codex"
 done
+# The prompt probe fails closed: Codex can't open a session with the profile (AGENTS.md denied
+# to its loader, as codex-cli 0.167 without project_doc_max_bytes=0), or it loads AGENTS.md.
+cp -R "$TOOLKIT_DIR/lean" "$WORK/lean-agentsmd"
+sed -i.bak "/^  -c 'project_doc_max_bytes=0'$/d" "$WORK/lean-agentsmd/adapters/codex.sh"
+grep -q "^  -c 'project_doc_max_bytes=0'" "$WORK/lean-agentsmd/adapters/codex.sh" && die "test setup: project_doc_max_bytes=0 was not removed"
+for m in interactive headless check; do
+  for how in strip fail agents; do
+    reset; rc=0; a="$A"
+    case "$how" in strip) a="$WORK/lean-agentsmd/adapters/codex.sh" ;; *) export STUB_DEBUG=$how ;; esac
+    "$a" "$P" "$m" - "$WORK/system.md" x "$WORK/f.json" > "$WORK/out" 2>&1 || rc=$?
+    [ "$rc" = 3 ] || die "AGENTS.md probe $how/$m: expected exit 3, got $rc: $(cat "$WORK/out")"
+    case "$how" in
+      agents) grep -q 'would load AGENTS.md instructions into the session' "$WORK/out" ;;
+      *) grep -q "can't open a session with the lean profile, refusing to start: .*failed to load AGENTS.md" "$WORK/out" ;;
+    esac || die "AGENTS.md probe $how/$m message: $(cat "$WORK/out")"
+    [ "$(n_calls interactive)" = 0 ] && [ "$(n_calls exec)" = 0 ] || die "AGENTS.md probe $how/$m: no session may start"
+  done
+done
 reset
 "$A" "$P" check - "$WORK/system.md" - > "$WORK/out" 2>&1 || die "check mode: $(cat "$WORK/out")"
 grep -q 'Codex sandbox confirmed' "$WORK/out" && [ "$(n_calls interactive)" = 0 ] && [ "$(n_calls exec)" = 0 ] || die "check runs no session"
+pass "fail closed: a session Codex can't open with the profile, or AGENTS.md in the probed prompt -> exit 3, no session"
 pass "fail closed: sandbox can't apply, no seatbelt, codex binary not runnable, no proxy (also with the caller's own loopback proxy), an outside write or read going through -> exit 3, no session"
 
 echo "3b. codex behind a symlink chain under ~/.codex"

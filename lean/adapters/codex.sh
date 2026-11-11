@@ -20,8 +20,14 @@
 #     its repository and the LEAN_SECRET_GLOBS globs: lean/lib.sh), `read` on the codex
 #     binary's release folder under <Codex home>/packages/ (below), and `deny` globs on CLAUDE.md,
 #     CLAUDE.local.md, AGENTS.md, AGENTS.override.md, .claude/ and .codex/ anywhere in the
-#     project (Codex only accepts `deny` on globs: those are unreadable to commands too;
-#     Codex itself still loads AGENTS.md);
+#     project (Codex only accepts `deny` on globs: those are unreadable to commands too);
+#   - no project instructions: `project_doc_max_bytes = 0` and no fallback names, so Codex
+#     loads no AGENTS.md / AGENTS.override.md of the project. The session's instructions are
+#     the lean system prompt (developer_instructions) only. codex-cli 0.167 reads the project
+#     docs through its sandboxed helper, so with the deny globs above loading them failed the
+#     session ("failed to load AGENTS.md instructions ...: Operation not permitted"). The
+#     user's own global <Codex home>/AGENTS.md is still read (outside the profile; 0.167 has
+#     no switch for it): lean/SECURITY.md "Codex sessions";
 #   - network through Codex's own proxy (feature `network_proxy`): localhost and
 #     .harness.json::lean.allowed_domains only; unix sockets only in the project and the
 #     local database sockets (sandbox.sh's list);
@@ -41,6 +47,10 @@
 # inherited one (a local Proxyman/Charles/mitmproxy) can't pass the check with the network
 # open. Codex's own API traffic doesn't use the caller's proxy either. Any failure, or an unknown flag/key in the
 # installed Codex, refuses to start. macOS only (the check expects CODEX_SANDBOX=seatbelt).
+# Then `codex debug prompt-input` (local, no model, a temp CODEX_HOME, no API key, a dead
+# proxy) builds the session's prompt with the same flags from the project: it must succeed
+# (a profile Codex can't open a session with, e.g. AGENTS.md denied to its loader) and carry
+# no AGENTS.md instructions, or the session is refused (exit 3).
 #
 # The environment: the secret-looking variables are dropped as for the claude adapters
 # (lean/lib.sh lean_env_args), except Codex's own OPENAI_* / CODEX_* (it needs them to run),
@@ -130,6 +140,8 @@ common=(--enable network_proxy
   -c "permissions.lean.filesystem=$(toml .codex_fs)"
   -c "permissions.lean.network=$net"
   -c 'approvals_reviewer="user"'
+  -c 'project_doc_max_bytes=0'
+  -c 'project_doc_fallback_filenames=[]'
   -c 'shell_environment_policy.exclude=["OPENAI_*","CODEX_API_KEY"]'
   -c "shell_environment_policy.set.TMPDIR=$(jq -Rn --arg t "$session_tmp/" '$t')"
   -c 'shell_environment_policy.set.GIT_CONFIG_GLOBAL="/dev/null"'
@@ -176,6 +188,25 @@ if [ "$(printf '%s\n' "$out" | tail -1)" != LEAN-CODEX-SANDBOX-OK ]; then
   exit 3
 fi
 rm -rf "$canary"   # before exec (interactive), which skips the EXIT trap
+# Prompt probe: Codex builds the session's prompt with the same flags in the project, locally
+# (no model, no credentials: a temp CODEX_HOME, no API key, proxies to a closed port). It must
+# succeed and load no AGENTS.md.
+probe_home="$session_tmp/codex-probe-home"
+mkdir -p "$probe_home"
+rc=0
+out=$(cd "$project" && "${cmd[@]:0:${#cmd[@]}-1}" CODEX_HOME="$probe_home" OPENAI_API_KEY= CODEX_API_KEY= \
+  HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 NO_PROXY= \
+  "$codex_bin" debug prompt-input "${common[@]}" 2>&1 < /dev/null) || rc=$?
+rm -rf "$probe_home"
+if [ "$rc" != 0 ]; then
+  why=$(printf '%s\n' "$out" | grep -m1 '^Error' || printf '%s\n' "$out" | tail -3)
+  echo "lean: Codex can't open a session with the lean profile, refusing to start: $(printf '%s\n' "$why" | tr '\n' ' ' | cut -c1-300)" >&2
+  exit 3
+fi
+if printf '%s\n' "$out" | grep -q 'AGENTS\.md instructions'; then
+  echo "lean: Codex would load AGENTS.md instructions into the session (project_doc_max_bytes=0 not honored by this codex), refusing to start" >&2
+  exit 3
+fi
 [ "$mode" != check ] || { echo "lean: Codex sandbox confirmed for $project"; exit 0; }
 
 system_toml=$(jq -Rs . < "$system_file")
