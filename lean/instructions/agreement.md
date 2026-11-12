@@ -35,11 +35,16 @@ project runs them when the feature closes.
 
 - Follow the document. When you must decide something it does not cover, decide, and append it to a
   **Decisions while implementing** section of the document.
+- **Files** and **Changed tests** are fixed: the checks read them as the planner wrote them, and
+  fail on any path you add to or remove from them. Do not edit those two lists (other sections,
+  such as **Decisions while implementing**, are fine to append).
 - Do not delete or weaken existing tests. When the feature changes what an existing assertion pins,
-  update that assertion to the new behavior and list its file under **Changed tests** with the reason.
-  Add tests for what the feature changes.
+  update that assertion to the new behavior only in a file listed under **Changed tests**. Add tests
+  for what the feature changes.
 - Change only the files listed under **Files** (a file you delete or rename, both paths, counts). If
-  another one is truly needed, add it to that list with a short reason.
+  another file is truly needed (or an assertion in a test file not under **Changed tests** must
+  change), do not change it: say so in your final message, with the file and why, and finish the
+  rest. The leader decides whether the plan grows.
 - Never delete, rewrite or migrate existing rows in a database by hand (`psql`, scripts, ad hoc
   SQL), even local ones: only the migrations and tests the feature adds may change data. When
   existing data stops a migration or a test, stop and say so in your final message, with the query
@@ -52,7 +57,8 @@ Review only the change: the diff against the base the prompt gives (`git diff <b
 untracked files `git status --short` lists), the files under **Files** and the document itself. Check
 every decision implemented, every answer under **Risks** true in the code, nothing out of scope
 touched, tests covering the change. Fix what is wrong or missing, once, in the files under **Files**,
-then stop. Leave the document as it is, except to add to **Files** a file your fix needed.
+then stop. Leave the document as it is: **Files** and **Changed tests** are fixed, so a fix that
+needs another file is not made; say so in your final message, with the file and why.
 
 Keep the review to one pass: read the code yourself (no subagents), and run the feature's own tests
 at most once at the end, not in loops, in the background or as the full suite (the prompt holds the

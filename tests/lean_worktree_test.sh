@@ -605,6 +605,8 @@ echo "8. the gate runs the suite in the sandbox"
 setv() { jq --arg v "$1" '.verify_command = $v' "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"; }
 gate3() { bash "$TOOLKIT_DIR/lean/gate.sh" "$R3" f "$@" 2>&1; }
 printf '# f\n\n**Files**\n- `.harness.json`: the verify_command each case sets\n' > "$R3/docs/features/f.md"; g -C "$R3" add -A && g -C "$R3" commit -qm doc || die "doc"
+# The leader rewrote the plan after sessions ran: it accepts the new lists (lean/lib.sh lean_plan_pin).
+(cd "$R3" && bash "$TOOLKIT_DIR/lean/run.sh" replan f --by tester) >/dev/null 2>&1 || die "replan"
 if [ "$have_sbx" = 1 ]; then
   setv "cat '$HOME/.ssh/id'"
   out=$(gate3) && die "the suite must not read ~/.ssh in the gate: $out"

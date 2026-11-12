@@ -254,6 +254,11 @@ gate closes it.
    This is the one log-out you run: the gate is a script, not your judgment. A refusal means another `fix`
    round, never a workaround; to send the feature down the reviewer path instead, the user decides and
    `set-mode <name> none` must run before any verdict is recorded.
+   `PLAN LISTS CHANGED SINCE PINNED`: a session edited the plan's **Files** / **Changed tests** (pinned before
+   the first session). Show the user the paths; only if they accept the wider scope run `lean/run.sh replan
+   <name>` (an approved plan: with an explicit `--by <name>`), else a `fix` round undoes it.
+   `NO PINNED PLAN LISTS` (sessions ran, nothing pinned: an older feature, a `set-mode` round trip, a reused
+   name): check those lists with the user the same way, then `lean/run.sh replan <name>`.
 
 ## Learnings
 

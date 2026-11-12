@@ -11,6 +11,8 @@
 #   lean/run.sh chain     <name>   every step above, headless, in one call; a compact summary
 #                                  (--step-minutes N caps each step; never logs out)
 #   lean/run.sh usage     <name>   the feature's sessions: tool, model, turns, tokens, time, cost
+#   lean/run.sh replan    <name>   the leader accepts a change to the plan's Files / Changed tests
+#                                  (pinned once a session ran; --by <name> when the plan was approved)
 #
 # Options: --headless (claude -p / codex exec instead of an interactive session; the result JSON is
 # kept under the project's lean state, lean/lib.sh), --base <rev> (gate base; default the
@@ -34,7 +36,7 @@
 set -euo pipefail
 
 LEAN_DIR="$(cd "$(dirname "$0")" && pwd)"
-usage() { sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 step="${1:-}"; name="${2:-}"
 [ -n "$step" ] && [ -n "$name" ] || usage
 shift 2
@@ -103,6 +105,56 @@ if [ "$step" = usage ]; then
   file=$(lean_usage_file "$(pwd)" "$name")
   lean_usage_table "$(pwd)" "$name" || { echo "no usage recorded for $name ($file)"; exit 0; }
   echo "rows: $file"
+  exit 0
+fi
+
+# replan <name> [--by <name>] — the leader accepts the plan's **Files** / **Changed tests** as
+# the document now has them: they are pinned afresh (lean/lib.sh lean_plan_pin), and the gate
+# checks against them. Refused inside a session. An approved plan (approve-plan, or a frozen
+# risk-mode manifest) needs --by <the human who approved the change>, recorded with the lists.
+if [ "$step" = replan ]; then
+  case "$name" in *[!A-Za-z0-9_-]*) echo "feature name must be letters, digits, _ or -" >&2; exit 2 ;; esac
+  [ -f .harness.json ] || { echo "run lean/run.sh from a project with a .harness.json" >&2; exit 2; }
+  by=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by) [ $# -ge 2 ] || usage; by="$2"; shift 2 ;;
+      *) echo "unknown option: $1" >&2; usage ;;
+    esac
+  done
+  # shellcheck source=lib.sh
+  . "$LEAN_DIR/lib.sh"
+  project="$(pwd)"
+  if lean_in_session "$project"; then
+    echo "inside a lean session: replan is the leader's, outside any session (report the file the feature needs instead)" >&2; exit 2
+  fi
+  doc="docs/features/$name.md"
+  [ -f "$doc" ] || { echo "no feature document: $doc" >&2; exit 2; }
+  lean_adopt_legacy "$project"
+  file=$(lean_plan_file "$project" "$name")
+  approved=0
+  { grep -q '^# approved' "$file" 2>/dev/null || [ -f "$(lean_state_dir "$project")/frozen/$name.sha" ]; } && approved=1
+  if [ -f "$file" ]; then
+    drift=$(lean_plan_drift "$project" "$name")
+    [ -n "$drift" ] || { echo "[lean] nothing to accept: $doc lists what $file pins"; exit 0; }
+    echo "[lean] $doc's lists against $file:"
+    printf '%s\n' "$drift"
+  else
+    drift=$(lean_plan_lists "$doc" | awk -F'\t' '{ printf "  + %s: %s\n", $1, $2 }')
+    echo "[lean] no lists pinned yet for $name: $doc lists"
+    printf '%s\n' "${drift:-  (nothing)}"
+  fi
+  if [ "$approved" = 1 ]; then
+    case "$(printf '%s' "$by" | tr '[:upper:]' '[:lower:]')" in
+      ""|user) echo "the plan of $name was approved: a change to its **Files** / **Changed tests** needs the user's approval again. Show them the change above; after they approve it, run lean/run.sh replan $name --by \"<their name>\"" >&2; exit 1 ;;
+    esac
+    lean_plan_pin "$project" "$name" --approved "$by" || { echo "could not write $file" >&2; exit 2; }
+  else
+    lean_plan_pin "$project" "$name" --again || { echo "could not write $file" >&2; exit 2; }
+  fi
+  if [ -f scripts/harness.sh ]; then
+    bash scripts/harness.sh append-log "lean replan $name: accepted $(printf '%s' "$drift" | sed 's/^ *//' | paste -sd ';' -)${by:+ (approved by $by)}" >/dev/null 2>&1 || true
+  fi
   exit 0
 fi
 
@@ -287,6 +339,11 @@ case "$step" in
       mkdir -p "$(dirname "$frozen")"
       shasum -a 256 "${acc_paths[@]}" > "$frozen"
       log "frozen $(wc -l < "$frozen" | tr -d ' ') file(s) into $frozen"
+      # Freezing by hand is the approval without the harness: the plan's lists are pinned with it
+      # (lean/lib.sh lean_plan_mark_approved: from the document only while no session ran).
+      lean_plan_mark_approved "$project" "$name" "run.sh freeze" || { echo "could not pin the plan's lists" >&2; exit 2; }
+      plan_drift=$(lean_plan_drift "$project" "$name")
+      [ -z "$plan_drift" ] || log "$doc's **Files** / **Changed tests** differ from the lists pinned before its sessions ran (approved as pinned; the gate fails on these until the user approves them and you run lean/run.sh replan $name --by <name>):"$'\n'"$plan_drift"
     fi
     # Red before green: acceptance tests that already pass check nothing. They run under the
     # sessions' sandbox rules, like the gate (lean/lib.sh lean_sandboxed).

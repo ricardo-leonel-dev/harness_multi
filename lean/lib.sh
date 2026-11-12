@@ -6,7 +6,8 @@
 # lean_state_dir: frozen/<name>.sha (risk mode's acceptance manifest), lean/<name>/trusted.sha
 # (the hashes of the harness-owned files the flow runs or trusts), lean/<name>/nested.sha (the
 # nested instruction files there before the feature's first run), lean/<name>/dirty.sha (the
-# files already changed before it, lean_dirty_manifest) and run results. The folder is keyed by the project's resolved path,
+# files already changed before it, lean_dirty_manifest), lean/<name>/plan.lists (the plan's
+# **Files** / **Changed tests**, lean_plan_pin) and run results. The folder is keyed by the project's resolved path,
 # never by .harness.json (a session could edit that and point the next step at fresh state).
 
 LEAN_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,11 +89,12 @@ lean_nested_manifest() {
 # not when trusted.sha is deleted to re-pin, so no session's work can be recorded as already
 # there; it goes when the feature's lean lifecycle ends (scripts/harness.sh
 # lean_forget_baseline). A feature pinned before dirty.sha existed never gets one.
+# Every call ends with lean_plan_pin (the plan's **Files** / **Changed tests**, plan.lists).
 lean_pin() {
   local project="$1" name="$2" again="${3:-}" dir n first=0
   dir="$(lean_state_dir "$project")/lean/$name" || return 1
   mkdir -p "$dir" || return 1
-  [ "$again" = --again ] || [ ! -f "$dir/trusted.sha" ] || return 0
+  [ "$again" = --again ] || [ ! -f "$dir/trusted.sha" ] || { lean_plan_pin "$project" "$name"; return; }
   ! lean_first_pin "$project" "$name" || first=1
   lean_trusted_manifest "$project" > "$dir/trusted.tmp" && mv "$dir/trusted.tmp" "$dir/trusted.sha" || return 1
   echo "[lean] pinned the hashes of $(wc -l < "$dir/trusted.sha" | tr -d ' ') harness-owned file(s) in $dir/trusted.sha" >&2
@@ -106,6 +108,7 @@ lean_pin() {
     n=$(wc -l < "$dir/dirty.sha" | tr -d ' ')
     [ "$n" = 0 ] || echo "[lean] recorded $n file(s) already changed before the feature in $dir/dirty.sha (the gate ignores them while their content stays the same)" >&2
   fi
+  lean_plan_pin "$project" "$name"
 }
 
 # lean_first_pin <project> <name> — true when nothing was pinned or run for the feature yet: its
@@ -115,11 +118,109 @@ lean_pin() {
 # it before its first step pins.
 lean_first_pin() {
   local runs="$(lean_state_dir "$1")/lean" f
-  [ -z "$(find "$runs/$2" -mindepth 1 -maxdepth 1 ! -name '*.tmp' -print 2>/dev/null | head -1)" ] || return 1
+  [ -z "$(find "$runs/$2" -mindepth 1 -maxdepth 1 ! -name '*.tmp' ! -name plan.lists -print 2>/dev/null | head -1)" ] || return 1
   for f in "$runs/$2.system.md" "$runs/$2.review.json" "$runs/$2".implement.*.json "$runs/$2".review.*.json "$runs/$2".fix.*.json; do
     [ ! -e "$f" ] || return 1
   done
   return 0
+}
+
+# The plan's lists, pinned: <state>/lean/<name>/plan.lists holds the paths named under **Files**
+# and **Changed tests** in docs/features/<name>.md ("<section><TAB><path>" lines, as
+# lean_plan_section reads them; a first line "# approved by <name> at <time>" when they were
+# approved). Once a session of the feature ran (lean_sessions_ran), lean/gate.sh checks against
+# these lists, not the live document, and fails naming any path added or removed there since
+# (lean_plan_drift): a session can append to the document (Decisions while implementing) but
+# not widen its scope. Written by lean_plan_pin: by every pin while no session ran yet (the
+# leader may still edit the plan) unless approved; afresh by approve-plan / run.sh freeze
+# (approved) and by `lean/run.sh replan` (the leader accepting a change, outside any session).
+# Removed with dirty.sha (scripts/harness.sh lean_forget_baseline). Once a session ran, no pin
+# writes it, so a feature whose sessions ran without one (pinned by an older version, its lean
+# lifecycle ended and began again with set-mode, a reused name, a lost file) fails the gate
+# until the leader runs lean/run.sh replan: the live document is never trusted then.
+lean_plan_file() { local s; s=$(lean_state_dir "$1") || return 1; printf '%s/lean/%s/plan.lists\n' "$s" "$2"; }
+
+# lean_plan_section <doc> <title> — the path-like words under that section of the doc (a
+# heading, or a "**Title**" / "- **Title**" line, holding <title>; bullets and backticks
+# stripped), sorted. lean/gate.sh's reading of the plan.
+lean_plan_section() {
+  [ -f "$1" ] || return 0
+  awk -v t="$2" '/^#+ |^- \*\*|^\*\*/ { in_sec = (index($0, t) > 0) } in_sec' "$1" \
+    | { grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+' || true; } | LC_ALL=C sort -u
+}
+
+# lean_plan_lists <doc> — "Files<TAB><path>" and "Changed tests<TAB><path>" lines.
+lean_plan_lists() {
+  lean_plan_section "$1" Files | awk '{ print "Files\t" $0 }'
+  lean_plan_section "$1" "Changed tests" | awk '{ print "Changed tests\t" $0 }'
+}
+
+# lean_plan_pinned <file> <title> — the paths pinned for that section.
+lean_plan_pinned() { awk -F'\t' -v t="$2" '!/^#/ && $1 == t { print $2 }' "$1"; }
+
+# lean_sessions_ran <project> <name> — true when a session of the feature was opened (run.sh
+# writes <name>.system.md before each one) or left a result or usage row; also when the state
+# can't be found (fail closed: nothing is re-pinned then).
+lean_sessions_ran() {
+  local runs f
+  runs="$(lean_state_dir "$1")/lean" || return 0
+  for f in "$runs/$2.system.md" "$runs/$2.review.json" "$runs/$2".implement.*.json "$runs/$2".review.*.json "$runs/$2".fix.*.json "$runs/$2/usage.tsv"; do
+    [ ! -e "$f" ] || return 0
+  done
+  return 1
+}
+
+# lean_plan_pin <project> <name> [--again | --approved <by>] — writes plan.lists from the
+# document (nothing without it). Plain: only while no session ran and the lists aren't approved
+# ones. --again: afresh, keeping an approval line; --approved: afresh, as approved by <by>.
+lean_plan_pin() {
+  local project="$1" name="$2" how="${3:-}" by="${4:-}" file doc head="" n
+  doc="$1/docs/features/$2.md"
+  file=$(lean_plan_file "$project" "$name") || return 1
+  [ -f "$doc" ] || return 0
+  if [ -z "$how" ]; then
+    ! lean_sessions_ran "$project" "$name" || return 0
+    ! grep -q '^# approved' "$file" 2>/dev/null || return 0
+  fi
+  [ "$how" != --again ] || head=$(grep -m1 '^# approved' "$file" 2>/dev/null || true)
+  [ "$how" != --approved ] || head="# approved by $(printf '%s' "$by" | tr -d '\n\t') at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  mkdir -p "$(dirname "$file")" || return 1
+  { [ -z "$head" ] || printf '%s\n' "$head"; lean_plan_lists "$doc"; } > "$file.tmp" || return 1
+  if [ -f "$file" ] && cmp -s "$file.tmp" "$file"; then rm -f "$file.tmp"; return 0; fi
+  mv "$file.tmp" "$file" || return 1
+  n=$(grep -vc '^#' "$file" || true)
+  echo "[lean] pinned the plan's **Files** / **Changed tests** ($n path(s)) in $file: sessions can't widen them (lean/run.sh replan $name accepts a change)" >&2
+}
+
+# lean_plan_mark_approved <project> <name> <by> — records that the plan's lists were approved
+# by <by> (scripts/harness.sh at claim, from approve-plan's record in the database; lean/run.sh
+# freeze). An approved plan.lists stays as it is. Before any session: pinned afresh from the
+# document, as approved. After one: never from the document (a session may have widened it):
+# the lists pinned so far are marked approved, and with none the file holds the approval line
+# alone, so the gate names every listed path as a change until the leader runs
+# lean/run.sh replan <name> --by <name>.
+lean_plan_mark_approved() {
+  local project="$1" name="$2" by="$3" file
+  file=$(lean_plan_file "$project" "$name") || return 1
+  ! grep -q '^# approved' "$file" 2>/dev/null || return 0
+  if ! lean_sessions_ran "$project" "$name"; then
+    lean_plan_pin "$project" "$name" --approved "$by"; return
+  fi
+  mkdir -p "$(dirname "$file")" || return 1
+  { printf '# approved by %s at %s\n' "$(printf '%s' "$by" | tr -d '\n\t')" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    [ ! -f "$file" ] || grep -v '^#' "$file" || true; } > "$file.tmp" && mv "$file.tmp" "$file" || return 1
+  echo "[lean] marked the plan's pinned **Files** / **Changed tests** in $file as approved by $by (sessions ran: not re-read from the document)" >&2
+}
+
+# lean_plan_drift <project> <name> — "  + <section>: <path>" / "  - <section>: <path>" for each
+# path the document's lists gained or lost since plan.lists; nothing without plan.lists or the
+# document.
+lean_plan_drift() {
+  local file doc="$1/docs/features/$2.md"
+  file=$(lean_plan_file "$1" "$2") || return 0
+  [ -f "$file" ] && [ -f "$doc" ] || return 0
+  { diff <(grep -v '^#' "$file") <(lean_plan_lists "$doc") || true; } \
+    | awk -F'\t' '/^[<>] / { printf "  %s %s: %s\n", (substr($1, 1, 1) == ">" ? "+" : "-"), substr($1, 3), $2 }'
 }
 
 # lean_dirty_hash <path> — what lean_dirty_manifest records for a repository-root path (run from
