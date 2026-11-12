@@ -134,6 +134,10 @@ lean_dirty_hash() {
   fi
 }
 
+# lean_manifest_paths <manifest> — the paths of a shasum manifest ("<sha>  <path>" or
+# "<sha> *<path>"), one per line, spaces kept.
+lean_manifest_paths() { awk 'NF { sub(/^[^ ]+ [ *]/, ""); print }' "$@"; }
+
 # lean_dirty_manifest <project> <name> — "<lean_dirty_hash>  <path>" for every file of the
 # project's repository already changed against HEAD (modified, staged, deleted, untracked and
 # not ignored: lean_repo_changes, a rename under both its paths) at the feature's first pin,
@@ -157,13 +161,13 @@ lean_dirty_manifest() {
     acc=$(jq -r '.lean.acceptance_dir // "acceptance"' .harness.json 2>/dev/null || echo acceptance)
     acc="${acc%/}"
     # The frozen manifest's paths ("<sha>  <path>", from the project), as written and from the root.
-    own=$( { [ ! -f "$frozen" ] || awk 'NF { sub(/^[^ ]+ [ *]/, ""); print }' "$frozen"; } \
+    own=$( { [ ! -f "$frozen" ] || lean_manifest_paths "$frozen"; } \
       | while IFS= read -r f; do [ -z "$f" ] || printf '%s\n%s%s\n' "$f" "$prefix" "$f"; done)
     lean_repo_changes HEAD | while IFS= read -r f; do
       case "$f" in
         "\$'"*) continue ;;
         "${prefix}progress/"*|"${prefix}state/"*) continue ;;
-        "${prefix}docs/features/$2.md"|"${prefix}docs/features/$2.review.md"|"${prefix}$acc/$2."*) continue ;;
+        "${prefix}docs/features/$2.md"|"${prefix}docs/features/$2.review.md"|"${prefix}$acc/$2."*|"${prefix}$acc/"*"/$2."*) continue ;;  # find recurses: any depth
       esac
       ! grep -qxF -- "$f" <<<"$own" || continue
       printf '%s  %s\n' "$(cd "$top" && lean_dirty_hash "$f")" "$f"
@@ -238,7 +242,7 @@ LEAN_ACCEPTANCE_INVALID="invalid .harness.json::lean.acceptance_command: use a s
 # lean_acceptance_command <project> <path...> — the command that runs the acceptance tests:
 # .harness.json::lean.acceptance_command (non-empty) with each {paths} replaced by the
 # shell-quoted paths, or the paths appended when it has none; unset, verify_command with the
-# paths appended as before, and LEAN_ACCEPTANCE_WARN set to LEAN_COMPOUND_WARN when it is a
+# shell-quoted paths appended, and LEAN_ACCEPTANCE_WARN set to LEAN_COMPOUND_WARN when it is a
 # compound command (lean_is_compound). Run it in the current shell (not $(...)) for the warning.
 lean_acceptance_command() {
   local project="$1" acc q="" f out="" rest; shift
@@ -247,7 +251,8 @@ lean_acceptance_command() {
   if [ -z "$acc" ]; then
     acc=$(jq -r '.verify_command // empty' "$project/.harness.json" 2>/dev/null || true)
     ! lean_is_compound "$acc" || LEAN_ACCEPTANCE_WARN="$LEAN_COMPOUND_WARN"
-    LEAN_ACCEPTANCE_CMD="$acc $*"
+    for f in "$@"; do q="$q $(printf '%q' "$f")"; done
+    LEAN_ACCEPTANCE_CMD="$acc$q"
     return 0
   fi
   for f in "$@"; do q="$q $(printf '%q' "$f")"; done
@@ -557,15 +562,17 @@ lean_repo_changes() {
 # reports the cached tokens inside input_tokens, so they are subtracted. cost_usd only as the
 # CLI reports it (total_cost_usd); "-" for Codex (none) and claude-mini (Claude Code's estimate
 # at Anthropic prices, not what MiniMax bills). No price table anywhere. A field the JSON lacks
-# is "?"; an interactive session has no result JSON: its row holds the duration only.
-# seconds: the session's wall time as run.sh measured it. Best-effort: a failure here never
-# changes a step's outcome.
+# is "?"; an interactive session has no result JSON: its row holds the duration only. A
+# session `run.sh chain` stopped at its step cap returns nothing to run.sh: the chain records
+# its row (result "?", the note given: turns and tokens "?", cost "?" or "-" as above).
+# seconds: the session's wall time as run.sh measured it (a stopped session: the step's, as
+# the chain measured it). Best-effort: a failure here never changes a step's outcome.
 LEAN_USAGE_HEADER='at	feature	step	mode	tool	model	turns	input	cache_read	cache_write	output	seconds	cost_usd	note'
 
 lean_usage_file() { printf '%s/lean/%s/usage.tsv\n' "$(lean_state_dir "$1")" "$2"; }
 
-# lean_usage_record <project> <name> <step> <mode> <tool> <model|-> <seconds> <result_json|->
-# (- : an interactive session).
+# lean_usage_record <project> <name> <step> <mode> <tool> <model|-> <seconds> <result_json|-|?> [<note>]
+# (- : an interactive session; ? : a session stopped before it returned, with <note>).
 lean_usage_record() {
   local file tool="$5" model="$6" res="$8" parsed="" jmodel="" turns="" in="" cr="" cw="" out="" cost="" note=""
   file=$(lean_usage_file "$1" "$2") || return 0
@@ -573,6 +580,9 @@ lean_usage_record() {
   if [ "$model" = - ]; then model=default; [ "$tool" != codex-m3 ] || model=minimax; fi
   if [ "$res" = - ]; then
     turns=- in=- cr=- cw=- out=- cost=- note="interactive (not measured)"
+  elif [ "$res" = '?' ]; then
+    turns='?' in='?' cr='?' cw='?' out='?' cost='?' note="${9:-stopped}"
+    case "$tool" in claude-mini|codex|codex-m3) cost=- ;; esac
   else
     parsed=$(jq -r 'def num: if type == "number" then (floor | tostring) else "?" end;
       select(type == "object")

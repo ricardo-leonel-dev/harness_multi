@@ -211,11 +211,14 @@ open_session() {
   { cat "$LEAN_DIR/instructions/agreement.md"
     [ "$risk" = 1 ] && { echo; cat "$LEAN_DIR/instructions/risk.md"; }
     printf '\nFeature: %s. Document: %s. Risk questions: %s.\n' "$name" "$doc" "$question_file"
-    [ "$risk" = 1 ] && printf 'Frozen acceptance tests: %s\n' "$(awk '{print $2}' "$frozen" | tr '\n' ' ')"
+    [ "$risk" = 1 ] && printf 'Frozen acceptance tests: %s\n' "$(lean_manifest_paths "$frozen" | while IFS= read -r f; do printf '%q ' "$f"; done)"
   } > "$system"
   # One usage row per session (lean/lib.sh lean_usage_record; best-effort).
   local t0=$SECONDS rc=0 mode_name=normal
   [ "$risk" = 0 ] || mode_name=risk
+  # What the chain reads: a claude-mini step's line shows no cost, and a session it stops at
+  # its step cap gets its usage row from it (lean/chain.sh).
+  log "session: $adapter $model $mode_name"
   if [ "$headless" = 1 ]; then
     local result max_turns; result="$runs/$name.$step.$(date +%Y%m%d%H%M%S).json"
     # The step's turn cap (lean.max_turns, validated above): claude -p --max-turns; the codex
@@ -272,21 +275,23 @@ case "$step" in
     # With the harness, approve-plan already froze them: only the red-before-green check is left.
     if [ "$risk" = 1 ]; then
       log "already frozen: $frozen"
-      files=$(awk '{print $2}' "$frozen")
+      files=$(lean_manifest_paths "$frozen")
     else
       files=$(find "$acc_dir" -type f -name "$name.*" 2>/dev/null | sort)
       [ -n "$files" ] || { echo "no acceptance tests for $name in $acc_dir/ (risk mode needs them)" >&2; exit 2; }
+    fi
+    # One path per line, spaces kept (never word-split).
+    acc_paths=()
+    while IFS= read -r f; do [ -z "$f" ] || acc_paths+=("$f"); done <<<"$files"
+    if [ "$risk" = 0 ]; then
       mkdir -p "$(dirname "$frozen")"
-      # shellcheck disable=SC2086
-      shasum -a 256 $files > "$frozen"
+      shasum -a 256 "${acc_paths[@]}" > "$frozen"
       log "frozen $(wc -l < "$frozen" | tr -d ' ') file(s) into $frozen"
     fi
     # Red before green: acceptance tests that already pass check nothing. They run under the
     # sessions' sandbox rules, like the gate (lean/lib.sh lean_sandboxed).
     # lean.acceptance_command when set, else verify_command with the paths appended (lean/lib.sh
-    # lean_acceptance_command), as the gate runs them.
-    acc_paths=()
-    while IFS= read -r f; do [ -z "$f" ] || acc_paths+=("$f"); done <<<"$files"
+    # lean_acceptance_command, shell-quoted), as the gate runs them.
     lean_acceptance_command "$project" ${acc_paths[@]+"${acc_paths[@]}"}
     [ -z "$LEAN_ACCEPTANCE_WARN" ] || log "$LEAN_ACCEPTANCE_WARN"
     lean_sandbox_prepare "$project"

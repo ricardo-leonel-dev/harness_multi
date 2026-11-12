@@ -15,7 +15,9 @@
 # changed files. Fix runs at most once. Never logs out: the caller runs
 # `scripts/harness.sh log-out --lean` itself (its own gate run is the suite run it needs).
 #
-# Output: one line per step (result, duration, turns and cost from the result JSON), the final
+# Output: one line per step (result, duration, turns and cost from the result JSON; no cost for
+# a claude-mini session, whose figure is Claude Code's estimate at Anthropic prices, as in its
+# usage row, nor for codex, which reports none; total: sums the costs shown), the final
 # gate's headings only, where the full logs are, `git status --short`, the feature's usage
 # table (the sessions this chain opened, a sum over them, and how many earlier ones
 # `run.sh usage <name>` shows: lean/lib.sh lean_usage_table), on PASS with
@@ -29,6 +31,9 @@
 # else 30. On expiry the step's process group gets TERM, then KILL 5 s later (perl: stock
 # macOS bash 3.2 has no timeout). A process that started a session of its own (the gate's
 # suite, lean/lib.sh lean_in_group) is stopped by its parent's TERM trap, not by the cap.
+# A session stopped by the cap returns nothing to run.sh, so the chain records its usage row
+# (tool, model and mode from the `[lean] session:` line run.sh logged; the step's time; turns,
+# tokens and cost "?"; note "timed out after <N>m"), only when run.sh recorded none for it.
 # With scripts/harness.sh present, each step's result is appended to the session log
 # (best-effort: a failed append-log never fails the chain).
 
@@ -121,13 +126,21 @@ lean_chain() {
   }
   # step <step> — runs it, adds its line, sets fail_reason (empty: ok).
   step() {
-    local st="$1" log rc=0 start dur res="" info="" extra="" parsed
+    local st="$1" log rc=0 start dur res="" info="" extra="" parsed rows_before session="" s_tool s_model s_mode
     n=$((n + 1)); log="$logs/$n-$st.log"; fail_reason=""
+    rows_before=$(lean_usage_count "$project" "$name" 2>/dev/null || echo 0)
     start=$SECONDS
     lean_chain_run "$secs" "$log" bash "$LEAN_DIR/run.sh" "$st" "$name" "${pass_args[@]}" || rc=$?
     dur=$((SECONDS - start)); total=$((total + dur)); last_rc=$rc
+    # "<tool> <model|-> <mode>" of the session run.sh opened (empty: it opened none).
+    session=$(sed -n 's/^\[lean\] session: //p' "$log" | tail -1)
     if [ "$rc" = 124 ]; then
       fail_reason="timed out after ${mins}m"
+      # lean_chain_run waited for the whole process group: run.sh can't add a row after this.
+      if [ -n "$session" ] && [ "$(lean_usage_count "$project" "$name" 2>/dev/null || echo 0)" = "$rows_before" ]; then
+        read -r s_tool s_model s_mode <<<"$session"   # not set --: a model id like opus[1m] would glob
+        lean_usage_record "$project" "$name" "$st" "${s_mode:-$mode}" "$s_tool" "${s_model:--}" "$dur" '?' "timed out after ${mins}m" || true
+      fi
     elif [ "$st" = gate ] && [ "$rc" = 1 ]; then
       fail_reason="gate failed"
     elif [ "$rc" != 0 ]; then
@@ -140,6 +153,7 @@ lean_chain() {
              | "\(.is_error) \(.num_turns // "-") \(.total_cost_usd // "-") \(.subtype // "-" | tostring | gsub("\\s"; "_"))"' "$res" 2>/dev/null) && [ -n "$parsed" ]; then
           set -- $parsed
           info=" turns=$2"
+          [ "${session%% *}" != claude-mini ] || set -- "$1" "$2" - "$4"   # not MiniMax's bill
           [ "$3" = - ] || { info="$info cost=\$$(printf '%.2f' "$3")"
             cost_total=$(awk -v a="${cost_total:-0}" -v b="$3" 'BEGIN { printf "%.2f", a + b }'); }
           if [ -z "$fail_reason" ] && [ "$4" = error_max_turns ]; then

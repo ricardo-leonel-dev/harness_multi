@@ -70,13 +70,15 @@ think of.
    verdict `changes`, gets one fix and a last gate. It stops at the first failure (a step exiting
    non-zero or past its cap, a session past `lean.max_turns`, a result JSON missing or with `is_error`, a risk review without a
    `VERDICT:` line or that changed files) and refuses to start when the plan awaits approval or a
-   risk feature has no frozen manifest. Output: one line per step (duration, turns, cost), the
+   risk feature has no frozen manifest. Output: one line per step (duration, turns, cost; no cost
+   for `claude-mini` or Codex, as in step 8, and `total:` sums only the costs shown), the
    final gate's headings (the full report and every step's log stay under `<lean state>/lean/`),
    `git status --short`, the usage table of the sessions this chain opened (step 8), then
    `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`; exit 0 only on PASS. On PASS with the harness, a `next:` line before it holds the `log-out --lean` command to
    run: `--changes` lists the files the gate checked (quoted), only `--closure` is left to fill
    in. Each step is capped at `--step-minutes` (default `lean.step_minutes`, else 30): its
-   process group is killed and the step fails. With the harness, each step's result is
+   process group is killed, the step fails, and a session it stopped still gets its usage row
+   (step 8). With the harness, each step's result is
    `append-log`ged. It never logs out.
 8. **Usage**: `lean/run.sh usage <name>` prints every session recorded for the feature (read-only).
    Each session `run.sh` opens (implement, review, fix; chained or by hand) appends a row to
@@ -87,8 +89,11 @@ think of.
    tokens are taken out of input, so input is uncached input for every tool; Codex reports no
    cost). Cost only as the CLI reports it, never from a price table; left out for `claude-mini`
    (Claude Code's estimate at Anthropic prices, not MiniMax's bill). An interactive session gets
-   its duration and `interactive (not measured)`; an unreadable result, `?` fields. A step that
-   `chain` kills at `--step-minutes` records no row.
+   its duration and `interactive (not measured)`; an unreadable result, `?` fields. A session
+   `chain` stops at `--step-minutes` returns no result: `chain` records its row (tool, model,
+   mode, the step's time, `?` turns / tokens / cost (cost `-` where it is left out above), note
+   `timed out after <N>m`), once, and
+   lists it in its usage table.
 
 Every step (not `usage`) refuses a name without `docs/features/<name>.md` before pinning anything.
 Steps 3–5 open an interactive session (`--headless` for `claude -p` / `codex exec`). Close with
