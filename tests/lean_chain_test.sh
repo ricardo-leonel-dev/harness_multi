@@ -15,13 +15,15 @@
 #      `next:` log-out --lean line (the gate's files, shell-quoted) right before CHAIN: PASS,
 #      never without the harness or on FAIL.
 #   5. the per-step cap (lean.step_minutes, --step-minutes) kills the step's processes and
-#      reports it.
+#      reports it; the stopped session leaves exactly one usage row (note "timed out after
+#      <N>m"), shown in the chain's table; a session that finished leaves no extra row.
 #   6. a lean/chain.sh changed after the pin is refused before run.sh sources it.
 #   7. who opens the review: normal mode uses lean.reviewer when set (any adapter, may fix,
 #      even the implementer's tool), else the implementer; fix stays on the implementer; risk
 #      mode without lean.reviewer uses its default; the object form {normal, risk} picks one
 #      per mode (a missing key falls back, .risk = implementer is refused); any other type
-#      exits 2 naming the key before a session opens.
+#      exits 2 naming the key before a session opens. A claude-mini step's line shows no cost
+#      (none summed into total:), as its usage row.
 #
 # Usage: bash tests/lean_chain_test.sh   (exits non-zero on the first failure)
 
@@ -245,8 +247,31 @@ for f in stub.pid sleep.pid; do
   pid=$(cat "$WORK/$f"); ! kill -0 "$pid" 2>/dev/null || { kill "$pid"; die "the step's $f process should be killed"; }
 done
 grep -q '^lean chain: implement fail (timed out' "$WORK/applog" || die "timeout append-log: $(cat "$WORK/applog")"
+# The stopped session still gets one usage row (the chain writes it: run.sh never returned),
+# with the step's time and "?" for what only the result JSON knows, in this chain's table.
+U="$(bash -c '. "$1/lib.sh"; lean_usage_file "$2" f' _ "$L" "$P")"
+[ "$(grep -c 'timed out after 0.05m$' "$U")" = 1 ] || die "one usage row for the timed-out session: $(cat "$U")"
+T=$'\t'
+case "$(tail -1 "$U")" in *"${T}f${T}implement${T}normal${T}claude${T}default${T}?${T}?${T}?${T}?${T}?${T}"[0-9]*"${T}?${T}timed out after 0.05m") ;;
+  *) die "timed-out row: $(tail -1 "$U")" ;; esac
+grep -q '^usage (f: 1 session' "$WORK/out" && grep -q '^  implement .*timed out after 0.05m$' "$WORK/out" \
+  || die "the chain's usage table shows the timed-out session: $(out)"
+rows=$(awk 'NR > 1' "$U" | wc -l | tr -d ' ')
 reset; scn implement 'sleep 2; printf "done\n" > src/app.txt'
 chain --step-minutes 1 || die "--step-minutes overrides lean.step_minutes: $(out)"
+[ "$(awk 'NR > 1' "$U" | wc -l | tr -d ' ')" = $((rows + 2)) ] || die "a finished session leaves one row each (implement, review): $(cat "$U")"
+[ "$(grep -c 'timed out' "$U")" = 1 ] || die "no timeout row when the session finished: $(cat "$U")"
+grep -q '^usage (f: 2 sessions' "$WORK/out" || die "the chain's table: the 2 sessions it opened: $(out)"
+# A model id with glob characters is recorded as written, even with a file it would match here.
+g -C "$P" checkout -q -- src/app.txt
+lean_conf "$P" '.lean.implementer = "claude:opus[1m]"'; touch "$P/opusm"
+rm -f "$(bash -c '. "$1/lib.sh"; lean_state_dir "$2"' _ "$L" "$P")/lean/f/trusted.sha"
+reset; scn implement "sleep 60 & wait"
+chain && die "a step past its cap must fail (opus[1m]): $(out)"
+case "$(tail -1 "$U")" in *"${T}implement${T}normal${T}claude${T}opus[1m]${T}"*"${T}timed out after 0.05m") ;;
+  *) die "timed-out row keeps the model id unglobbed: $(tail -1 "$U")" ;; esac
+rm -f "$P/opusm"; lean_conf "$P" '.lean.implementer = "claude"'
+rm -f "$(bash -c '. "$1/lib.sh"; lean_state_dir "$2"' _ "$L" "$P")/lean/f/trusted.sha"
 (cd "$P" && bash "$L/run.sh" chain f --step-minutes x) > "$WORK/out" 2>&1 && die "a bad --step-minutes must fail"
 (cd "$P" && bash "$L/run.sh" implement f --step-minutes 1) > "$WORK/out" 2>&1 && die "--step-minutes is chain only"
 pass "the step cap kills the step's processes and reports it; --step-minutes overrides the config"
@@ -285,7 +310,10 @@ chain || die "normal with a codex reviewer that fixes: $(out)"
 [ "$(steps)" = "implement:ok review:ok gate:ok" ] || die "codex review order: $(steps) / $(out)"
 [ "$(tools)" = "implement claude-mini:-,review codex:gpt-x" ] || die "codex reviewer: $(tools)"
 grep -Eq '^review +ok +[0-9]+m[0-9]+s turns=3$' "$WORK/out" || die "codex review line (turns, no cost): $(out)"
-grep -q '^total: .*cost \$0.25' "$WORK/out" || die "total cost counts the claude-mini step only: $(out)"
+# claude-mini's total_cost_usd (0.25 from the stub) is Claude Code's Anthropic-price estimate:
+# not shown, not summed, as its usage row.
+grep -Eq '^implement +ok +[0-9]+m[0-9]+s turns=3$' "$WORK/out" || die "claude-mini implement line (turns, no cost): $(out)"
+grep -q '^total: ' "$WORK/out" && ! grep -q '^total: .*cost' "$WORK/out" || die "no total cost from claude-mini or codex: $(out)"
 g -C "$P" checkout -q -- src/app.txt
 reset; scn fix 'printf "done\n" > src/app.txt'
 chain || die "normal with a codex reviewer, fix round: $(out)"

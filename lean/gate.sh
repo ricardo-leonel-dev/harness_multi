@@ -110,7 +110,7 @@ to_project_relative() {
   done
 }
 # manifest_paths <manifest> — the paths of a shasum manifest, relative to the project.
-manifest_raw() { awk 'NF { sub(/^[^ ]+ [ *]/, ""); print }' "$@"; }
+manifest_raw() { lean_manifest_paths "$@"; }
 manifest_paths() { manifest_raw "$@" | to_project_relative; }
 doc="docs/features/$name.md"
 verify=$(jq -r '.verify_command // empty' .harness.json 2>/dev/null)
