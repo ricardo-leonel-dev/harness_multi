@@ -24,5 +24,6 @@ exactly one line: `VERDICT: approve` or `VERDICT: changes`.
 ## Fixing
 
 Fix the findings in `docs/features/<name>.review.md` and the failed checks the prompt gives you. The
-acceptance tests stay frozen. Finish with the tests the report names passing (not the full suite:
+acceptance tests stay frozen, and so do **Files** and **Changed tests** (a finding that needs another
+file is answered in your final message, not by widening the plan). Finish with the tests the report names passing (not the full suite:
 the gate runs it). Do not commit or push.

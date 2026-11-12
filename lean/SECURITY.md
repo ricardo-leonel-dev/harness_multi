@@ -111,6 +111,21 @@ Not sandboxed: a `claude-mini` or `codex-m3` started by hand, and a suite you st
   session changed (content or mode), even back to `HEAD`, counts as the feature's change.
   Deleting the feature's lean state by hand (its `lean/<name>/` folder and its sessions'
   results next to it) loses that record: a pin afterwards is a first pin again.
+- **The plan's scope** (`plan.lists`, next to `dirty.sha`): the paths under **Files** and
+  **Changed tests**, which decide what the gate lets a feature change. Sessions can write the
+  document (it is in the project), so without this a session could list the file it wanted to
+  change and pass (seen in a real run: a fix session added a 238-line out-of-scope test helper and
+  listed it). The lists are copied before the first session opens (each pin rewrites them only
+  while no session of the feature has run, `<name>.system.md` being written before each one; an
+  approved copy, from `approve-plan` or `run.sh freeze`, is never rewritten by a pin) and, once a
+  session ran, the gate reads them instead of the document and fails on any path added or removed
+  there. Only `lean/run.sh replan <name>` rewrites them, and it refuses inside a session
+  (`lean_in_session`); for an approved plan it needs `--by <name>`, the human who approved the
+  change. Removed when the feature's lean lifecycle ends, like `dirty.sha`. A feature whose
+  sessions ran but has no copy (an older feature, a lifecycle restarted with `set-mode`, a reused
+  name, a lost file) fails the gate until the leader runs `replan`: the document is never trusted
+  after a session. An approved plan stays approved across a lost state folder: `claim` marks the
+  lists approved again from the database (only re-reading the document before any session).
 - **Processes outside the sandbox** (gate profile only): mach services are denied but for an
   allowlist (`LEAN_MACH_ALLOW` in `sandbox.sh`, plus `lean.allowed_mach`), which never includes
   LaunchServices (`open`), Apple Events (`osascript`), the pasteboard or cfprefsd's agent (other

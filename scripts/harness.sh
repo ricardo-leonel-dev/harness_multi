@@ -198,8 +198,9 @@
 #                                              --quick): refused when HEAD moved off the session base (a commit);
 #                                              runs lean/gate.sh against the session base — suite green, no
 #                                              assertion removed unless listed under **Changed tests**, every changed
-#                                              file under **Files**; risk mode: the acceptance tests match the manifest
-#                                              frozen at approve-plan (refused when the ~/.cache copy was rewritten),
+#                                              file under **Files** (both lists as pinned outside the project once a
+#                                              session ran: lean/run.sh replan accepts a change); risk mode: the
+#                                              acceptance tests match the manifest frozen at approve-plan (refused when the ~/.cache copy was rewritten),
 #                                              and the harness-owned files match the hashes pinned at claim;
 #                                              the suite runs under the sessions' sandbox rules (lean/gate.sh);
 #                                              docs/features/<name>.review.md has a VERDICT line and the reviewer
@@ -1144,13 +1145,13 @@ fi
 
 # lean_claim_pin <feature_id> [keep] — for a feature with a lean mode, at claim: pins the
 # trusted files' hashes afresh (keep: only what isn't pinned yet, on
-# a resume), and in risk mode writes the manifest frozen at approve-plan to the lean state
-# again, so lean/run.sh finds risk mode even if the state folder was lost or the project
+# a resume), records an approved plan's lists as approved (lean_plan_mark_approved), and in
+# risk mode writes the manifest frozen at approve-plan to the lean state again, so lean/run.sh finds risk mode even if the state folder was lost or the project
 # moved. Best-effort: a failure is a [WARN] (lean/run.sh pins before its first session).
 lean_claim_pin() {
-  local fid="$1" keep="${2:-}" row name mode frozen state
-  row=$(db "SELECT name, COALESCE(mode, ''), COALESCE(plan_frozen, '') FROM features WHERE id=$fid;")
-  IFS='|' read -r name mode frozen <<<"$row"
+  local fid="$1" keep="${2:-}" row name mode frozen approved_by state
+  row=$(db "SELECT name, COALESCE(mode, ''), CASE WHEN plan_approved_at IS NULL THEN '' ELSE COALESCE(NULLIF(plan_approved_by, ''), 'approve-plan') END, COALESCE(plan_frozen, '') FROM features WHERE id=$fid;")
+  IFS='|' read -r name mode approved_by frozen <<<"$row"
   [ -n "$mode" ] || return 0
   if ! declare -F lean_pin >/dev/null; then warn "lean/lib.sh is missing: hashes not pinned at claim"; return 0; fi
   lean_adopt_legacy "$(pwd)"
@@ -1160,6 +1161,11 @@ lean_claim_pin() {
     mkdir -p "$state/frozen" && printf '%s\n' "$frozen" > "$state/frozen/$name.sha" \
       || warn "could not write $state/frozen/$name.sha"
   fi
+  # An approved plan's lists stay approved even if the state folder was lost (lean/lib.sh
+  # lean_plan_mark_approved; before lean_pin, whose plain pin would write them unapproved).
+  if [ -n "$approved_by" ] && declare -F lean_plan_mark_approved >/dev/null; then
+    lean_plan_mark_approved "$(pwd)" "$name" "$approved_by" 2>/dev/null || warn "could not record the plan approval of $name in $(lean_plan_file "$(pwd)" "$name")"
+  fi
   if [ -n "$keep" ]; then lean_pin "$(pwd)" "$name" || warn "could not pin feature $name's hashes in $state/lean/$name"
   else lean_pin "$(pwd)" "$name" --again || warn "could not pin feature $name's hashes in $state/lean/$name"; fi
 }
@@ -1167,12 +1173,13 @@ lean_claim_pin() {
 # lean_forget_baseline <name> — the feature's lean lifecycle ended (log-out closed it, it was
 # superseded or deleted, or set-mode none put it on the reviewer path): its dirty.sha (the files
 # already changed before its first pin, lean/lib.sh lean_pin) goes. It is recorded once per
-# feature and never again, so nothing later can take it for this feature's baseline.
+# feature and never again, so nothing later can take it for this feature's baseline. Its
+# plan.lists (the plan's pinned **Files** / **Changed tests**, lean_plan_pin) goes with it.
 lean_forget_baseline() {
   local state
   [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
   state=$(lean_state_dir "$(pwd)" 2>/dev/null) || return 0
-  rm -f "$state/lean/$1/dirty.sha"
+  rm -f "$state/lean/$1/dirty.sha" "$state/lean/$1/plan.lists"
 }
 
 # approve-plan <TARGET> [--by NAME] — record the human's approval of a lean
@@ -1240,6 +1247,12 @@ RETURNING feature_number || ' ' || name;")
   if [ -z "$updated" ]; then
     [ -z "$frozen_file" ] || rm -f "$frozen_file"
     fail "not approvable: feature $target changed meanwhile — run status and try again"; exit 1
+  fi
+  # The approved plan's **Files** / **Changed tests**, pinned outside the project (lean/lib.sh
+  # lean_plan_pin): a later change needs lean/run.sh replan --by, the user's approval again.
+  if declare -F lean_plan_pin >/dev/null; then
+    lean_adopt_legacy "$(pwd)"   # before the state folder exists: the legacy copy needs it absent
+    lean_plan_pin "$(pwd)" "$name" --approved "$by" 2>/dev/null || warn "could not pin the plan's lists of $name in $(lean_plan_file "$(pwd)" "$name")"
   fi
   ok "approved plan for feature $updated (mode $mode, by: $by$note)"
   sync_mirror

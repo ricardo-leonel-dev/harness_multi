@@ -214,7 +214,7 @@ lean_chain() {
   [ "$n" = 0 ] || echo "total: $(fmt_dur "$total")${cost_total:+, cost \$$cost_total}"
   if [ -n "$gate_log" ]; then
     echo "gate:"
-    { grep -E '^(ALL CHECKS PASS|HEAD MOVED|SANDBOX UNAVAILABLE|SUITE FAILS|FROZEN |ACCEPTANCE TESTS FAIL|ASSERTION LINES REMOVED|MISSING: |CHANGED BUT NOT LISTED|PATHS WITH A NEWLINE|FOLDERS THE GATE|CLAUDE\.md / |CHANGED OUTSIDE|gate: ignoring |\[WARN\])' "$gate_log" || true; } \
+    { grep -E '^(ALL CHECKS PASS|HEAD MOVED|SANDBOX UNAVAILABLE|SUITE FAILS|FROZEN |ACCEPTANCE TESTS FAIL|ASSERTION LINES REMOVED|MISSING: |CHANGED BUT NOT LISTED|PLAN LISTS CHANGED|NO PINNED PLAN LISTS|PATHS WITH A NEWLINE|FOLDERS THE GATE|CLAUDE\.md / |CHANGED OUTSIDE|gate: ignoring |\[WARN\])' "$gate_log" || true; } \
       | cut -c1-160 | head -10 | sed 's/^/  /'
     echo "  full report: $gate_log"
   fi

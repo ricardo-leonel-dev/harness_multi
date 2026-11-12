@@ -62,6 +62,19 @@ think of.
    re-pin, leaves it as it is); it goes when the feature closes (`log-out --lean`), is
    superseded or deleted, or `set-mode <name> none`. A feature pinned before `dirty.sha` existed
    counts every change, as before.
+   **The plan's lists are pinned.** Sessions write the document (they append **Decisions while
+   implementing**), so **Files** and **Changed tests** are copied to `<lean state>/lean/<name>/plan.lists`,
+   outside the project: by every pin until the feature's first session opens (the leader may still
+   edit the plan), and at `approve-plan` (or `run.sh freeze` without the harness) as approved.
+   Once a session ran, the gate (and so `log-out --lean`) checks against those lists, and fails
+   with `PLAN LISTS CHANGED SINCE PINNED`, naming each path added or removed, when the document's
+   lists differ. Sessions report a file they need instead of listing it; the leader accepts a
+   change, outside any session, with `lean/run.sh replan <name>` (refused inside a session). A plan
+   that was approved (risk mode, or normal `--approval`) needs the user's approval of the change
+   again: `lean/run.sh replan <name> --by <name>` records who. Other sections may change freely.
+   `plan.lists` goes with `dirty.sha`. Once a session ran no pin writes it, so a feature whose
+   sessions ran without one (an older feature, a `set-mode none` round trip, a reused name)
+   fails the gate with `NO PINNED PLAN LISTS` until the leader checks the lists and runs `replan`.
 
 7. **Chain** (instead of 2–6, when the steps should run unattended): `lean/run.sh chain <name>
    [--base <rev>] [--step-minutes N]` runs them headless in one call, each as its own `run.sh
