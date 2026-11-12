@@ -7,13 +7,15 @@
 #     --verify-command "npm test"
 #
 # Harness-core files (AGENTS.md + a CLAUDE.md symlink to it, .claude/agents/*.md,
-# .codex/agents/*.toml, init.sh, scripts/*.sh) are copied/relinked unconditionally
+# .codex/agents/*.toml, init.sh, scripts/*.sh, lean/) are copied/relinked unconditionally
 # — re-running install.sh refreshes them. docs/{architecture,conventions,verification}.md,
 # CHECKPOINTS.md, specs/, and .harness.json are created
 # only if absent — never clobbers project-owned content. Shared instructions and
 # docs/specs.md are refreshed; --profile postgres explicitly adds shared SQL tools
 # on each install. Harness-owned files and the state/ snapshot are listed in the
 # repository's .git/info/exclude so they never reach the project's history.
+# .claude/settings.local.json gets allow rules for ./init.sh and the routine
+# harness.sh subcommands (Claude Code only), merged into any existing rules.
 
 set -u
 TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +26,7 @@ warn() { printf '[WARN]  %s\n' "$1"; }
 fail() { printf '[FAIL]  %s\n' "$1" >&2; }
 
 PROJECT_SLUG=""
+HIDE_HARNESS=0
 DESCRIPTION=""
 VERIFY_COMMAND=""
 SUPABASE_URL_ENV="SUPABASE_URL"
@@ -66,6 +69,11 @@ Usage: install.sh --slug SLUG [options]
                                 --by when the leader doesn't pass an explicit name. On first install, install.sh
                                 prompts interactively if --human-user is not passed. Skipping the prompt is
                                 only possible in CI by passing --human-user "...".
+  --hide-harness               set .harness.json::hide_harness (also on an existing install): the project's git
+                                must not show the harness — its project-owned files (.harness.json, CHECKPOINTS.md,
+                                docs/{architecture,conventions,verification}.md, specs/, and test folders, the lean
+                                flow's docs/features/ and acceptance dir when git tracks nothing in them)
+                                are excluded too, and agents check commits/PRs with harness.sh hide-check.
 EOF
 }
 
@@ -85,6 +93,7 @@ while [ $# -gt 0 ]; do
     --notion-status-done) NOTION_STATUS_DONE="$2"; shift 2 ;;
     --notion-status-spec-ready) NOTION_STATUS_SPEC_READY="$2"; shift 2 ;;
     --human-user) HUMAN_USER="$2"; shift 2 ;;
+    --hide-harness) HIDE_HARNESS=1; shift ;;
     --postgres-schemas) POSTGRES_SCHEMAS="${2:-}"; POSTGRES_SCHEMAS_SET=1; shift 2 ;;
     --postgres-database) POSTGRES_DATABASE="${2:-}"; POSTGRES_DATABASE_SET=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -168,6 +177,83 @@ gen_uuid() {
 
 sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 
+# link_target_dir <path> — physical directory a symlink at <path> points into
+# (empty when <path> is not a symlink).
+link_target_dir() {
+  local t
+  [ -L "$1" ] || return 0
+  t="$(readlink "$1")"
+  case "$t" in /*) ;; *) t="$(dirname "$1")/$t" ;; esac
+  (cd "$(dirname "$t")" 2>/dev/null && pwd -P)
+}
+
+# A git worktree given the harness by `harness.sh link-worktree` shares the main
+# checkout's files through symlinks: copying into it would write through those
+# links and leave regular copies of files added since (a stale agent_usage.py
+# that later breaks record-usage). The main checkout's install refreshes it.
+if [ -L "$TARGET_DIR/harness.db" ] || [ -L "$TARGET_DIR/scripts" ] || [ -L "$TARGET_DIR/scripts/harness.sh" ]; then
+  fail "$TARGET_DIR shares another checkout's harness (link-worktree symlinks): run install.sh in that main checkout instead — it re-links its worktrees"
+  exit 1
+fi
+
+# Every harness file install.sh copies, and each directory down to it, must be
+# a real file or directory of this project: cp onto a self-referential link
+# (`f -> f`, left by an older link-worktree repair) fails with "Too many levels
+# of symbolic links" and a linked directory would send the copies into another
+# checkout or folder. Checked before anything is written.
+linked_dest() {
+  local rest="$1" sub="" part
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    if [ "$part" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+    sub="${sub:+$sub/}$part"
+    if [ -L "$TARGET_DIR/$sub" ]; then printf '%s\n' "$sub"; return 0; fi
+    [ -e "$TARGET_DIR/$sub" ] || return 0
+  done
+}
+DESTS="AGENTS.md init.sh scripts/time_phase.py scripts/agent_usage.py harness/installed-files.txt"
+for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do DESTS="$DESTS .claude/agents/${name##*/}"; done
+for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do DESTS="$DESTS .codex/agents/${name##*/}"; done
+for name in "$TOOLKIT_DIR"/scripts/*.sh; do DESTS="$DESTS scripts/${name##*/}"; done
+for name in coverage persona timing testing lifecycle notion cross-project; do DESTS="$DESTS harness/instructions/$name.md"; done
+DESTS="$DESTS $(cd "$TOOLKIT_DIR" && find lean -type f | tr '\n' ' ')"
+if [ "$PROFILE" = postgres ]; then
+  DESTS="$DESTS scripts/mock_data.py scripts/assemble_migration.py scripts/build_traceability.sh scripts/run_tests.sh scripts/templates/acceptance_test_prologue.sql harness/instructions/mock-data.md harness/instructions/postgres.md"
+  DESTS="$DESTS $(cd "$TOOLKIT_DIR/profiles/postgres" && find test_helpers -type f | sed 's|^|harness/|' | tr '\n' ' ')"
+fi
+LINKED=""
+for rel in $DESTS; do
+  hit="$(linked_dest "$rel")"
+  [ -z "$hit" ] || case " $LINKED " in *" $hit "*) ;; *) LINKED="${LINKED:+$LINKED }$hit" ;; esac
+done
+# One summary [FAIL] (count and the first few, each with what it is), not a
+# line per file: a partly linked worktree can have a dozen of them.
+if [ -n "$LINKED" ]; then
+  n=0 shown=""
+  for hit in $LINKED; do
+    n=$((n + 1))
+    [ "$n" -le 3 ] || continue
+    if [ "$(readlink "$TARGET_DIR/$hit")" = "$TARGET_DIR/$hit" ] || [ "$(readlink "$TARGET_DIR/$hit")" = "${hit##*/}" ]; then
+      what="a link to itself, left by an older link-worktree repair"
+    elif [ ! -e "$TARGET_DIR/$hit" ]; then
+      what="a broken or looping link to $(readlink "$TARGET_DIR/$hit")"
+    else
+      what="a link to $(readlink "$TARGET_DIR/$hit")"
+    fi
+    shown="${shown:+$shown; }$hit ($what)"
+  done
+  [ "$n" -le 3 ] || shown="$shown; and $((n - 3)) more"
+  gd="$(git -C "$TARGET_DIR" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  gcd="$(cd "$TARGET_DIR" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P || true)"
+  if [ -n "$gd" ] && [ -n "$gcd" ] && [ ! "$gd" -ef "$gcd" ]; then
+    hint="this is a linked git worktree: run install.sh in its main checkout instead — it re-links its worktrees"
+  else
+    hint="make each one a regular file or directory of this project, then re-run install.sh"
+  fi
+  fail "$n harness path(s) are links, install.sh would copy harness files through them into another place: $shown. $hint"
+  exit 1
+fi
+
 echo "── 1. Copying harness-core files ───────────────────────"
 
 cp "$TOOLKIT_DIR/AGENTS.md" "$TARGET_DIR/AGENTS.md"
@@ -184,6 +270,25 @@ cp "$TOOLKIT_DIR/scripts/agent_usage.py" "$TARGET_DIR/scripts/agent_usage.py"
 chmod +x "$TARGET_DIR/init.sh" "$TARGET_DIR"/scripts/*.sh
 ok "copied AGENTS.md (+ CLAUDE.md symlink), .claude/agents/*.md, .codex/agents/*.toml, init.sh, scripts/*.sh, scripts/{time_phase,agent_usage}.py"
 
+# The files copied above (and the profile ones below) are listed, relative to
+# the project, in harness/installed-files.txt: link-worktree replaces a stale
+# regular copy in a worktree only for a path in that list, never for a project
+# file that merely happens to be git-ignored (scripts/local.json, .codex/config.toml,
+# mock-data/). INSTALLED_FILES is appended to next to every cp that adds one.
+INSTALLED_FILES="AGENTS.md init.sh scripts/time_phase.py scripts/agent_usage.py"
+for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do INSTALLED_FILES="$INSTALLED_FILES .claude/agents/${name##*/}"; done
+for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do INSTALLED_FILES="$INSTALLED_FILES .codex/agents/${name##*/}"; done
+for name in "$TOOLKIT_DIR"/scripts/*.sh; do INSTALLED_FILES="$INSTALLED_FILES scripts/${name##*/}"; done
+
+# lean/ (the lean flow: gate, runner, sandbox, adapters, instructions) sits at the
+# project root, where harness.sh looks for the gate (<scripts>/../lean/gate.sh).
+# Harness-owned: refreshed on every install and excluded from git below.
+mkdir -p "$TARGET_DIR/lean"
+cp -R "$TOOLKIT_DIR/lean/." "$TARGET_DIR/lean/"
+find "$TARGET_DIR/lean" -type f -name '*.sh' -exec chmod +x {} +
+ok "copied lean/ (gate, runner, adapters, instructions)"
+INSTALLED_FILES="$INSTALLED_FILES $(cd "$TOOLKIT_DIR" && find lean -type f | LC_ALL=C sort | tr '\n' ' ')"
+
 # Shared instructions are harness-owned and refreshed even in existing projects.
 mkdir -p "$TARGET_DIR/harness/instructions"
 cp "$TOOLKIT_DIR/shared/coverage.md" "$TARGET_DIR/harness/instructions/coverage.md"
@@ -192,6 +297,8 @@ cp "$TOOLKIT_DIR/shared/timing.md" "$TARGET_DIR/harness/instructions/timing.md"
 for name in testing lifecycle notion cross-project; do
   cp "$TOOLKIT_DIR/shared/$name.md" "$TARGET_DIR/harness/instructions/$name.md"
 done
+INSTALLED_FILES="$INSTALLED_FILES harness/instructions/coverage.md harness/instructions/persona.md harness/instructions/timing.md"
+for name in testing lifecycle notion cross-project; do INSTALLED_FILES="$INSTALLED_FILES harness/instructions/$name.md"; done
 if [ "$PROFILE" = postgres ]; then
   mkdir -p "$TARGET_DIR/scripts/templates"
   cp "$TOOLKIT_DIR/profiles/postgres/mock_data.py" "$TARGET_DIR/scripts/mock_data.py"
@@ -211,7 +318,10 @@ if [ "$PROFILE" = postgres ]; then
   cp -r "$TOOLKIT_DIR/profiles/postgres/test_helpers/." "$TARGET_DIR/harness/test_helpers/"
   chmod +x "$TARGET_DIR/harness/test_helpers/install.sh" "$TARGET_DIR/harness/test_helpers/uninstall.sh"
   ok "refreshed postgres profile tools, shared instructions, and test_helpers (harness/test_helpers/)"
+  INSTALLED_FILES="$INSTALLED_FILES scripts/mock_data.py scripts/assemble_migration.py scripts/build_traceability.sh scripts/run_tests.sh scripts/templates/acceptance_test_prologue.sql harness/instructions/mock-data.md harness/instructions/postgres.md"
 fi
+# shellcheck disable=SC2086
+printf '%s\n' $INSTALLED_FILES > "$TARGET_DIR/harness/installed-files.txt"
 
 # The harness no longer installs Claude Code hooks, so Claude Code and Codex CLI
 # behave the same: agents run ./init.sh themselves (it also records agent usage)
@@ -238,8 +348,35 @@ if [ -f "$SETTINGS" ] && jq -e . "$SETTINGS" >/dev/null 2>&1; then
   fi
 fi
 
+# Claude Code's auto mode classifier sometimes denies the harness's own commands
+# (record-review taken for an "external system write", init.sh for an unseen
+# script), which stalls a feature until the human runs them by hand. Allow rules
+# skip the classifier for init.sh and the routine subcommands agents run; the
+# human gate (approve-spec) and the commands that cancel, delete or supersede
+# keep going through it. They go in the project's .claude/settings.local.json
+# (never global, never committed) and are merged into what is there; Codex CLI
+# does not read this file.
+LOCAL_SETTINGS="$TARGET_DIR/.claude/settings.local.json"
+HARNESS_ALLOW='["Bash(./init.sh:*)"'
+for sub in status recall check-blockers claim claim-spec set-plan set-surfaces add-surface append-log tick-tasks test record-init record-review mark-spec-ready log-out; do
+  HARNESS_ALLOW="$HARNESS_ALLOW,\"Bash(scripts/harness.sh $sub:*)\""
+done
+HARNESS_ALLOW="$HARNESS_ALLOW]"
+if [ -f "$LOCAL_SETTINGS" ] && ! jq -e . "$LOCAL_SETTINGS" >/dev/null 2>&1; then
+  warn ".claude/settings.local.json is not valid JSON — not adding the harness allow rules $HARNESS_ALLOW"
+else
+  [ -f "$LOCAL_SETTINGS" ] || printf '{}\n' > "$LOCAL_SETTINGS"
+  MERGED="$(jq --argjson add "$HARNESS_ALLOW" \
+    '.permissions.allow = reduce $add[] as $r ((.permissions.allow // []); if any(.[]; . == $r) then . else . + [$r] end)' \
+    "$LOCAL_SETTINGS")"
+  if [ "$MERGED" != "$(jq . "$LOCAL_SETTINGS")" ]; then
+    printf '%s\n' "$MERGED" > "$LOCAL_SETTINGS"
+    ok "allowed ./init.sh and the routine scripts/harness.sh subcommands in .claude/settings.local.json (Claude Code only)"
+  fi
+fi
+
 # specs/ holds git-tracked spec content for sdd=1 features (see docs/specs.md) —
-# deliberately NOT added to .gitignore below, unlike harness.db.
+# deliberately NOT in the .git/info/exclude block below, unlike harness.db.
 if [ -d "$TARGET_DIR/specs" ]; then
   :
 else
@@ -345,10 +482,11 @@ jq -n \
   > "$TARGET_DIR/.harness.json"
 ok "wrote .harness.json"
 fi
-
-touch "$TARGET_DIR/.gitignore"
-grep -qxF 'harness.db' "$TARGET_DIR/.gitignore" || echo 'harness.db' >> "$TARGET_DIR/.gitignore"
-ok "harness.db added to .gitignore"
+if [ "$HIDE_HARNESS" -eq 1 ] && [ "$(jq -r '.hide_harness // false' "$TARGET_DIR/.harness.json")" != true ]; then
+  jq '.hide_harness = true' "$TARGET_DIR/.harness.json" > "$TARGET_DIR/.harness.json.tmp" \
+    && mv "$TARGET_DIR/.harness.json.tmp" "$TARGET_DIR/.harness.json"
+  ok "set hide_harness in .harness.json"
+fi
 
 # Everything install.sh owns (copied, refreshed or generated) stays out of git:
 # the rules go to .git/info/exclude — local, never committed — so a project's
@@ -361,17 +499,39 @@ exclude_harness_files() {
     warn "not inside a git repository — skipping .git/info/exclude"
     return 0
   fi
-  local prefix exclude_rel exclude_file snapshot begin end name entries tracked
+  local prefix exclude_rel exclude_file snapshot begin end name entries tracked acceptance
   prefix="$(git -C "$TARGET_DIR" rev-parse --show-prefix)"
   exclude_rel="$(cd "$TARGET_DIR" && git rev-parse --git-path info/exclude)"
   case "$exclude_rel" in /*) exclude_file="$exclude_rel" ;; *) exclude_file="$TARGET_DIR/$exclude_rel" ;; esac
   snapshot="$(jq -r '.snapshot_path // "state"' "$TARGET_DIR/.harness.json")"
   snapshot="${snapshot%/}"
 
-  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ docs/specs.md $snapshot/ mock-data/"
+  entries="AGENTS.md CLAUDE.md init.sh harness.db harness/ lean/ docs/specs.md $snapshot/ progress/ mock-data/ .claude/settings.local.json"
   for name in "$TOOLKIT_DIR"/.claude/agents/*.md; do entries="$entries .claude/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/.codex/agents/*.toml; do entries="$entries .codex/agents/${name##*/}"; done
   for name in "$TOOLKIT_DIR"/scripts/*.sh; do entries="$entries scripts/${name##*/}"; done
+  # hide_harness: the files the harness scaffolds for the project would give it
+  # away too, and so would test folders git tracks nothing in (tests the agents
+  # wrote). A test folder with tracked files belongs to the project: left alone.
+  # The lean flow's plans (docs/features/) and acceptance tests
+  # (lean.acceptance_dir) follow the same rule, but are excluded before they
+  # exist: agents create them later, and git would show them from the start.
+  if [ "$(jq -r '.hide_harness // false' "$TARGET_DIR/.harness.json")" = true ]; then
+    entries="$entries .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md docs/verification.md specs/"
+    for name in tests test spec __tests__; do
+      if [ -d "$TARGET_DIR/$name" ] && [ -z "$(cd "$TARGET_DIR" && git ls-files -- "$name" | head -1)" ]; then
+        entries="$entries $name/"
+      fi
+    done
+    acceptance="$(jq -r '.lean.acceptance_dir // "acceptance"' "$TARGET_DIR/.harness.json")"
+    acceptance="${acceptance#./}"; acceptance="${acceptance%/}"
+    for name in docs/features "$acceptance"; do
+      case "$name" in ""|.|/*|*..*|*" "*) continue ;; esac
+      if [ -z "$(cd "$TARGET_DIR" && git ls-files -- "$name" | head -1)" ]; then
+        entries="$entries $name/"
+      fi
+    done
+  fi
   # harness/ (above) already covers harness/test_helpers/; project-owned Tier 2
   # helpers live outside it (test_helpers.project_specific_dir) so git sees them.
   entries="$entries scripts/mock_data.py scripts/time_phase.py scripts/agent_usage.py scripts/assemble_migration.py scripts/build_traceability.sh scripts/templates/acceptance_test_prologue.sql"
@@ -417,6 +577,27 @@ echo "── 6. Generating initial snapshot + mirror sync ───────�
 
 bash scripts/harness.sh snapshot
 bash scripts/harness.sh sync
+
+# Worktrees linked to this checkout (harness.sh link-worktree) get harness files
+# added since and lose stale regular copies of harness-owned ones: re-run the
+# linking for each worktree whose harness.db links here.
+refresh_linked_worktrees() {
+  git -C "$TARGET_DIR" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  local prefix here wt dir
+  prefix="$(git -C "$TARGET_DIR" rev-parse --show-prefix)"
+  here="$(cd "$TARGET_DIR" && pwd -P)"
+  while IFS= read -r wt; do
+    [ -n "$wt" ] || continue
+    dir="$wt/$prefix"; dir="${dir%/}"
+    [ -d "$dir" ] || continue
+    [ "$(cd "$dir" && pwd -P)" != "$here" ] || continue
+    [ "$(link_target_dir "$dir/harness.db")" = "$here" ] || continue
+    echo ""
+    echo "── Refreshing linked worktree $dir ──"
+    bash scripts/harness.sh link-worktree "$dir" || warn "could not refresh the links of worktree $dir — run scripts/harness.sh link-worktree \"$dir\""
+  done < <(git -C "$TARGET_DIR" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
+}
+refresh_linked_worktrees
 
 echo ""
 ok "install complete. Fill in docs/*.md and CHECKPOINTS.md, then run ./init.sh."

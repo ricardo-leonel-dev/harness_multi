@@ -81,7 +81,10 @@ installs can share one repository. Only project-owned content reaches git:
 `install.sh` lists them so you can untrack them with `git rm -r --cached`.
 
 Optionally pass `--features-seed features.seed.json` (see
-`templates/features.seed.json.tmpl`) to bulk-load an initial feature list.
+`templates/features.seed.json.tmpl`) to bulk-load an initial feature list. The import is
+all or nothing: every item is checked first and a bad one imports nothing. Items
+whose name already exists in the project are skipped and reported as already
+present, so re-running with an extended seed adds only the new items.
 
 ## The Postgres/Supabase mirror (optional)
 
@@ -139,6 +142,23 @@ everything from the current, already-updated `db/schema.postgres.sql`.
 `db/migrations/0004_agent_runs.sql` once, then apply the new
 `db/rpc/upsert_agent_run.sql`. Until both are applied, `sync` only `[WARN]`s on
 the agent-runs step; everything else keeps syncing.
+
+**Mirror deployed before lean mode existed?** Run
+`db/migrations/0005_lean_mode.sql` once (feature `mode`/plan approval, session
+review fields), then re-apply `db/rpc/upsert_feature.sql` and
+`db/rpc/upsert_session.sql` (each drops its previous signature first). The new
+parameters are defaulted, so an older `sync_postgres.sh` keeps working; a newer
+one against a mirror without them syncs every row without the lean fields and
+`[WARN]`s once.
+
+**Mirror deployed before scope surfaces existed?** Run
+`db/migrations/0006_scope_surfaces.sql` once (feature `out_of_scope`, session
+`surfaces`/`surfaces_required`; sessions already in the mirror get
+`surfaces_required = false`), then re-apply `db/rpc/upsert_feature.sql` and
+`db/rpc/upsert_session.sql` (each drops its previous signature first). The new
+parameters are defaulted, so an older `sync_postgres.sh` keeps working; a newer
+one against a mirror without them syncs every row without the scope fields and
+`[WARN]`s once.
 
 **Mirror deployed before specs/sessions were resolved by feature local id?**
 Re-apply `db/rpc/upsert_spec.sql` and `db/rpc/upsert_session.sql` (each drops
@@ -369,11 +389,34 @@ Covered by `bash tests/quick_path_test.sh`.
 - `log-out`'s DIFF says `tests=n/a` when the project keeps `tests/` out of git on purpose.
 - `scripts/harness.sh link-worktree <worktree_project_dir>`, run from the main checkout,
   gives a git worktree the same harness (symlinks to `harness.db`, `scripts/`, agents,
-  `AGENTS.md`, `.harness.json`; `docs/`, `specs/`, `CHECKPOINTS.md` only when the worktree
+  `AGENTS.md`, `.harness.json`, `lean/`; `docs/`, `specs/`, `CHECKPOINTS.md` only when the worktree
   has none) and keeps `progress/` a local directory, so agents never write through a symlink
   into another checkout. It lists the links in the shared `.git/info/exclude` and is safe to
-  re-run.
-Covered by `bash tests/feature_flow_test.sh`.
+  re-run: it links harness files added since and replaces a stale regular copy of a file
+  the toolkit installs (listed in `harness/installed-files.txt`, untracked in the worktree;
+  top-level, directly under `scripts/`, `.claude/agents/` or `lean/`, or in `.codex/agents/`,
+  `harness/instructions/` or a `lean/` subdirectory such as `lean/adapters/` when the worktree
+  holds those directories for real; nothing deeper) with a link,
+  moving a differing copy to the worktree's own `progress/stale_harness_copies/` (a linked
+  `progress/` is made local first; a failed step prints a `[WARN]` naming the file). Other files there, such
+  as a git-ignored `scripts/local.json`, `.codex/config.toml` or `mock-data/`, are kept. `install.sh` in the main checkout
+  re-runs it for every worktree linked there, and refuses to run inside a linked worktree
+  (it would write through the links). A `record-usage` whose collector fails (e.g. a stale
+  `agent_usage.py`) prints a `[WARN]` with its error, also shown by `stats` and `./init.sh`.
+Covered by `bash tests/feature_flow_test.sh` and `bash tests/worktree_link_refresh_test.sh`.
+
+### Out of scope and surfaces
+
+- `add-feature --out-of-scope "<line>"` (repeatable, at most 5) / `set-out-of-scope` keep the
+  behaviour the user excluded; `claim`, `status` and the snapshot show it, and the reviewer
+  rejects a diff that adds it.
+- Right after `claim` the implementer runs `set-surfaces "<path-or-glob>"...` (`*` stops at `/`,
+  `**` crosses it); `add-surface "<glob>" --reason "<why>"` widens it and logs the reason.
+  `log-out` and `log-out --quick` refuse without surfaces, or when a `--changes` path or a file
+  changed since the claim (untracked included; `progress/` and git-excluded files skipped) is
+  outside them. `log-out --lean` keeps its own Files check. Sessions opened before the upgrade
+  close with a warning.
+Covered by `bash tests/scope_surfaces_test.sh`.
 
 ## Versioned PostgreSQL mock data
 

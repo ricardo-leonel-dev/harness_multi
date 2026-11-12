@@ -17,6 +17,19 @@ verification.
   nothing else.
 - Never commit or push unless the human asked for it in this session.
 
+## Hidden harness (`.harness.json::hide_harness: true`)
+
+The project's git must not show that this harness exists. Everything git can see — code, comments, test
+names, commit messages, PR titles and descriptions — reads as a developer's own work:
+
+- No harness words or ids: no `F12`/`R3`/`P1`/`T4`, "spec", "harness", "reviewer", "implementer",
+  `progress/`, `specs/`, `tasks.md`, `CHECKPOINTS.md`, nor any AI tool. Name a test after the behavior it
+  checks, not after the requirement that asked for it.
+- Write harness files only where they already live (`progress/`, `specs/`, `harness/`, `state/`): those
+  paths are excluded from git. Never `git add -f` an excluded file.
+- Before any commit or PR: `scripts/harness.sh hide-check --message "<commit message or PR text>"`, and
+  reword whatever it lists.
+
 ## Response length
 
 - Default to short answers. Start with the minimum useful response and expand

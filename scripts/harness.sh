@@ -12,15 +12,43 @@
 #                                              optional "depends_on": [name...] gates claim on those LOCAL
 #                                              features — same project — being 'done' first)
 #   add-feature --name <slug> --title <t> [--description <d>] [--request <text>] [--acceptance <item...>]
-#               [--sdd] [--depends-on <name...>] [--size small|normal]
+#               [--sdd] [--depends-on <name...>] [--size small|normal] [--mode normal|risk] [--approval]
+#               [--out-of-scope <line>]...
 #                                              create a single pending feature directly (no seed file) — for
 #                                              ad-hoc tasks the leader creates on the spot, no matching pending
 #                                              feature existed; --sdd requires an approved spec before claim;
 #                                              --depends-on names other LOCAL features (same project, must
 #                                              already exist) that must be 'done' before this one is claimable;
 #                                              --size small lets it close through log-out --quick (default normal);
-#                                              --request keeps the user's request verbatim (the spec quotes it)
+#                                              --request keeps the user's request verbatim (the spec quotes it);
+#                                              --out-of-scope (repeatable, 0-5 short lines) records behaviour the
+#                                              user excluded ("no pagination"): claim prints it, the reviewer
+#                                              rejects a diff that adds it (seed files: "out_of_scope": [...]);
+#                                              --mode puts it on the lean flow (lean/README.md): it closes only
+#                                              through log-out --lean; --approval (normal only; risk always needs
+#                                              it, so with risk it only warns) makes claim wait for approve-plan.
+#                                              --mode is not combinable with --sdd
+#   set-mode <feature_number|name> <normal|risk|none> [--approval]
+#                                              set or clear (none) a feature's lean mode; refused on done/superseded
+#                                              features and once its plan is approved (that would void the approval)
+#                                              ; risk or --approval only on a pending feature (approve-plan needs pending)
+#   approve-plan <TARGET> [--by NAME]         record the human's approval of a lean feature's plan,
+#                                              docs/features/<name>.md (leader-only, right after the user approves it
+#                                              in conversation; --by resolved as for approve-spec). Only for a pending
+#                                              risk feature, or a normal one with --approval; claim refuses those until
+#                                              it ran. Risk mode also freezes <lean.acceptance_dir>/<name>.* (default
+#                                              acceptance/) with shasum -a 256 into the feature and into
+#                                              <lean state>/frozen/<name>.sha (what lean/run.sh reads; the state is
+#                                              keyed by the project's resolved path, lean/lib.sh);
+#                                              refuses with no acceptance tests
+#   set-out-of-scope <feature_number|name> [line...]
+#                                              replace a not-done feature's out-of-scope lines (none clears them)
 #   set-request <feature_number|name> <text>  store/replace a feature's verbatim user request
+#   drop-sdd <feature_number|name> <reason>   turn a pending sdd=1 feature into sdd=0 before any spec exists
+#                                              (only after the user accepted it in this conversation); the
+#                                              reason is kept as a feature note
+#   add-sdd <feature_number|name> <reason>    turn a pending sdd=0 feature into sdd=1 when the user asks for a
+#                                              spec (never delete and re-add it); the reason is kept as a note
 #   set-size <feature_number|name> <small|normal>
 #                                              change a not-yet-done feature's size (leader's classification,
 #                                              or back to normal when an escalation is approved)
@@ -34,9 +62,13 @@
 #                                              Notion push-back starts applying to it (pairs with notion-create-feature
 #                                              for the ad-hoc-task-to-Notion flow — see AGENTS.md)
 #   import-sessions <seed.json>               bulk-load historical (closed) sessions
+#   notion-push <feature_number|name>         retry the Notion status push (log-out/claim in a sandbox without
+#                                              network leave a [WARN] naming this command)
 #   notion-diff                               (stdin: JSON array of {source_id,...}) prints only entries not yet imported
 #   notion-import <file.json>                 import entries as pending features, auto-numbered, source_id stored
 #                                              (optional "sdd" checkbox property carried through if present;
+#                                              optional "mode"/"plan_approval" get add-feature --mode/--approval's
+#                                              checks first, nothing imported on a bad one; sdd + mode -> sdd, warned;
 #                                              optional "depends_on": [name...] also carried through — see
 #                                              import-features above)
 #   claim-spec [--agent NAME] [--agent-model MODEL] [TARGET]
@@ -84,7 +116,10 @@
 #                                              (GPT-5)") to take precedence.
 #                                              (best-effort: also pushes notion_status_in_progress to the
 #                                              feature's source Notion page, if it has a source_id)
-#                                              Prints the feature's work folder, progress/<name>/: every handoff
+#                                              A feature with a lean mode also gets the harness-owned files'
+#                                              hashes pinned afresh, and in risk mode its
+#                                              approved manifest written again, in the lean state (lean/lib.sh)
+#                                              Creates and prints the work folder, progress/<name>/: every handoff
 #                                              (impl.md, quick.md, review.md, escalate.md, logs) goes there, and
 #                                              log-out deletes it once the feature is done
 #                                              An explicit TARGET that is in_progress/blocked with NO open session
@@ -103,6 +138,22 @@
 #                                              --feature TARGET writes a feature-level note instead (no open
 #                                              session needed); snapshot lists them under the feature's Notes.
 #   set-plan <item> [item...]                 replace the current open session's plan
+#   set-surfaces <path-or-glob...>            declare, once, right after claim, the paths the open session's
+#                                              change may touch (project-relative): "*" and "?" stop at "/",
+#                                              "**" crosses it (src/api/** also matches src/api), "**/" is zero
+#                                              or more directories, a path without * or ? covers that file or
+#                                              directory. Refused: ".", "*", "**", "**/*", absolute paths, "..".
+#                                              log-out (reviewer path and --quick) refuses without them, and
+#                                              when a --changes path or any file changed in the working tree
+#                                              since the claim (untracked included; git-excluded files,
+#                                              progress/, the snapshot and the feature's own specs/<name>/
+#                                              skipped) is outside them. Lean features use their Files list.
+#                                              A session opened before this existed closes with a warning
+#   add-surface <path-or-glob> --reason <why>  widen the open session's surfaces; the reason goes to its log
+#   hide-check [--message TEXT]              with .harness.json::hide_harness, fail when git (or the commit/PR
+#                                              text) would show the harness: files, words or ids (F12, R3, T4)
+#   tick-tasks T<n> [T<n>...]                 mark those tasks [x] in the open session's specs/<name>/tasks.md
+#                                              in one step (sdd=1), and log which ones
 #   set-next-step <item> [item...]            replace the current open session's next_step
 #   record-review <approved|changes-requested> [--by human:NAME] [--reviewer-model MODEL] [--notes TEXT]
 #                                              record the reviewer's verdict on the current open session
@@ -122,7 +173,8 @@
 #                                              which is the ONLY command that accepts a bare human name).
 #   log-out --changes <item...> --verification <text> --closure <text>
 #                                              close the open session and mark its feature done — refuses
-#                                              unless record-review has recorded 'approved' on this session
+#                                              unless record-review has recorded 'approved' on this session,
+#                                              or when a changed file is outside the surfaces (set-surfaces)
 #                                              (best-effort: also pushes notion_status_done to the
 #                                              feature's source Notion page, if it has a source_id).
 #                                              Also logs a "DIFF: code=N, tests=M" entry measured from
@@ -130,6 +182,9 @@
 #                                              excluded) and warns, never blocks, when code exceeds
 #                                              .harness.json::review_budget_lines (default 400, 0 disables).
 #                                              On success it deletes the feature's work folder progress/<name>/
+#                                              and syncs the Postgres mirror (every log-out path; best-effort,
+#                                              silent with no mirror configured, a failing one only warns), as record-review,
+#                                              approve-plan and approve-spec also do
 #   log-out --quick --changes <item...> --verification <text> --closure <text>
 #                                              small features only: close without a reviewer when the quick gate
 #                                              passes — diff <= quick_max_diff_lines (80) and <= quick_max_files (4)
@@ -138,6 +193,19 @@
 #                                              there, and the last ./init.sh green on the current tree. Otherwise
 #                                              refuses with the reasons (logged): launch the reviewer. A reviewer's
 #                                              approval wins; requested changes are never bypassed
+#   log-out --lean --changes <item...> --verification <text> --closure <text>
+#                                              features with a lean mode only (they refuse the reviewer path and
+#                                              --quick): refused when HEAD moved off the session base (a commit);
+#                                              runs lean/gate.sh against the session base — suite green, no
+#                                              assertion removed unless listed under **Changed tests**, every changed
+#                                              file under **Files**; risk mode: the acceptance tests match the manifest
+#                                              frozen at approve-plan (refused when the ~/.cache copy was rewritten),
+#                                              and the harness-owned files match the hashes pinned at claim;
+#                                              the suite runs under the sessions' sandbox rules (lean/gate.sh);
+#                                              docs/features/<name>.review.md has a VERDICT line and the reviewer
+#                                              changed no files. A refusal is logged (LEAN: refused) and means "fix";
+#                                              a pass records review_status 'lean'; the gate's suite run stands in
+#                                              for ./init.sh (only a failed ./init.sh in the session still refuses)
 #   hold <reason...>                          stop the active session (rejected escalation): it keeps the slot,
 #                                              so claim refuses other features and log-out refuses this one
 #   unhold [reason...]                        the user releases a held session (block also releases it)
@@ -148,6 +216,8 @@
 #   delete-feature <TARGET>                   soft-delete a feature and its specs (sets deleted_at) — refuses
 #                                              while the feature has an open or paused session
 #   status                                     print current project/feature/session state
+#   session-base <name>                       print the BASE commit recorded on the open (not paused) session of
+#                                              feature <name> (nothing without one); lean/run.sh's default base
 #   mock-data-generate --version VERSION [--selection FILE] [--extends VERSION]
 #   mock-data-check --version VERSION [--offline] [--database DB]
 #   mock-data-load --version VERSION --target-database harness_mock_NAME
@@ -156,6 +226,7 @@
 #   sync                                       best-effort push to the Postgres mirror
 #   notion-check                               best-effort curl+jq query for new Notion tasks (prints notion-diff-ready JSON)
 #   notion-create-feature --project <slug> --title <t> --description <d> [--acceptance <a>] [--status <s>] [--sdd]
+#                         [--mode normal|risk] [--approval]   (set the card's optional "Mode"/"Plan approval")
 #                                              create a new Notion page (feature card) in a project — for cross-
 #                                              project dependency requests; fails loudly (not a [WARN]) since the
 #                                              caller must not proceed to block a feature on a card that wasn't
@@ -210,11 +281,20 @@
 #                                              (--no-refresh skips that)
 #   link-worktree <worktree_project_dir>      run from the main checkout: give a git worktree of this repository
 #                                              the harness without a second harness.db — symlinks what must be
-#                                              shared (harness.db, scripts, agents, AGENTS.md, .harness.json, ...;
+#                                              shared (harness.db, scripts, agents, AGENTS.md, .harness.json, lean/, ...;
 #                                              project files such as docs/ or specs/ only when the worktree lacks
 #                                              them) and keeps progress/ a real local directory, so agents writing
 #                                              handoffs never write outside the worktree. Lists the links in the
-#                                              shared .git/info/exclude. Safe to re-run: existing files are kept
+#                                              shared .git/info/exclude. Safe to re-run and repairing: links harness
+#                                              files added since, and replaces a stale regular copy of a file the
+#                                              toolkit installs (listed in harness/installed-files.txt, untracked in
+#                                              the worktree; top-level, a direct child of scripts/, .claude/agents/ or
+#                                              lean/, or a file in .codex/agents/, harness/instructions/ or a lean/
+#                                              subdirectory (adapters/, instructions/, risk-questions/) when those are
+#                                              real directories; nothing deeper) with a link (a differing copy is moved to the worktree's
+#                                              own progress/stale_harness_copies/); other existing files, and anything under a linked directory of the
+#                                              worktree (.claude -> main's .claude), are kept. install.sh re-runs it for every linked
+#                                              worktree; install.sh itself refuses to run inside one
 #   test [file...]                            run tests with output to progress/test_last.log, printing only
 #                                              the result (and the log's tail on failure): with files and
 #                                              .harness.json::test_targeted_command (its {files} placeholder
@@ -279,29 +359,53 @@ cmd_import_features() {
   local seed_file="${1:?usage: import-features <seed.json>}"
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  jq -e 'type == "array"' "$seed_file" >/dev/null 2>&1 || { fail "import-features: $seed_file must be a JSON array of features"; exit 1; }
 
-  jq -c '.[]' "$seed_file" | while IFS= read -r item; do
+  # Every item is validated before anything is written, and the inserts run as
+  # one transaction: a bad item N (or an insert that fails, e.g. a duplicate
+  # number) leaves no items 1..N-1 behind. An item whose name already names an
+  # active feature of the project is skipped and reported as already present,
+  # so re-running with an extended seed still adds the new items.
+  local sql="BEGIN;" item i=0 added=0 present=0 items=()
+  while IFS= read -r item; do items+=("$item"); done < <(jq -c '.[]' "$seed_file")
+  for item in "${items[@]+"${items[@]}"}"; do
+    i=$((i + 1))
     local number name title desc status accept sdd depends_on now
     number=$(jq -r '.feature_number' <<<"$item")
-    name=$(jq -r '.name' <<<"$item")
-    title=$(jq -r '.title' <<<"$item")
+    name=$(jq -r '.name // ""' <<<"$item")
+    title=$(jq -r '.title // ""' <<<"$item")
     desc=$(jq -r '.description // ""' <<<"$item")
     status=$(jq -r '.status // "pending"' <<<"$item")
     accept=$(jq -c '.acceptance // []' <<<"$item")
     sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
     depends_on=$(jq -c '.depends_on // []' <<<"$item")
+    [[ "$number" =~ ^[0-9]+$ ]] || { fail "import-features: item $i has no integer feature_number ($number): nothing imported"; exit 1; }
+    [ -n "$name" ] || { fail "import-features: item $i (feature $number) has no name: nothing imported"; exit 1; }
+    local oos_lines=() oos_line oos
+    while IFS= read -r oos_line; do oos_lines+=("$oos_line"); done < <(jq -r '(.out_of_scope // [])[]' <<<"$item")
+    oos="$(out_of_scope_json "${oos_lines[@]+"${oos_lines[@]}"}")" || { fail "import-features: item $i (feature $number $name) is invalid: nothing imported"; exit 1; }
+    if [ -n "$(db "SELECT 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND name='$(sql_escape "$name")' LIMIT 1;")" ]; then
+      present=$((present + 1)); continue
+    fi
+    added=$((added + 1))
     now="$(now_iso)"
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, '$(sql_escape "$status")', '$(sql_escape "$depends_on")', '$now', '$now');"
+    sql="$sql
+INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, out_of_scope, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, '$(sql_escape "$status")', '$(sql_escape "$depends_on")', '$(sql_escape "$oos")', '$now', '$now');"
   done
-  ok "imported features from $seed_file"
+  db_exec "$sql
+COMMIT;" || { fail "import-features: the import failed and was rolled back: nothing imported"; exit 1; }
+  ok "imported $added feature(s) from $seed_file ($present already present)"
 }
 
 cmd_add_feature() {
-  local name="" title="" desc="" request="" accept_items=() sdd=0 depends_items=() size=normal
+  local name="" title="" desc="" request="" accept_items=() sdd=0 depends_items=() size=normal mode="" approval=0 oos_items=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
+      --out-of-scope) [ $# -ge 2 ] || { fail "--out-of-scope needs a line"; exit 1; }; oos_items+=("$2"); shift 2 ;;
+      --mode) mode="$2"; shift 2 ;;
+      --approval) approval=1; shift ;;
       --request) request="$2"; shift 2 ;;
       --size) size="$2"; shift 2 ;;
       --title) title="$2"; shift 2 ;;
@@ -323,10 +427,13 @@ cmd_add_feature() {
     esac
   done
   if [ -z "$name" ] || [ -z "$title" ]; then
-    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--request <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>] [--size small|normal]"
+    fail "usage: add-feature --name <slug> --title <text> [--description <text>] [--request <text>] [--acceptance <item...>] [--sdd] [--depends-on <name...>] [--size small|normal] [--mode normal|risk] [--approval] [--out-of-scope <line>]..."
     exit 1
   fi
   case "$size" in small|normal) ;; *) fail "--size must be 'small' or 'normal', got: $size"; exit 1 ;; esac
+  local out_of_scope; out_of_scope="$(out_of_scope_json "${oos_items[@]+"${oos_items[@]}"}")" || exit 1
+  local mode_sql plan_approval
+  IFS=' ' read -r mode_sql plan_approval < <(lean_mode_values "$mode" "$approval" "$sdd") || exit 1
 
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
@@ -360,12 +467,162 @@ cmd_add_feature() {
   local now; now="$(now_iso)"
 
   local request_sql=NULL; [ -n "$request" ] && request_sql="'$(sql_escape "$request")'"
-  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, size, request, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$size', $request_sql, '$now', '$now');"
+  db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, size, request, mode, plan_approval, out_of_scope, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', '$size', $request_sql, $mode_sql, $plan_approval, '$(sql_escape "$out_of_scope")', '$now', '$now');"
   local sdd_note=""; [ "$sdd" = "1" ] && sdd_note=", sdd"
   [ "$size" = "small" ] && sdd_note="$sdd_note, small"
+  [ -n "$mode" ] && sdd_note="$sdd_note, mode $mode$([ "$plan_approval" = 1 ] && echo ' (plan approval required)')"
   local deps_note=""; [ "$depends_on" != "[]" ] && deps_note=", depends on: $depends_on"
+  [ "$out_of_scope" != "[]" ] && deps_note="$deps_note, out of scope: ${#oos_items[@]} line(s)"
   ok "added feature $next_number: $name (pending$sdd_note$deps_note)"
+}
+
+# out_of_scope_json [line...] — validates a feature's out-of-scope lines and
+# prints them as a JSON array: at most OUT_OF_SCOPE_MAX lines, each one short
+# (<= OUT_OF_SCOPE_MAX_CHARS), single-line and not blank. These are behaviour
+# exclusions taken from the user's words ("no pagination"); the reviewer
+# rejects a diff that adds any of them.
+OUT_OF_SCOPE_MAX=5
+OUT_OF_SCOPE_MAX_CHARS=200
+out_of_scope_json() {
+  local line
+  if [ $# -gt "$OUT_OF_SCOPE_MAX" ]; then
+    fail "out of scope takes at most $OUT_OF_SCOPE_MAX lines (got $#): keep only the exclusions the user stated"; return 1
+  fi
+  for line in "$@"; do
+    case "$line" in *$'\n'*|*$'\r'*) fail "an out-of-scope line must be a single line: $line"; return 1 ;; esac
+    [ -n "${line//[[:space:]]/}" ] || { fail "an out-of-scope line can't be blank"; return 1; }
+    [ "${#line}" -le "$OUT_OF_SCOPE_MAX_CHARS" ] || { fail "out-of-scope line longer than $OUT_OF_SCOPE_MAX_CHARS characters: $line"; return 1; }
+  done
+  json_array "$@"
+}
+
+# set-out-of-scope <TARGET> [line...] — replace a not-yet-done feature's
+# out-of-scope lines (no line clears them). Same limits as add-feature's.
+cmd_set_out_of_scope() {
+  local target="${1:-}"; shift || true
+  [ -n "$target" ] || { fail "usage: set-out-of-scope <feature_number|name> [line...]"; exit 1; }
+  local json; json="$(out_of_scope_json "$@")" || exit 1
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local updated
+  updated=$(db "UPDATE features SET out_of_scope='$(sql_escape "$json")', updated_at='$(now_iso)'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status NOT IN ('done','superseded') AND $where
+RETURNING feature_number || ' ' || name;")
+  [ -n "$updated" ] || { fail "no matching feature that is not done/superseded: $target"; exit 1; }
+  if [ $# -eq 0 ]; then ok "cleared the out-of-scope lines of feature $updated"; else ok "feature $updated: $# out-of-scope line(s)"; fi
+}
+
+# print_out_of_scope <feature_id> — the feature's out-of-scope lines, for claim
+# and status (nothing when there are none).
+print_out_of_scope() {
+  local lines
+  lines=$(db "SELECT j.value FROM features f, json_each(f.out_of_scope) j WHERE f.id=$1;" 2>/dev/null)
+  [ -n "$lines" ] || return 0
+  echo "out of scope (the change must not add this):"
+  printf '%s\n' "$lines" | sed 's/^/  - /'
+}
+
+# lean_mode_values <mode> <approval 0|1> <sdd 0|1> — validates a lean mode
+# (lean/README.md) and prints "<mode as SQL> <plan_approval>": '' or none ->
+# "NULL 0"; normal -> "'normal' <approval>"; risk -> "'risk' 1" (a risk plan
+# always needs approval, so --approval with risk only warns that it's ignored;
+# without a mode it's refused). The lean flow replaces the spec flow, so an
+# sdd=1 feature can't take a mode. Warnings go to stderr, like fail's.
+lean_mode_values() {
+  local mode="$1" approval="$2" sdd="$3"
+  case "$mode" in
+    ""|none)
+      [ "$approval" = 0 ] || { fail "--approval only applies with mode normal (risk always needs approval)"; return 1; }
+      echo "NULL 0" ;;
+    normal|risk)
+      [ "$sdd" = 0 ] || { fail "an sdd feature can't take a lean mode: the spec flow and the lean flow are alternatives (drop-sdd first if the user accepted it)"; return 1; }
+      if [ "$mode" = risk ]; then
+        [ "$approval" = 0 ] || warn "--approval with mode risk: risk always requires approval; --approval ignored"
+        echo "'risk' 1"
+      else echo "'normal' $approval"; fi ;;
+    *) fail "mode must be 'normal' or 'risk'${4:+ or 'none'}, got: $mode"; return 1 ;;
+  esac
+}
+
+# set-mode <TARGET> <normal|risk|none> [--approval] — set or clear a feature's
+# lean mode. Refused once the plan is approved (a mode change would void that
+# approval) and on done/superseded features. 'none' puts the feature back on
+# the reviewer path.
+cmd_set_mode() {
+  local target="" mode="" approval=0 positional=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --approval) approval=1; shift ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  target="${positional[0]:-}"; mode="${positional[1]:-}"
+  if [ -z "$target" ] || [ -z "$mode" ] || [ "${#positional[@]}" -ne 2 ]; then
+    fail "usage: set-mode <feature_number|name> <normal|risk|none> [--approval]"; exit 1
+  fi
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local row
+  row=$(db "SELECT sdd, status, COALESCE(plan_approved_at, '') FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
+  [ -n "$row" ] || { fail "no matching feature: $target"; exit 1; }
+  local sdd status approved_at
+  IFS='|' read -r sdd status approved_at <<<"$row"
+  case "$status" in done|superseded) fail "feature $target is $status: its mode is final"; exit 1 ;; esac
+  [ -z "$approved_at" ] || { fail "feature $target's plan was already approved ($approved_at): changing its mode would void that approval"; exit 1; }
+  # The mode decides which close path applies. Once a reviewer has recorded a
+  # verdict on the feature's open session, or the session is on hold, switching
+  # paths would step around that verdict or that hold.
+  local open_sid open_review open_held
+  IFS='|' read -r open_sid open_review open_held < <(db "SELECT sl.id, COALESCE(sl.review_status, ''), COALESCE(sl.held_at, '') FROM session_log sl JOIN features f ON f.id=sl.feature_id
+WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.$where AND sl.closed_at IS NULL AND sl.deleted_at IS NULL LIMIT 1;")
+  [ -z "$open_held" ] || { fail "feature $target's session $open_sid is on hold: only the user can release it ('unhold') before its mode changes"; exit 1; }
+  case "$open_review" in
+    approved|changes_requested)
+      fail "a reviewer already recorded '$open_review' on feature $target's session $open_sid: its mode can't change now (the reviewer's verdict stands — finish on the reviewer path)"; exit 1 ;;
+  esac
+  local mode_sql plan_approval
+  IFS=' ' read -r mode_sql plan_approval < <(lean_mode_values "$mode" "$approval" "$sdd" with-none) || exit 1
+  # A mode that needs plan approval (risk, or normal --approval) can only be
+  # set while the feature is pending: approve-plan takes pending features only,
+  # so after the claim that approval could never be given.
+  local needs_pending=0
+  { [ "$mode" = risk ] || [ "$plan_approval" = 1 ]; } && needs_pending=1
+  if [ "$needs_pending" = 1 ] && [ "$status" != pending ]; then
+    fail "feature $target is $status: mode $mode$([ "$plan_approval" = 1 ] && [ "$mode" != risk ] && echo ' --approval') needs a plan approved before the claim, so it can only be set on a pending feature"; exit 1
+  fi
+  local updated
+  updated=$(db "UPDATE features SET mode=$mode_sql, plan_approval=$plan_approval, updated_at='$(now_iso)'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status NOT IN ('done','superseded') AND plan_approved_at IS NULL AND $where
+  AND ($needs_pending = 0 OR status = 'pending')
+  AND NOT EXISTS (SELECT 1 FROM session_log sl WHERE sl.feature_id=features.id AND sl.closed_at IS NULL AND sl.deleted_at IS NULL
+    AND (sl.held_at IS NOT NULL OR sl.review_status IN ('approved','changes_requested')))
+RETURNING feature_number || ' ' || name;")
+  [ -n "$updated" ] || { fail "feature $target changed meanwhile: run status and try again"; exit 1; }
+  # A quick or lean pass was earned on the other close path: it no longer applies.
+  if [ -n "$open_sid" ]; then
+    local cleared
+    cleared=$(db "UPDATE session_log SET review_status=NULL, reviewed_by=NULL, reviewed_at=NULL WHERE id=$open_sid AND review_status IN ('quick','lean') RETURNING review_status;")
+    [ -z "$cleared" ] || db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($open_sid, '[harness] set-mode $(sql_escape "$mode"): cleared the earlier gate pass (it belonged to the other close path)', '$(now_iso)');"
+  fi
+  if [ "$mode" = none ]; then
+    lean_forget_baseline "${updated#* }"
+    ok "feature $updated has no lean mode (reviewer path)"
+  else
+    ok "feature $updated is now mode $mode$([ "$plan_approval" = 1 ] && echo ', plan approval required')"
+  fi
 }
 
 # set-size <TARGET> <small|normal> — a small feature may close through
@@ -389,6 +646,108 @@ WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status NOT IN
 RETURNING feature_number || ' ' || name;")
   [ -n "$updated" ] || { fail "no matching feature that is not done/superseded: $target"; exit 1; }
   ok "feature $updated is now $size"
+}
+
+# drop-sdd <TARGET> <reason> — the leader found the request already complete
+# and the user accepted skipping the spec. Only a pending sdd=1 feature with no
+# spec started; the reason stays as a feature note.
+cmd_drop_sdd() {
+  local target="${1:-}"; shift || true
+  local reason="$*"
+  if [ -z "$target" ] || [ -z "$reason" ]; then
+    fail "usage: drop-sdd <feature_number|name> <reason>"; exit 1
+  fi
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local now; now="$(now_iso)"
+  local updated
+  updated=$(db "UPDATE features SET sdd=0, updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status='pending' AND sdd=1 AND $where
+  AND NOT EXISTS (SELECT 1 FROM specs WHERE specs.feature_id=features.id AND specs.deleted_at IS NULL)
+RETURNING id || ' ' || feature_number || ' ' || name;")
+  [ -n "$updated" ] || { fail "no pending sdd=1 feature without a spec matches: $target"; exit 1; }
+  db_exec "INSERT INTO feature_notes (feature_id, entry, created_at) VALUES (${updated%% *}, '$(sql_escape "SDD dropped: $reason")', '$now');"
+  ok "feature ${updated#* } is now sdd=0"
+}
+
+# add-sdd <TARGET> <reason> — the user asked for a spec on a feature already
+# created without one. Only a pending sdd=0 feature; the reason stays as a
+# feature note. Never delete and re-add a feature to change this.
+cmd_add_sdd() {
+  local target="${1:-}"; shift || true
+  local reason="$*"
+  if [ -z "$target" ] || [ -z "$reason" ]; then
+    fail "usage: add-sdd <feature_number|name> <reason>"; exit 1
+  fi
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local now; now="$(now_iso)"
+  local updated
+  updated=$(db "UPDATE features SET sdd=1, size='normal', updated_at='$now'
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND status='pending' AND sdd=0 AND $where
+RETURNING id || ' ' || feature_number || ' ' || name;")
+  [ -n "$updated" ] || { fail "no pending sdd=0 feature matches: $target"; exit 1; }
+  db_exec "INSERT INTO feature_notes (feature_id, entry, created_at) VALUES (${updated%% *}, '$(sql_escape "SDD added: $reason")', '$now');"
+  ok "feature ${updated#* } is now sdd=1"
+}
+
+# push_notion_status <feature_id> — best-effort push of the feature's current
+# status to its Notion card (no-op without a source_id or for a status with no
+# Notion column). A network or HTTP failure — a sandbox without network, most
+# often — names the command that retries it.
+push_notion_status() {
+  local fid="${1:-}"
+  [[ "$fid" =~ ^[0-9]+$ ]] || return 0
+  local row; row=$(db "SELECT COALESCE(source_id,'') || '|' || status || '|' || feature_number FROM features WHERE id=$fid;")
+  local source_id="${row%%|*}" rest="${row#*|}"
+  local status="${rest%%|*}" fnum="${rest#*|}"
+  [ -n "$source_id" ] || return 0
+  local value
+  case "$status" in
+    spec_ready) value=$(config '.notion_status_spec_ready' 'Spec Ready') ;;
+    in_progress) value=$(config '.notion_status_in_progress' 'In Progress') ;;
+    done) value=$(config '.notion_status_done' 'Done') ;;
+    superseded) value=$(config '.notion_status_superseded' 'Done') ;;
+    *) return 0 ;;
+  esac
+  bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$value" ||
+    warn "Notion card of feature $fnum still shows its previous status — retry with network: scripts/harness.sh notion-push $fnum"
+}
+
+# sync_mirror — best-effort Postgres mirror sync after a lifecycle step the
+# dashboard shows, so it doesn't wait for the next ./init.sh. Silent when no
+# mirror is configured (no supabase_url_env/supabase_key_env); a configured
+# mirror that fails warns, never changes the command's exit code.
+sync_mirror() {
+  HARNESS_SYNC_QUIET_UNCONFIGURED=1 bash "$SCRIPT_DIR/sync_postgres.sh" ||
+    warn "mirror sync failed — the dashboard shows the previous state until 'scripts/harness.sh sync' or the next ./init.sh"
+  return 0
+}
+
+# notion-push <TARGET> — retry the Notion status push for one feature.
+cmd_notion_push() {
+  local target="${1:?usage: notion-push <feature_number|name>}"
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local fid; fid=$(db "SELECT id FROM features WHERE project_id='$(sql_escape "$(project_id)")' AND deleted_at IS NULL AND $where;")
+  [ -n "$fid" ] || { fail "no feature matches: $target"; exit 1; }
+  push_notion_status "$fid"
 }
 
 # set-request <TARGET> <text> — the user's request verbatim, for a feature
@@ -530,6 +889,13 @@ cmd_notion_diff() {
     '[.[] | select((.source_id as $s | $existing | index($s)) == null)]' <<<"$input"
 }
 
+# notion-import <file.json> — entries from notion-check (or the same shape) as
+# pending features. mode/plan_approval (the card's optional "Mode" select and
+# "Plan approval" checkbox) get add-feature --mode/--approval's validation,
+# checked for every entry before any is inserted; an entry with both sdd and a
+# mode is imported as sdd without the mode, with a warning, and a risk entry
+# with plan approval ticked is imported as risk (which always needs approval),
+# with a warning that the checkbox is ignored.
 cmd_notion_import() {
   local seed_file="${1:?usage: notion-import <file.json>}"
   local pid; pid="$(project_id)"
@@ -537,8 +903,32 @@ cmd_notion_import() {
   local next_number
   next_number=$(db "SELECT COALESCE(MAX(feature_number), 0) + 1 FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL;")
 
-  jq -c '.[]' "$seed_file" | while IFS= read -r item; do
-    local name title desc accept sdd depends_on source_id now source_id_sql
+  local rows=() item name sdd mode approval lean_values=() mode_sql plan_approval
+  while IFS= read -r item; do rows+=("$item"); done < <(jq -c '.[]' "$seed_file")
+  for item in "${rows[@]+"${rows[@]}"}"; do
+    name=$(jq -r '.name' <<<"$item")
+    sdd=$(jq -r 'if (.sdd == true or .sdd == 1) then 1 else 0 end' <<<"$item")
+    mode=$(jq -r '.mode // ""' <<<"$item")
+    approval=$(jq -r 'if (.plan_approval == true or .plan_approval == 1) then 1 else 0 end' <<<"$item")
+    if [ "$sdd" = 1 ] && { [ -n "$mode" ] || [ "$approval" = 1 ]; }; then
+      warn "notion-import: $name has both SDD and a lean mode/plan approval — imported as sdd without the mode (the spec flow and the lean flow are alternatives)"
+      mode="" approval=0
+    fi
+    # Handled here rather than by lean_mode_values's own warning: its stderr
+    # is captured below as the failure reason, and this one names the card.
+    if [ "$mode" = risk ] && [ "$approval" = 1 ]; then
+      warn "notion-import: $name is a Risk card with \"Plan approval\" ticked — risk always requires approval; checkbox ignored"
+      approval=0
+    fi
+    mode_sql=$(lean_mode_values "$mode" "$approval" "$sdd" 2>&1) \
+      || { fail "notion-import: $name: $(sed 's/^\[FAIL\] *//' <<<"$mode_sql") — nothing imported"; exit 1; }
+    lean_values+=("$mode_sql")
+  done
+
+  local i=0
+  for item in "${rows[@]+"${rows[@]}"}"; do
+    local title desc accept depends_on source_id now source_id_sql
+    IFS=' ' read -r mode_sql plan_approval <<<"${lean_values[$i]}"; i=$((i + 1))
     name=$(jq -r '.name' <<<"$item")
     title=$(jq -r '.title' <<<"$item")
     desc=$(jq -r '.description // ""' <<<"$item")
@@ -553,8 +943,8 @@ cmd_notion_import() {
       source_id_sql="NULL"
     fi
     # The card's text is the user's own request: keep it verbatim too.
-    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, source_id, request, created_at, updated_at)
-VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', $source_id_sql, NULLIF('$(sql_escape "$desc")', ''), '$now', '$now');"
+    db_exec "INSERT INTO features (project_id, feature_number, name, title, description, acceptance, sdd, status, depends_on, source_id, request, mode, plan_approval, created_at, updated_at)
+VALUES ('$(sql_escape "$pid")', $next_number, '$(sql_escape "$name")', '$(sql_escape "$title")', '$(sql_escape "$desc")', '$(sql_escape "$accept")', $sdd, 'pending', '$(sql_escape "$depends_on")', $source_id_sql, NULLIF('$(sql_escape "$desc")', ''), $mode_sql, $plan_approval, '$now', '$now');"
     next_number=$((next_number + 1))
   done
   ok "imported notion tasks from $seed_file"
@@ -710,10 +1100,149 @@ COMMIT;
 SQL
   ok "spec ready for review: $spec_dir (feature $fnum $name, R=$req_count, T=$task_count$revised_note)"
 
-  local source_id; source_id=$(db "SELECT source_id FROM features WHERE id=$fid;")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_spec_ready' 'Spec Ready')"
+  push_notion_status "$fid"
+}
+
+# resolve_approver <command> <--by value> — prints the approving human's name.
+# Resolution order for --by (post feature-38 audit): explicit --by always
+# wins; else $HARNESS_HUMAN_USER env var (CI/override); else
+# .harness.json::human_user (set by install.sh at install time). With no
+# name anywhere it refuses: a placeholder like "user" would record an
+# approval nobody can trace back to a person.
+# approve-spec and approve-plan are the ONLY commands where a literal human
+# name is the correct attribution — subagents don't run them, only the
+# leader does, on behalf of the human who approved in conversation.
+resolve_approver() {
+  local cmd="$1" by="${2:-}"
+  if [ -z "$by" ]; then
+    if [ -n "${HARNESS_HUMAN_USER:-}" ]; then
+      by="$HARNESS_HUMAN_USER"
+    else
+      by="$(config '.human_user' '')"
+    fi
   fi
+  if [ -z "$by" ] || [ "$(printf '%s' "$by" | tr '[:upper:]' '[:lower:]')" = user ]; then
+    fail "$cmd needs the approving human's name: set .harness.json::human_user (or \$HARNESS_HUMAN_USER), or ask the user for their name and pass --by \"<name>\""
+    return 1
+  fi
+  printf '%s' "$by"
+}
+
+# The lean flow's shared helpers (lean/lib.sh, next to scripts/): lean_state_dir <project>
+# is where lean/run.sh keeps the frozen manifests and trusted-file hashes,
+# outside the project and keyed by its resolved path, so a sandboxed session can't read,
+# change or redirect them. Without lean/ the same folder is computed here.
+if [ -f "$SCRIPT_DIR/../lean/lib.sh" ]; then
+  # shellcheck source=../lean/lib.sh
+  . "$SCRIPT_DIR/../lean/lib.sh"
+else
+  lean_state_dir() {
+    local real; real=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+    printf '%s/.cache/harness/projects/%s-%s\n' "$HOME" "$(basename "$real")" "$(printf '%s' "$real" | shasum -a 256 | cut -c1-12)"
+  }
+fi
+
+# lean_claim_pin <feature_id> [keep] — for a feature with a lean mode, at claim: pins the
+# trusted files' hashes afresh (keep: only what isn't pinned yet, on
+# a resume), and in risk mode writes the manifest frozen at approve-plan to the lean state
+# again, so lean/run.sh finds risk mode even if the state folder was lost or the project
+# moved. Best-effort: a failure is a [WARN] (lean/run.sh pins before its first session).
+lean_claim_pin() {
+  local fid="$1" keep="${2:-}" row name mode frozen state
+  row=$(db "SELECT name, COALESCE(mode, ''), COALESCE(plan_frozen, '') FROM features WHERE id=$fid;")
+  IFS='|' read -r name mode frozen <<<"$row"
+  [ -n "$mode" ] || return 0
+  if ! declare -F lean_pin >/dev/null; then warn "lean/lib.sh is missing: hashes not pinned at claim"; return 0; fi
+  lean_adopt_legacy "$(pwd)"
+  state=$(lean_state_dir "$(pwd)") || return 0
+  if [ "$mode" = risk ] && [ -n "$frozen" ]; then
+    frozen=$(db "SELECT plan_frozen FROM features WHERE id=$fid;")
+    mkdir -p "$state/frozen" && printf '%s\n' "$frozen" > "$state/frozen/$name.sha" \
+      || warn "could not write $state/frozen/$name.sha"
+  fi
+  if [ -n "$keep" ]; then lean_pin "$(pwd)" "$name" || warn "could not pin feature $name's hashes in $state/lean/$name"
+  else lean_pin "$(pwd)" "$name" --again || warn "could not pin feature $name's hashes in $state/lean/$name"; fi
+}
+
+# lean_forget_baseline <name> — the feature's lean lifecycle ended (log-out closed it, it was
+# superseded or deleted, or set-mode none put it on the reviewer path): its dirty.sha (the files
+# already changed before its first pin, lean/lib.sh lean_pin) goes. It is recorded once per
+# feature and never again, so nothing later can take it for this feature's baseline.
+lean_forget_baseline() {
+  local state
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
+  state=$(lean_state_dir "$(pwd)" 2>/dev/null) || return 0
+  rm -f "$state/lean/$1/dirty.sha"
+}
+
+# approve-plan <TARGET> [--by NAME] — record the human's approval of a lean
+# feature's plan (docs/features/<name>.md). Leader-only, right after the user
+# approves it in conversation; claim refuses a risk feature, or a normal one
+# with plan_approval, until this ran. Risk mode also freezes the acceptance
+# tests (<acceptance_dir>/<name>.*) into features.plan_frozen and into
+# <lean_state_dir>/frozen/<name>.sha, the manifest lean/run.sh reads.
+cmd_approve_plan() {
+  local target="" by=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by) by="$2"; shift 2 ;;
+      *) target="$1"; shift ;;
+    esac
+  done
+  [ -n "$target" ] || { fail "usage: approve-plan <feature_number|name> [--by <name>]"; exit 1; }
+  by="$(resolve_approver approve-plan "$by")" || exit 1
+
+  local pid; pid="$(project_id)"
+  [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
+  local where
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    where="feature_number=$target"
+  else
+    where="name='$(sql_escape "$target")'"
+  fi
+  local row
+  row=$(db "SELECT id, name, COALESCE(mode, ''), plan_approval, status, COALESCE(plan_approved_at, '') FROM features
+WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
+  [ -n "$row" ] || { fail "not approvable: no matching feature $target"; exit 1; }
+  local fid name mode needs status approved_at
+  IFS='|' read -r fid name mode needs status approved_at <<<"$row"
+  [ -n "$mode" ] || { fail "not approvable: feature $name has no lean mode (set-mode $name normal|risk first)"; exit 1; }
+  if [ "$mode" = normal ] && [ "$needs" != 1 ]; then
+    fail "not approvable: feature $name is mode normal without plan approval — it claims without one (set-mode $name normal --approval if the user wants to approve the plan)"; exit 1
+  fi
+  [ -z "$approved_at" ] || { fail "not approvable: feature $name's plan was already approved ($approved_at)"; exit 1; }
+  [ "$status" = pending ] || { fail "not approvable: feature $name is $status (a plan is approved before the feature is claimed)"; exit 1; }
+  local doc="docs/features/$name.md"
+  [ -f "$doc" ] || { fail "not approvable: $doc is missing (the planner writes it first: lean/instructions/planning.md)"; exit 1; }
+
+  local manifest="" frozen_sql=NULL frozen_file="" note=""
+  if [ "$mode" = risk ]; then
+    local acc_dir files=() f
+    acc_dir="$(config '.lean.acceptance_dir' 'acceptance')"; acc_dir="${acc_dir%/}"
+    while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(find "$acc_dir" -type f -name "$name.*" 2>/dev/null | sort)
+    [ "${#files[@]}" -gt 0 ] || { fail "not approvable: no acceptance tests for $name in $acc_dir/ (risk mode freezes them at approval)"; exit 1; }
+    manifest=$(shasum -a 256 "${files[@]}") || { fail "not approvable: could not hash the acceptance tests"; exit 1; }
+    frozen_sql="'$(sql_escape "$manifest")'"
+    ! declare -F lean_adopt_legacy >/dev/null || lean_adopt_legacy "$(pwd)"
+    frozen_file="$(lean_state_dir "$(pwd)")/frozen/$name.sha"
+    if [ -f "$frozen_file" ] && [ "$(cat "$frozen_file")" != "$manifest" ]; then
+      warn "replacing $frozen_file: it differs from the acceptance tests being approved"
+    fi
+    mkdir -p "$(dirname "$frozen_file")" && printf '%s\n' "$manifest" > "$frozen_file" \
+      || { fail "not approvable: could not write $frozen_file"; exit 1; }
+    note=", froze ${#files[@]} acceptance file(s) into $frozen_file"
+  fi
+
+  local now updated; now="$(now_iso)"
+  updated=$(db "UPDATE features SET plan_approved_by='$(sql_escape "$by")', plan_approved_at='$now', plan_frozen=$frozen_sql, updated_at='$now'
+WHERE id=$fid AND status='pending' AND plan_approved_at IS NULL AND mode IS NOT NULL AND (mode='risk' OR plan_approval=1)
+RETURNING feature_number || ' ' || name;")
+  if [ -z "$updated" ]; then
+    [ -z "$frozen_file" ] || rm -f "$frozen_file"
+    fail "not approvable: feature $target changed meanwhile — run status and try again"; exit 1
+  fi
+  ok "approved plan for feature $updated (mode $mode, by: $by$note)"
+  sync_mirror
 }
 
 cmd_approve_spec() {
@@ -725,24 +1254,7 @@ cmd_approve_spec() {
     esac
   done
   [ -n "$target" ] || { fail "usage: approve-spec <feature_number|name> [--by <name>]"; exit 1; }
-
-  # Resolution order for --by (post feature-38 audit): explicit --by always
-  # wins; else $HARNESS_HUMAN_USER env var (CI/override); else
-  # .harness.json::human_user (set by install.sh at install time); else the
-  # legacy default "user" so old installs without the config keep working.
-  # This is the ONLY command where a literal human name is the correct
-  # attribution — subagents don't run it, only the leader does, on behalf
-  # of the human who approved the spec in conversation.
-  if [ -z "$by" ]; then
-    if [ -n "${HARNESS_HUMAN_USER:-}" ]; then
-      by="$HARNESS_HUMAN_USER"
-    else
-      by="$(config '.human_user' '')"
-      if [ -z "$by" ]; then
-        by="user"
-      fi
-    fi
-  fi
+  by="$(resolve_approver approve-spec "$by")" || exit 1
 
   local pid; pid="$(project_id)"
   [ -n "$pid" ] || { fail "unknown project slug: $PROJECT_SLUG"; exit 1; }
@@ -779,7 +1291,7 @@ WHERE feature_id=$fid AND status='ready' AND deleted_at IS NULL;")
     count_sql=", requirements_count=$req_count, tasks_count=$task_count"
     counts_note="R=$req_count, T=$task_count"
     if [ "$prev_req" != "$req_count" ] || [ "$prev_task" != "$task_count" ]; then
-      warn "spec counts changed since mark-spec-ready: R $prev_req→$req_count, T $prev_task→$task_count — recording the current ones"
+      warn "spec counts changed since mark-spec-ready: R ${prev_req}→${req_count}, T ${prev_task}→${task_count} — recording the current ones"
     fi
   fi
 
@@ -799,6 +1311,7 @@ RETURNING id, feature_id;" 2>&1)
     exit 1
   fi
   ok "approved spec for feature $target (by: $by${counts_note:+, $counts_note})"
+  sync_mirror
 }
 
 cmd_claim() {
@@ -834,7 +1347,8 @@ cmd_claim() {
   fi
 
   local check_row
-  check_row=$(sqlite3 -json "$DB_PATH" "SELECT f.id, f.name, f.sdd, f.status, f.depends_on, s.status AS spec_status
+  check_row=$(sqlite3 -json "$DB_PATH" "SELECT f.id, f.name, f.sdd, f.status, f.depends_on, s.status AS spec_status,
+  f.mode, f.plan_approval, f.plan_approved_at
 FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
 WHERE $target_where;")
 
@@ -875,6 +1389,16 @@ WHERE $target_where;")
       exit 1
     fi
 
+    # Lean flow: a risk plan, or a normal one marked --approval, needs the
+    # user's approval (approve-plan) before work starts. Enforced by plan_gate
+    # in the UPDATE below; this only gives the message.
+    local mode_now; mode_now=$(jq -r '.[0].mode // ""' <<<"$check_row")
+    if [ -n "$mode_now" ] && [ "$(jq -r '.[0].plan_approved_at // ""' <<<"$check_row")" = "" ] \
+      && { [ "$mode_now" = risk ] || [ "$(jq -r '.[0].plan_approval' <<<"$check_row")" = 1 ]; }; then
+      fail "feature $name_now (mode $mode_now) needs its plan approved first — after the user approves docs/features/$name_now.md, run 'scripts/harness.sh approve-plan $name_now --by <name>', then claim (see lean/README.md)"
+      exit 1
+    fi
+
     if [ "$sdd_flag" = "1" ]; then
       if [ "$status_now" = "pending" ] || [ "$status_now" = "spec_drafting" ]; then
         fail "feature $name_now requires an approved spec first (status=$status_now) — run 'claim-spec' then 'mark-spec-ready', get human approval, then 'approve-spec', then 'claim' (see docs/specs.md)"
@@ -904,6 +1428,11 @@ WHERE $target_where;")
   # in the function. depends_on defaults to '[]', so json_each yields no
   # rows and the NOT EXISTS is vacuously true for features with no
   # dependencies declared.
+  # Lean flow, same posture: a risk feature, or a normal one with
+  # plan_approval, is claimable only once approve-plan stamped it. Vacuously
+  # true for features without a mode.
+  local plan_gate="f.mode IS NULL OR (f.mode = 'normal' AND f.plan_approval = 0) OR f.plan_approved_at IS NOT NULL"
+
   local deps_gate="NOT EXISTS (SELECT 1 FROM json_each(f.depends_on) dep WHERE dep.value NOT IN (SELECT name FROM features d2 WHERE d2.project_id = f.project_id AND d2.status = 'done' AND d2.deleted_at IS NULL))"
 
   # Checked before the feature UPDATE: otherwise a claim while another session
@@ -923,14 +1452,14 @@ WHERE $target_where;")
   if [ -n "$target" ]; then
     if [[ "$target" =~ ^[0-9]+$ ]]; then
       update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.feature_number=$target AND ($sdd_gate) AND ($deps_gate))"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.feature_number=$target AND ($sdd_gate) AND ($deps_gate) AND ($plan_gate))"
     else
       update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.name='$(sql_escape "$target")' AND ($sdd_gate) AND ($deps_gate))"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.name='$(sql_escape "$target")' AND ($sdd_gate) AND ($deps_gate) AND ($plan_gate))"
     fi
   else
     update_sql="UPDATE features SET status='in_progress', updated_at='$now'
-WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND ($sdd_gate) AND ($deps_gate) ORDER BY f.feature_number LIMIT 1)"
+WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND ($sdd_gate) AND ($deps_gate) AND ($plan_gate) ORDER BY f.feature_number LIMIT 1)"
   fi
 
   # SQLite has no RAISE()/control flow outside triggers, so "claim exactly
@@ -943,7 +1472,7 @@ WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")
     exit 1
   fi
   if [ "$updated" = "[]" ] || [ -z "$updated" ]; then
-    fail "not claimable: no matching pending feature (or an sdd=1 feature awaiting an approved spec — see the message above)"
+    fail "not claimable: no matching pending feature (or an sdd=1 feature awaiting an approved spec, or a lean plan awaiting approve-plan — see the message above)"
     exit 1
   fi
   local feature_id; feature_id=$(jq -r '.[0].id' <<<"$updated")
@@ -959,13 +1488,14 @@ WHERE id = (SELECT f.id FROM features f WHERE f.project_id='$(sql_escape "$pid")
   db_exec "INSERT INTO session_log (project_id, feature_id, agent, started_at)
 VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent_attribution")', '$now');"
   record_session_base "$(current_session_id)"
+  lean_claim_pin "$feature_id"
   ok "claimed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
+  ensure_feature_dir "$(jq -r '.[0].name' <<<"$updated")"
   ok "work folder: $(feature_dir "$(jq -r '.[0].name' <<<"$updated")")/ (handoffs and logs; deleted at log-out)"
+  print_out_of_scope "$feature_id"
+  surfaces_hint "$feature_id"
 
-  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$updated")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_in_progress' 'In Progress')"
-  fi
+  push_notion_status "$(jq -r '.[0].id' <<<"$updated")"
 }
 
 # The project's active session. A paused session (its feature is blocked) is
@@ -1044,16 +1574,16 @@ SQL
     exit 1
   fi
 
-  record_session_base "$new_sid"
+  record_session_base "$new_sid" "$prev_sid"
+  lean_claim_pin "$fid" keep
   local row
   row=$(sqlite3 -json "$DB_PATH" "SELECT feature_number, name, title, source_id FROM features WHERE id=$fid;")
   ok "resumed: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$row") (new session $new_sid; ${resumed#RESUMED: })"
   warn "any review verdict stayed on the old session — record-review must run again on session $new_sid before log-out"
+  print_out_of_scope "$fid"
+  surfaces_hint "$fid"
 
-  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$row")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_in_progress' 'In Progress')"
-  fi
+  push_notion_status "$fid"
 }
 
 cmd_append_log() {
@@ -1118,6 +1648,27 @@ VALUES ($(jq -r '.[0].id' <<<"$frow"), '$(sql_escape "[$attribution] $entry")', 
   ok "appended log entry to session $sid (by: $attribution)"
 }
 
+# tick-tasks T<n>... — ticks several tasks.md checkboxes in one call, so an
+# implementer doesn't spend one model call (and the whole context) per Edit.
+# Every id is checked before the file is written: a typo changes nothing.
+cmd_tick_tasks() {
+  [ $# -gt 0 ] || { fail "usage: tick-tasks T<n> [T<n>...]"; exit 1; }
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || { fail "no open session — run 'claim' first"; exit 1; }
+  local name file t expr=""
+  name=$(db "SELECT f.name FROM session_log s JOIN features f ON f.id = s.feature_id WHERE s.id=$sid;")
+  file="specs/$name/tasks.md"
+  [ -f "$file" ] || { fail "no $file — tick-tasks is for sdd=1 features"; exit 1; }
+  for t in "$@"; do
+    [[ "$t" =~ ^T[0-9]+$ ]] || { fail "not a task id: $t (expected T<n>)"; exit 1; }
+    grep -qE "^- \[[ xX]\] $t( |$)" "$file" || { fail "$file has no task $t"; exit 1; }
+    expr="$expr s/^- \[ \] $t( |\$)/- [x] $t\1/;"
+  done
+  sed -E "$expr" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] TICKED: $*")', '$(now_iso)');"
+  ok "ticked $* in $file"
+}
+
 cmd_set_array_field() {
   local field="$1"; shift
   local sid; sid="$(current_session_id)"
@@ -1179,10 +1730,234 @@ cmd_record_review() {
   local now; now="$(now_iso)"
 
   db_exec "UPDATE session_log SET review_status='$(sql_escape "$verdict")', reviewed_by='$(sql_escape "$by")', reviewed_at='$now' WHERE id=$sid;"
+  # The approval covers the code as it is now: log-out refuses it once that
+  # code changes (review_verdict).
+  local fp; fp="$(tree_fingerprint)" || fp=none
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] REVIEW: $verdict_raw fp=$fp', '$now');"
   if [ -n "$notes" ]; then
     db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "REVIEW ($verdict_raw): $notes")', '$now');"
   fi
   ok "recorded review verdict '$verdict_raw' on session $sid (by: $by)"
+  sync_mirror
+}
+
+# --- Surfaces: the paths a change may touch ----------------------------------
+# The implementer declares them right after claim (set-surfaces) and widens
+# them with a logged reason (add-surface --reason). log-out (reviewer path and
+# --quick) refuses a session without them, or with a changed file outside them.
+# Lean features use their plan's Files list instead (lean/gate.sh).
+#
+# Pattern semantics (relative to the project directory):
+#   *    any characters except "/"         tests/api_*.rs
+#   ?    one character except "/"
+#   **   any characters, "/" included      src/api/**  (also matches src/api)
+#   **/  zero or more directories          **/fixtures/*.json
+#   no * or ?: that path, or anything under it when it is a directory  src/api
+# Everything else is literal. A pattern that matches everything (".", "*",
+# "**", "**/*"), an absolute path or one with a ".." segment is refused.
+
+# surface_normalize <path> — strips leading "./" and trailing "/".
+surface_normalize() {
+  local p="$1"
+  while [ "${p#./}" != "$p" ]; do p="${p#./}"; done
+  while [ "${p%/}" != "$p" ] && [ "$p" != "/" ]; do p="${p%/}"; done
+  printf '%s' "$p"
+}
+
+# surface_invalid <pattern> — prints why a surface pattern is refused (nothing
+# when it is acceptable).
+surface_invalid() {
+  local raw="$1" p
+  case "$raw" in *$'\n'*|*$'\r'*) echo "a pattern must be a single line"; return ;; esac
+  p="$(surface_normalize "$raw")"
+  [ -n "${p//[[:space:]]/}" ] || { echo "empty pattern"; return; }
+  case "$p" in /*|"~"*) echo "absolute path (patterns are relative to the project directory)"; return ;; esac
+  case "/$p/" in */../*) echo "'..' leaves the project directory"; return ;; esac
+  [ -n "${p//[*?\/.]/}" ] || { echo "matches every file: name the directories or files the change touches"; return; }
+}
+
+# surface_regex <pattern> — the pattern as an anchored ERE (see semantics above).
+surface_regex() {
+  local p; p="$(surface_normalize "$1")"
+  local re="" i=0 c n="${#p}" glob=0
+  case "$p" in *[*?]*) glob=1 ;; esac
+  while [ "$i" -lt "$n" ]; do
+    c="${p:$i:1}"
+    if [ "$c" = "*" ] && [ "${p:$((i + 1)):1}" = "*" ]; then
+      if [ "${p:$((i + 2)):1}" = "/" ]; then re="$re(.*/)?"; i=$((i + 3)); continue; fi
+      if [ $((i + 2)) -eq "$n" ] && [ "${re%/}" != "$re" ]; then re="${re%/}(/.*)?"; i=$((i + 2)); continue; fi
+      re="$re.*"; i=$((i + 2)); continue
+    fi
+    case "$c" in
+      "*") re="$re[^/]*" ;;
+      "?") re="$re[^/]" ;;
+      "^") re="$re\\^" ;;
+      "\\") re="$re[\\]" ;;
+      .|+|"("|")"|"{"|"}"|"|"|'$'|"["|"]") re="$re[$c]" ;;
+      *) re="$re$c" ;;
+    esac
+    i=$((i + 1))
+  done
+  [ "$glob" = 1 ] || re="$re(/.*)?"
+  printf '^%s$' "$re"
+}
+
+# surface_matches <file> <pattern...> — whether <file> (project-relative) is
+# inside any pattern.
+surface_matches() {
+  local file; file="$(surface_normalize "$1")"; shift
+  local pat re
+  for pat in "$@"; do
+    re="$(surface_regex "$pat")"
+    [[ "$file" =~ $re ]] && return 0
+  done
+  return 1
+}
+
+# session_surfaces <session_id> — the declared patterns, one per line.
+session_surfaces() {
+  db "SELECT j.value FROM session_log s, json_each(s.surfaces) j WHERE s.id=$1;" 2>/dev/null
+}
+
+# surfaces_hint <feature_id> — after claim: the step that comes next (not for
+# lean features, whose plan lists the files).
+surfaces_hint() {
+  [ -z "$(db "SELECT mode FROM features WHERE id=$1;")" ] || return 0
+  echo "next: declare the paths this change may touch before editing: scripts/harness.sh set-surfaces \"<path-or-glob>\"... (widen later with add-surface \"<glob>\" --reason \"<why>\"; log-out refuses files outside them)"
+}
+
+# surfaces_validate_all <pattern...> — fails on the first refused pattern.
+surfaces_validate_all() {
+  local pat why
+  [ $# -gt 0 ] || { fail "name at least one path or glob"; return 1; }
+  for pat in "$@"; do
+    why="$(surface_invalid "$pat")"
+    [ -z "$why" ] || { fail "surface '$pat' refused: $why"; return 1; }
+  done
+}
+
+# set-surfaces <pattern...> — declare the open session's surfaces, once. A
+# later widening goes through add-surface, so its reason is on the log.
+cmd_set_surfaces() {
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || { fail "no open session — run 'claim' first"; exit 1; }
+  surfaces_validate_all "$@" || exit 1
+  if [ -n "$(db "SELECT surfaces FROM session_log WHERE id=$sid AND surfaces IS NOT NULL;")" ]; then
+    fail "session $sid already has surfaces ($(session_surfaces "$sid" | paste -sd ' ' -)) — widen them with add-surface \"<glob>\" --reason \"<why>\""
+    exit 1
+  fi
+  local pats=() pat
+  for pat in "$@"; do pats+=("$(surface_normalize "$pat")"); done
+  local arr; arr=$(json_array "${pats[@]}")
+  local now; now="$(now_iso)"
+  db_exec "UPDATE session_log SET surfaces='$(sql_escape "$arr")' WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] SURFACES: ${pats[*]}")', '$now');"
+  ok "surfaces on session $sid: ${pats[*]}"
+}
+
+# add-surface <pattern> --reason <why> — widen the open session's surfaces;
+# the reason goes to the session log for the reviewer.
+cmd_add_surface() {
+  local pat="" reason="" have_pat=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --reason) reason="${2:-}"; shift; [ $# -eq 0 ] || shift ;;
+      *) [ "$have_pat" = 0 ] || { fail "usage: add-surface \"<path-or-glob>\" --reason \"<why>\""; exit 1; }
+         pat="$1"; have_pat=1; shift ;;
+    esac
+  done
+  if [ "$have_pat" = 0 ] || [ -z "${reason//[[:space:]]/}" ]; then
+    fail "usage: add-surface \"<path-or-glob>\" --reason \"<why>\" (the reason is required: it goes to the session log)"; exit 1
+  fi
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || { fail "no open session — run 'claim' first"; exit 1; }
+  surfaces_validate_all "$pat" || exit 1
+  pat="$(surface_normalize "$pat")"
+  local now; now="$(now_iso)"
+  db_exec "UPDATE session_log SET surfaces=(SELECT json_group_array(value) FROM (
+    SELECT value FROM json_each(COALESCE(session_log.surfaces, '[]'))
+    UNION ALL SELECT '$(sql_escape "$pat")' WHERE NOT EXISTS (SELECT 1 FROM json_each(COALESCE(session_log.surfaces, '[]')) WHERE value='$(sql_escape "$pat")')))
+  WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] SURFACE added: $pat — reason: $reason")', '$now');"
+  ok "added surface $pat on session $sid (reason logged)"
+}
+
+# abs_physical <absolute path> — the path with its deepest existing directory
+# resolved through symlinks (pwd -P), the rest appended as given, so a path
+# typed through a link (macOS /tmp -> /private/tmp) compares to `pwd -P`.
+# The leaf itself is not followed: a file that is a link stays named as is.
+abs_physical() {
+  local dir="${1%/*}" rest="${1##*/}" real
+  [ -n "$dir" ] || dir=/
+  while [ ! -d "$dir" ]; do
+    [ "$dir" != / ] && [ -n "$dir" ] || { printf '%s' "$1"; return 0; }
+    rest="${dir##*/}/$rest"; dir="${dir%/*}"; [ -n "$dir" ] || dir=/
+  done
+  real="$(cd "$dir" 2>/dev/null && pwd -P)" || { printf '%s' "$1"; return 0; }
+  printf '%s/%s' "${real%/}" "$rest"
+}
+
+# surfaces_outside <session_id> <feature_name> [change...] — prints every
+# changed file outside the session's surfaces, one per line: the --changes
+# paths, plus what git shows changed in the project since the session base
+# (committed, uncommitted and untracked; git-excluded files, progress/, the
+# snapshot and harness.db are skipped, like files already uncommitted at claim
+# and untouched since). The feature's own specs/<name>/ is always allowed
+# (tick-tasks).
+surfaces_outside() {
+  local sid="$1" name="$2"; shift 2
+  local pats=() pat line file here
+  while IFS= read -r pat; do [ -n "$pat" ] && pats+=("$pat"); done < <(session_surfaces "$sid")
+  pats+=("specs/$name")
+  here="$(pwd -P)"
+  local files=()
+  for file in "$@"; do
+    case "$file" in
+      /*) file="$(abs_physical "$file")"
+          if [ "${file#"$here"/}" != "$file" ]; then file="${file#"$here"/}"; else printf '%s\n' "$file"; continue; fi ;;
+    esac
+    file="$(surface_normalize "$file")"
+    case "/$file/" in */../*) printf '%s\n' "$file"; continue ;; esac
+    files+=("$file")
+  done
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    local base scope before
+    IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
+    before=$(session_claim_listing "$sid")
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      grep -qxF -- "$line" <<<"$before" || files+=("${line#* }")
+    done < <(dirty_listing "$base")
+  fi
+  for file in "${files[@]+"${files[@]}"}"; do
+    case "$file" in progress|progress/*|"$SNAPSHOT_PATH"/*|"$DB_PATH"|"$DB_PATH"-*) continue ;; esac
+    surface_matches "$file" "${pats[@]}" || printf '%s\n' "$file"
+  done | awk '!seen[$0]++'
+}
+
+# surfaces_gate <session_id> <changes...> — log-out's surfaces check (not for
+# lean features). Exits with the offending files listed; a session opened
+# before surfaces existed only warns.
+surfaces_gate() {
+  local sid="$1"; shift
+  local name required has
+  IFS='|' read -r name required has < <(db "SELECT f.name, s.surfaces_required, CASE WHEN s.surfaces IS NULL THEN 0 ELSE 1 END FROM session_log s JOIN features f ON f.id=s.feature_id WHERE s.id=$sid;")
+  if [ "$has" != 1 ]; then
+    if [ "$required" = 0 ]; then
+      warn "session $sid was opened before surfaces existed: closing without the surfaces check"
+      return 0
+    fi
+    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] SURFACES: refused — none declared', '$(now_iso)');"
+    fail "cannot log out session $sid: no surfaces declared — run 'scripts/harness.sh set-surfaces \"<path-or-glob>\"...' with the paths the change touches"
+    exit 1
+  fi
+  local outside; outside="$(surfaces_outside "$sid" "$name" "$@")"
+  [ -n "$outside" ] || return 0
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] SURFACES: refused — outside: $(printf '%s' "$outside" | paste -sd ' ' -)")', '$(now_iso)');"
+  fail "cannot log out session $sid: changed files outside the declared surfaces ($(session_surfaces "$sid" | paste -sd ' ' -)):"
+  printf '%s\n' "$outside" | sed 's/^/  - /' >&2
+  echo "  add each with 'scripts/harness.sh add-surface \"<glob>\" --reason \"<why>\"' if the change needs it, or revert it" >&2
+  exit 1
 }
 
 # is_review_excluded <path> — lockfiles, generated/build output and prose are
@@ -1192,6 +1967,23 @@ cmd_record_review() {
 # agent writes for one feature lives there, so log-out can delete it as a unit.
 feature_dir() {
   printf 'progress/%s' "$1"
+}
+
+# ensure_feature_dir <name> — creates progress/<name>/ so the folder claim
+# announces exists before an agent writes into it (a shell heredoc doesn't
+# create parent folders). Only plain slugs, and never through a symlinked
+# progress/ or progress/<name>: that would write into another checkout
+# (link-worktree makes progress/ local). Failing to create it only warns.
+ensure_feature_dir() {
+  local name="$1" dir
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
+  dir="$(feature_dir "$name")"
+  if [ -L progress ] || [ -L "$dir" ]; then
+    warn "not creating $dir/: progress/ or $dir is a symlink (run 'scripts/harness.sh link-worktree' to make progress/ local)"
+    return 0
+  fi
+  [ -d "$dir" ] || mkdir -p -- "$dir" 2>/dev/null || warn "could not create $dir/ — create it before writing handoffs there"
+  return 0
 }
 
 # clean_feature_dir <name> — deletes progress/<name>/ once the feature no
@@ -1239,27 +2031,69 @@ is_test_path() {
 # so record_diff_size still sees work the implementer commits before log-out,
 # plus a DIRTY entry with the files already uncommitted at that point, so the
 # quick gate doesn't count them as this session's work. No-op outside git or
-# before the first commit.
+# before the first commit. Given the cancelled session a resume replaces, it
+# copies that session's entries instead: the feature's own work so far counts.
 record_session_base() {
-  local sid="$1" sha dirty
+  local sid="$1" prev="${2:-}" sha dirty
   [ -n "$sid" ] || return 0
+  if [ -n "$prev" ] && [ -n "$(db "SELECT 1 FROM session_log_entries WHERE session_id=$prev AND entry LIKE '[harness] BASE: %' LIMIT 1;")" ]; then
+    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at)
+      SELECT $sid, entry, '$(now_iso)' FROM session_log_entries
+      WHERE session_id=$prev AND (entry LIKE '[harness] BASE: %' OR entry LIKE '[harness] DIRTY:%') ORDER BY id;"
+    return 0
+  fi
   sha=$(git rev-parse --verify --quiet HEAD 2>/dev/null) || return 0
   db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] BASE: $sha', '$(now_iso)');"
-  dirty=$(dirty_listing HEAD)
+  dirty=$(dirty_listing HEAD -w)
   [ -z "$dirty" ] || db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] DIRTY:
 $dirty")', '$(now_iso)');"
 }
 
 # dirty_listing <base> — one "<blob hash> <path>" line per file under this
 # project that differs from <base> or is untracked ("deleted" for a removed
-# file), skipping progress/ and the snapshot, which the harness rewrites.
+# file), skipping progress/ and the snapshot, which the harness rewrites, and
+# untracked nested repositories or worktrees (git lists them as one "dir/"
+# entry: another checkout, not a file of this change). Paths come back raw
+# (core.quotePath=false), so a non-ASCII name matches surfaces and exists.
+# With -w the contents are also stored in git's object database, so the
+# session can later measure its own changes against them (session_file_lines).
 dirty_listing() {
-  local file
-  { git diff --name-only --relative "$1" -- . 2>/dev/null; git ls-files --others --exclude-standard -- . 2>/dev/null; } \
+  local file write="${2:-}"
+  { git -c core.quotePath=false diff --name-only --relative "$1" -- . 2>/dev/null
+    git -c core.quotePath=false ls-files --others --exclude-standard -- . 2>/dev/null; } \
     | while IFS= read -r file; do
         case "$file" in ""|progress/*|"$SNAPSHOT_PATH"/*) continue ;; esac
-        if [ -f "$file" ]; then printf '%s %s\n' "$(git hash-object -- "$file")" "$file"; else printf 'deleted %s\n' "$file"; fi
+        case "$file" in */) [ -e "${file}.git" ] && continue ;; esac
+        if [ -f "$file" ]; then printf '%s %s\n' "$(git hash-object $write -- "$file" 2>/dev/null || git hash-object -- "$file")" "$file"; else printf 'deleted %s\n' "$file"; fi
       done
+}
+
+# session_file_lines <base> <claim listing> <file> — lines this session
+# changed in <file>. A file already uncommitted at claim is measured against
+# its contents then (kept by record_session_base), not against <base>, so work
+# left uncommitted by an earlier feature doesn't count; 0 if untouched since.
+# Otherwise: the diff against <base>, or the whole file when it is new.
+# Binary files count 0.
+session_file_lines() {
+  local base="$1" before="$2" file="$3" old new added deleted _ n=0
+  old=$(while IFS= read -r line; do [ "${line#* }" = "$file" ] && { echo "${line%% *}"; break; }; done <<<"$before")
+  if [ -n "$old" ] && [ "$old" != deleted ] && git cat-file -e "$old" 2>/dev/null; then
+    if [ -f "$file" ]; then new=$(git hash-object -w -- "$file"); else new=$(git hash-object -w /dev/null); fi
+    [ "$new" != "$old" ] || { echo 0; return; }
+    read -r added deleted _ < <(git diff --numstat "$old" "$new" 2>/dev/null)
+  elif [ "$old" != deleted ] && { git cat-file -e "$base:./$file" 2>/dev/null || git ls-files --error-unmatch -- "$file" >/dev/null 2>&1; }; then
+    read -r added deleted _ < <(git diff --numstat --relative "$base" -- "$file" 2>/dev/null)
+  elif [ -f "$file" ]; then
+    added=$(wc -l < "$file" | tr -d ' '); deleted=0
+  fi
+  [[ "${added:-}" =~ ^[0-9]+$ && "${deleted:-}" =~ ^[0-9]+$ ]] && n=$((added + deleted))
+  echo "$n"
+}
+
+# session_claim_listing <session_id> — the DIRTY listing logged at claim
+# (empty when the tree was clean then).
+session_claim_listing() {
+  db "SELECT substr(entry, 18) FROM session_log_entries WHERE session_id=$1 AND entry LIKE '[harness] DIRTY:%' ORDER BY id LIMIT 1;"
 }
 
 # session_diff_base <session_id> — prints "<base>\t<scope note>": the
@@ -1278,9 +2112,83 @@ session_diff_base() {
   printf '%s\t%s\n' "$base" "$scope"
 }
 
+# .harness.json::hide_harness — the project's git must not show the harness to
+# anyone reading it: no harness files and no harness words or ids (F12, R3, T4)
+# in the changes, the commit message or the PR text.
+hide_harness_on() { [ "$(config '.hide_harness' 'false')" = true ]; }
+HIDE_PATHS_RE='^((AGENTS|CLAUDE|CHECKPOINTS)\.md|init\.sh|\.harness\.json|harness\.db.*|docs/(architecture|conventions|verification|specs)\.md|docs/features/[^/]+\.review\.md)$|^(harness|lean|progress|specs|state|mock-data|\.claude|\.codex)/'
+
+# hide_lean_dirs_re — the lean flow's plan folder (docs/features/) and
+# acceptance folder (lean.acceptance_dir, default acceptance) as a path regex,
+# each only when HEAD tracks nothing in it: a folder the project already
+# commits to is the project's own (install.sh applies the same rule).
+hide_lean_dirs_re() {
+  local acc dir re=""
+  acc="$(config '.lean.acceptance_dir' 'acceptance')"; acc="${acc#./}"; acc="${acc%/}"
+  for dir in docs/features "$acc"; do
+    case "$dir" in ""|.|/*|*..*) continue ;; esac
+    [ -z "$(git ls-tree -r --name-only HEAD -- "$dir" 2>/dev/null | head -1)" ] || continue
+    re="$re${re:+|}$(printf '%s' "$dir" | sed 's/[][\\.*^$+?(){}|]/\\&/g')/"
+  done
+  [ -z "$re" ] || printf '^(%s)\n' "$re"
+}
+HIDE_WORDS_RE='harness|spec_author|quick_implementer|progress/|specs/|tasks\.md|checkpoints'
+HIDE_IDS_RE='(^|[^A-Za-z0-9_])[FRPT][0-9]+([^A-Za-z0-9_]|$)'
+
+# hide_text_findings — reads text on stdin, prints its lines (at most 5) that
+# carry a harness word (any case) or id. Lines over 300 characters are minified
+# or generated output, where short ids match by chance: skipped.
+hide_text_findings() {
+  awk -v w="$HIDE_WORDS_RE" -v i="$HIDE_IDS_RE" 'length($0) <= 300 && (tolower($0) ~ w || $0 ~ i)' | head -5
+}
+
+# hide_findings [path...] — one line per harness trace git can see under the
+# paths (default .): a harness file among the changes, or a harness word or id
+# in a line the changes add (tracked files) or in the whole file (untracked).
+hide_findings() {
+  [ $# -gt 0 ] || set -- .
+  local f line paths_re lean_re
+  paths_re="$HIDE_PATHS_RE"; lean_re="$(hide_lean_dirs_re)"
+  [ -z "$lean_re" ] || paths_re="$paths_re|$lean_re"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if grep -qE "$paths_re" <<<"$f"; then echo "harness file visible to git: $f"; continue; fi
+    [ -f "$f" ] && grep -Iq . -- "$f" 2>/dev/null || continue  # gone, empty or binary
+    while IFS= read -r line; do
+      echo "$f: $(printf '%s' "$line" | sed 's/^[[:space:]]*//' | cut -c1-120)"
+    done < <(if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+               git diff -U0 HEAD -- "$f" 2>/dev/null | sed -n 's/^+\([^+]\)/\1/p; s/^+$//p'
+             else cat -- "$f"; fi | hide_text_findings)
+  done < <({ git diff --name-only --relative HEAD -- "$@"; git ls-files --others --exclude-standard -- "$@"; } 2>/dev/null | sort -u)
+}
+
+# hide-check [--message TEXT] — with hide_harness on, refuses (exit 1) when git
+# would show the harness: run it before every commit and PR, passing their text.
+cmd_hide_check() {
+  local message=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --message) message="${2-}"; shift 2 ;;
+      *) fail "usage: hide-check [--message <commit or PR text>]"; exit 1 ;;
+    esac
+  done
+  hide_harness_on || { ok "hide_harness is off in .harness.json — nothing to check"; return 0; }
+  git rev-parse --git-dir >/dev/null 2>&1 || { warn "not inside a git repository — nothing to check"; return 0; }
+  local found msg_found=""
+  found=$(hide_findings .)
+  [ -z "$message" ] || msg_found=$(printf '%s\n' "$message" | hide_text_findings | sed 's/^/message: /')
+  found=$(printf '%s\n%s' "$found" "$msg_found" | sed '/^$/d')
+  if [ -n "$found" ]; then
+    fail "hide_harness: git (or the message) would show the harness — reword or move these, then run hide-check again:"
+    printf '%s\n' "$found" | sed 's/^/          /' >&2
+    exit 1
+  fi
+  ok "hide_harness: no harness trace in what git can see${message:+ or in the message}"
+}
+
 # record_diff_size <session_id> <path...> — advisory review budget: counts
-# changed lines (git diff against the session's BASE commit, falling back to
-# HEAD, for tracked paths; whole file for untracked ones) in the paths log-out was given, split into production code and tests,
+# the lines this session changed (session_file_lines) in the paths log-out was
+# given, split into production code and tests,
 # logs a DIFF entry on the session (data for calibrating future splits) and
 # warns when code exceeds .harness.json::review_budget_lines (default 400; 0
 # disables the warning). Never blocks: outside git or with no paths it's a no-op.
@@ -1288,22 +2196,18 @@ record_diff_size() {
   local sid="$1"; shift
   [ $# -gt 0 ] || return 0
   git rev-parse --git-dir >/dev/null 2>&1 || return 0
-  local code=0 tests=0 files=0 path added deleted file n base scope
+  local code=0 tests=0 files=0 path file n base scope before
   IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
+  before=$(session_claim_listing "$sid")
   for path in "$@"; do
-    while IFS=$'\t' read -r added deleted file; do
+    while IFS= read -r file; do
       [ -n "$file" ] || continue
       is_review_excluded "$file" && continue
-      [[ "$added" =~ ^[0-9]+$ ]] || continue  # binary
-      n=$((added + deleted)); files=$((files + 1))
+      n=$(session_file_lines "$base" "$before" "$file")
+      [ "$n" -gt 0 ] || continue  # binary, or uncommitted at claim and untouched since
+      files=$((files + 1))
       if is_test_path "$file"; then tests=$((tests + n)); else code=$((code + n)); fi
-    done < <(git diff --numstat --relative "$base" -- "$path" 2>/dev/null)
-    while IFS= read -r file; do
-      [ -n "$file" ] && [ -f "$file" ] || continue
-      is_review_excluded "$file" && continue
-      n=$(wc -l < "$file" | tr -d ' '); files=$((files + 1))
-      if is_test_path "$file"; then tests=$((tests + n)); else code=$((code + n)); fi
-    done < <(git ls-files --others --exclude-standard -- "$path" 2>/dev/null)
+    done < <(git diff --name-only --relative "$base" -- "$path" 2>/dev/null; git ls-files --others --exclude-standard -- "$path" 2>/dev/null)
   done
   [ "$files" -gt 0 ] || return 0
 
@@ -1335,20 +2239,40 @@ is_dependency_file() {
   return 1
 }
 
-# tree_fingerprint — hash of HEAD plus every uncommitted change under this
-# project (progress/, the snapshot and harness.db excluded: the harness itself
-# rewrites them), so log-out can tell whether the last ./init.sh saw the code
-# it closes.
+# tree_fingerprint — git tree hash of this project's files as they are on
+# disk, tracked and untracked (progress/, the snapshot and harness.db
+# excluded: the harness itself rewrites them), so log-out can tell whether the
+# last ./init.sh and the reviewer's approval saw the code it closes. It hashes
+# contents only, so committing them, or a commit elsewhere in the repository,
+# doesn't change it. Built in a throwaway copy of the index and a throwaway
+# object directory (the real objects are only read, as alternates), so it gives
+# the same answer where .git is read-only, as in the Codex sandbox.
 tree_fingerprint() {
   git rev-parse --git-dir >/dev/null 2>&1 || return 1
-  local ex=(-- . ":(exclude)progress" ":(exclude)$SNAPSHOT_PATH" ":(exclude)$DB_PATH*") f
-  {
-    git rev-parse HEAD 2>/dev/null
-    git diff HEAD --binary "${ex[@]}" 2>/dev/null
-    git ls-files --others --exclude-standard -z "${ex[@]}" 2>/dev/null | while IFS= read -r -d '' f; do
-      printf '%s ' "$f"; shasum < "$f"
-    done
-  } | shasum | cut -d' ' -f1
+  local tmp objects prefix tree
+  tmp=$(mktemp -d) && mkdir "$tmp/objects" || return 1
+  objects=$(cd "$(git rev-parse --git-path objects)" && pwd -P) || { rm -rf "$tmp"; return 1; }
+  cp "$(git rev-parse --git-path index)" "$tmp/index" 2>/dev/null
+  prefix=$(git rev-parse --show-prefix 2>/dev/null)
+  # add exits 1 when an exclude names an ignored path (harness.db, progress/)
+  # though it staged everything else, so its status is not checked.
+  GIT_INDEX_FILE="$tmp/index" GIT_OBJECT_DIRECTORY="$tmp/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects" \
+    git add -A -- . ":(exclude)progress" ":(exclude)$SNAPSHOT_PATH" ":(exclude)$DB_PATH*" >/dev/null 2>&1
+  # Some projects keep their tests out of git on purpose (.git/info/exclude),
+  # yet they are part of what init and the reviewer checked: force them into
+  # this throwaway index only, so a test changed after the approval is caught.
+  local d
+  for d in tests test spec __tests__; do
+    if [ -d "$d" ] && git check-ignore -q -- "$d/" 2>/dev/null; then
+      GIT_INDEX_FILE="$tmp/index" GIT_OBJECT_DIRECTORY="$tmp/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects" \
+        git add -f -A -- "$d" >/dev/null 2>&1
+    fi
+  done
+  tree=$(GIT_INDEX_FILE="$tmp/index" GIT_OBJECT_DIRECTORY="$tmp/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects" \
+    git write-tree ${prefix:+--prefix="$prefix"} 2>/dev/null)
+  rm -rf "$tmp"
+  [ -n "$tree" ] || return 1
+  printf '%s\n' "$tree"
 }
 
 # record-init <pass|fail|none> — init.sh calls this after its verify step: logs
@@ -1378,6 +2302,21 @@ init_verdict() {
   esac
 }
 
+# review_verdict <session_id> — whether the recorded approval covers the tree
+# now: current | stale | legacy (approved before approvals carried a
+# fingerprint). Outside git there is no fingerprint, so it can't go stale.
+review_verdict() {
+  local last fp
+  last=$(db "SELECT entry FROM session_log_entries WHERE session_id=$1 AND entry LIKE '[harness] REVIEW: approved fp=%' ORDER BY id DESC LIMIT 1;")
+  [ -n "$last" ] || { echo legacy; return; }
+  fp="$(tree_fingerprint)" || fp=none
+  if [ "$fp" = none ] || [ "$last" = "[harness] REVIEW: approved fp=none" ] || [ "$last" = "[harness] REVIEW: approved fp=$fp" ]; then
+    echo current
+  else
+    echo stale
+  fi
+}
+
 # quick_gate <session_id> <feature_name> <feature_number> — the signals
 # log-out --quick checks itself instead of trusting the agent. Fills
 # QUICK_REASONS (empty = pass), QUICK_LINES and QUICK_FILES. Size, files and
@@ -1386,7 +2325,7 @@ init_verdict() {
 # record-init's fingerprint.
 quick_gate() {
   local sid="$1" handoff; handoff="$(quick_handoff "$2" "$3")"
-  QUICK_REASONS=(); QUICK_LINES=0; QUICK_FILES=0
+  QUICK_REASONS=(); QUICK_LINES=0; QUICK_FILES=0; QUICK_MISSING_HANDOFF=""
   if ! git rev-parse --git-dir >/dev/null 2>&1; then
     QUICK_REASONS+=("not a git repository: the change can't be measured"); return
   fi
@@ -1395,23 +2334,17 @@ quick_gate() {
   max_files="$(config '.quick_max_files' '4')"; [[ "$max_files" =~ ^[0-9]+$ ]] || max_files=4
 
   # Files already uncommitted at claim and untouched since (same blob) are not
-  # this session's work. One touched further counts with its whole diff.
-  local base scope added deleted file changed=() before line
+  # this session's work; one touched further counts only what changed since.
+  local base scope file changed=() before line
   IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
   [ -z "$scope" ] || QUICK_REASONS+=("the session base is not in this branch's history: the change can't be measured")
-  before=$(db "SELECT substr(entry, 18) FROM session_log_entries WHERE session_id=$sid AND entry LIKE '[harness] DIRTY:%' ORDER BY id LIMIT 1;")
+  before=$(session_claim_listing "$sid")
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     grep -qxF -- "$line" <<<"$before" || changed+=("${line#* }")
   done < <(dirty_listing "$base")
   for file in "${changed[@]+"${changed[@]}"}"; do
-    if git cat-file -e "$base:./$file" 2>/dev/null || git ls-files --error-unmatch -- "$file" >/dev/null 2>&1; then
-      while IFS=$'\t' read -r added deleted _; do
-        [[ "$added" =~ ^[0-9]+$ ]] && QUICK_LINES=$((QUICK_LINES + added + deleted))
-      done < <(git diff --numstat --relative "$base" -- "$file" 2>/dev/null)
-    elif [ -f "$file" ]; then
-      QUICK_LINES=$((QUICK_LINES + $(wc -l < "$file")))
-    fi
+    QUICK_LINES=$((QUICK_LINES + $(session_file_lines "$base" "$before" "$file")))
   done
   QUICK_FILES=${#changed[@]}
 
@@ -1422,7 +2355,7 @@ quick_gate() {
   done
 
   if [ ! -f "$handoff" ]; then
-    QUICK_REASONS+=("handoff $handoff is missing")
+    QUICK_REASONS+=("handoff $handoff is missing"); QUICK_MISSING_HANDOFF="$handoff"
   else
     local risk declared
     risk=$(sed -n 's/^Risk:[[:space:]]*//p' "$handoff" | head -n 1 | tr -d '\r`' | sed 's/[[:space:]]*$//')
@@ -1442,14 +2375,77 @@ quick_gate() {
   esac
 }
 
+# lean_gate <session_id> <feature_name> <mode> — the checks log-out --lean
+# runs itself: lean/gate.sh (found next to this script's directory) against
+# the session base, with the manifest frozen at approve-plan in risk mode, plus
+# the risk-mode review file and the reviewer-changed-files record lean/run.sh
+# writes. Fills LEAN_REASONS (empty = pass) and LEAN_REPORT (the gate's output).
+lean_gate() {
+  local sid="$1" name="$2" mode="$3" gate state frozen_tmp="" base scope
+  LEAN_REASONS=(); LEAN_REPORT=""
+  gate="$(cd "$SCRIPT_DIR/.." && pwd)/lean/gate.sh"
+  if [ ! -f "$gate" ]; then
+    LEAN_REASONS+=("the lean gate is missing: $gate (install lean/ next to scripts/)"); return
+  fi
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    LEAN_REASONS+=("not a git repository: the gate can't measure the change"); return
+  fi
+  IFS=$'\t' read -r base scope < <(session_diff_base "$sid")
+  # The gate measures uncommitted work from the session's BASE: a commit made since
+  # (sessions never commit) would escape it, so HEAD must still be that commit.
+  local recorded head
+  recorded=$(db "SELECT substr(entry, 17) FROM session_log_entries WHERE session_id=$sid AND entry LIKE '[harness] BASE: %' ORDER BY id LIMIT 1;")
+  head=$(git rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ -n "$recorded" ] && [ "$head" != "$recorded" ]; then
+    LEAN_REASONS+=("HEAD moved: it is ${head:-unborn}, the feature's base commit is $recorded — sessions never commit; undo the commit(s) keeping the work uncommitted (git reset --soft $recorded) and log out again")
+  fi
+  ! declare -F lean_adopt_legacy >/dev/null || lean_adopt_legacy "$(pwd)"
+  state="$(lean_state_dir "$(pwd)")"
+  # The gate, the harness and their config are what decide this close: they must be the
+  # ones pinned at claim (sessions can't write them; this catches a change made anyway).
+  local changed
+  if declare -F lean_check_trusted >/dev/null && ! changed=$(lean_check_trusted "$(pwd)" "$name" 2>&1); then
+    LEAN_REASONS+=("$(printf '%s' "$changed" | tr '\n' ' ' | sed 's/  */ /g')")
+  fi
+  local args=(--base "$base")
+  if [ "$mode" = risk ]; then
+    local frozen cached="$state/frozen/$name.sha"
+    frozen=$(db "SELECT COALESCE(plan_frozen, '') FROM features WHERE name='$(sql_escape "$name")' AND deleted_at IS NULL AND id=(SELECT feature_id FROM session_log WHERE id=$sid);")
+    if [ -z "$frozen" ]; then
+      LEAN_REASONS+=("no frozen acceptance manifest recorded for $name (approve-plan freezes it)")
+    else
+      if [ -f "$cached" ] && [ "$(cat "$cached")" != "$frozen" ]; then
+        LEAN_REASONS+=("$cached differs from the manifest recorded at approve-plan: someone rewrote it")
+      fi
+      frozen_tmp=$(mktemp) && printf '%s\n' "$frozen" > "$frozen_tmp"
+      args+=(--frozen "$frozen_tmp")
+    fi
+    local review_file="docs/features/$name.review.md"
+    if [ ! -f "$review_file" ]; then
+      LEAN_REASONS+=("risk mode needs the review report $review_file (lean/run.sh review $name)")
+    elif ! grep -Eq '^VERDICT: (approve|changes)([^[:alnum:]_]|$)' "$review_file"; then
+      LEAN_REASONS+=("$review_file has no 'VERDICT: approve|changes' line")
+    fi
+    local review_json="$state/lean/$name.review.json"
+    if [ -f "$review_json" ] && [ "$(jq -r '.reviewer_changed_files' "$review_json" 2>/dev/null)" = true ]; then
+      LEAN_REASONS+=("the risk-mode reviewer changed files ($review_json): it must only report — undo its changes and review again")
+    fi
+  fi
+  local status=0
+  LEAN_REPORT=$(bash "$gate" "$(pwd)" "$name" "${args[@]}" 2>&1) || status=$?
+  [ -z "$frozen_tmp" ] || rm -f "$frozen_tmp"
+  [ "$status" = 0 ] || LEAN_REASONS+=("lean/gate.sh failed (exit $status)${scope:+ — note$scope}")
+}
+
 cmd_log_out() {
-  local changes=() verification="" closure="" quick=0
+  local changes=() verification="" closure="" quick=0 lean=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --quick) quick=1; shift ;;
+      --lean) lean=1; shift ;;
       --changes)
         shift
-        while [ $# -gt 0 ] && [ "$1" != "--verification" ] && [ "$1" != "--closure" ] && [ "$1" != "--quick" ]; do
+        while [ $# -gt 0 ] && [ "$1" != "--verification" ] && [ "$1" != "--closure" ] && [ "$1" != "--quick" ] && [ "$1" != "--lean" ]; do
           changes+=("$1"); shift
         done
         ;;
@@ -1471,6 +2467,61 @@ cmd_log_out() {
     exit 1
   fi
   local review_status; review_status=$(db "SELECT review_status FROM session_log WHERE id=$sid;")
+  [ "$quick$lean" != 11 ] || { fail "log-out takes --quick or --lean, not both"; exit 1; }
+
+  # Lean flow: a feature with a mode closes only through its gate, and only
+  # such a feature may use it. A refusal is logged and means "fix", never
+  # "work around it". The gate runs on every --lean log-out (an earlier pass
+  # or a reviewer approval doesn't carry over).
+  local lname lmode lnum lapproved lplan_approval
+  IFS='|' read -r lname lmode lnum lapproved lplan_approval < <(db "SELECT f.name, COALESCE(f.mode, ''), f.feature_number, COALESCE(f.plan_approved_at, ''), COALESCE(f.plan_approval, 0) FROM features f JOIN session_log sl ON sl.feature_id=f.id WHERE sl.id=$sid;")
+  if [ "$lean" = 1 ] && [ -z "$lmode" ]; then
+    fail "log-out --lean is only for features with a lean mode (feature $lname has none) — use the reviewer path, or --quick for a small feature"
+    exit 1
+  fi
+  if [ "$lean" = 0 ] && [ -n "$lmode" ]; then
+    local hint=""
+    [ -n "$lapproved" ] || hint=", or run 'scripts/harness.sh set-mode $lname none' first if the user wants the reviewer path"
+    fail "feature $lname has lean mode $lmode: close it with 'log-out --lean' (the lean gate)$hint"
+    exit 1
+  fi
+  if [ "$lean" = 1 ] && [ -z "$lapproved" ] && { [ "$lmode" = risk ] || [ "$lplan_approval" = 1 ]; }; then
+    fail "log-out --lean refused: feature $lname (mode $lmode) needs an approved plan and has none — it can't close on the lean path (set-mode $lname none for the reviewer path)"
+    exit 1
+  fi
+  if [ "$lean" = 1 ] && [ "$review_status" = "changes_requested" ]; then
+    fail "log-out --lean refused: a reviewer already requested changes on session $sid — it needs their approval"
+    exit 1
+  fi
+  if [ "$lean" = 0 ] && [ "$review_status" = "lean" ]; then
+    fail "cannot log out session $sid: its 'lean' pass doesn't apply to feature $lname, which has no lean mode — use the reviewer path"
+    exit 1
+  fi
+  # Reviewer path and --quick: every changed file must be inside the
+  # surfaces declared after claim. Lean features have their own Files check.
+  [ "$lean" = 1 ] || surfaces_gate "$sid" "${changes[@]+"${changes[@]}"}"
+  if [ "$lean" = 1 ]; then
+    lean_gate "$sid" "$lname" "$lmode"
+    if [ "${#LEAN_REASONS[@]}" -gt 0 ]; then
+      local joined; joined=$(printf '%s; ' "${LEAN_REASONS[@]}"); joined="${joined%; }"
+      # A pass from an earlier --lean run no longer describes this tree.
+      db_exec "UPDATE session_log SET review_status=NULL, reviewed_by=NULL, reviewed_at=NULL WHERE id=$sid AND review_status='lean';
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] LEAN: refused — $joined${LEAN_REPORT:+
+$LEAN_REPORT}")', '$(now_iso)');"
+      fail "log-out --lean refused — fix these, then log out again:"
+      printf '  - %s\n' "${LEAN_REASONS[@]}" >&2
+      [ -z "$LEAN_REPORT" ] || { echo "  gate report:" >&2; printf '%s\n' "$LEAN_REPORT" | sed 's/^/    /' >&2; }
+      exit 1
+    fi
+    local last_line; last_line=$(printf '%s\n' "$LEAN_REPORT" | sed '/^[[:space:]]*$/d' | tail -n 1)
+    db_exec "UPDATE session_log SET review_status='lean', reviewed_by='harness (lean gate)', reviewed_at='$(now_iso)' WHERE id=$sid;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] LEAN: passed (mode $lmode) — $last_line")', '$(now_iso)');"
+    ok "lean gate passed (mode $lmode): $last_line"
+    printf '%s\n' "$LEAN_REPORT" | grep '^\[WARN\]' | sed 's/^\[WARN\] *//' | while IFS= read -r w; do warn "lean gate: $w"; done
+    # Files changed before the feature and left as they were (lean/gate.sh): named, not refused.
+    printf '%s\n' "$LEAN_REPORT" | grep '^gate: ignoring ' | while IFS= read -r w; do ok "lean $w"; done
+    review_status=lean
+  fi
 
   # --quick: a small feature closes without a reviewer only when every signal
   # in quick_gate is clean. A refusal is logged and means "launch the
@@ -1491,8 +2542,14 @@ cmd_log_out() {
     if [ "${#QUICK_REASONS[@]}" -gt 0 ]; then
       local joined; joined=$(printf '%s; ' "${QUICK_REASONS[@]}"); joined="${joined%; }"
       db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] QUICK: refused — $joined")', '$(now_iso)');"
-      fail "log-out --quick refused — reviewer required:"
-      printf '  - %s\n' "${QUICK_REASONS[@]}" >&2
+      if [ "${#QUICK_REASONS[@]}" -eq 1 ] && [ -n "$QUICK_MISSING_HANDOFF" ]; then
+        # Only the handoff is missing: no gate signal asks for a reviewer yet.
+        fail "log-out --quick refused — missing handoff: write $QUICK_MISSING_HANDOFF (Risk: and Files: lines), then retry"
+      else
+        fail "log-out --quick refused — reviewer required:"
+        printf '  - %s\n' "${QUICK_REASONS[@]}" >&2
+        [ -z "$QUICK_MISSING_HANDOFF" ] || echo "  write $QUICK_MISSING_HANDOFF too: the gate reads its Risk: and Files: lines" >&2
+      fi
       exit 1
     fi
     db_exec "UPDATE session_log SET review_status='quick', reviewed_by='harness (quick gate)', reviewed_at='$(now_iso)' WHERE id=$sid;
@@ -1501,14 +2558,28 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[
     review_status=quick
   fi
 
-  if [ "$review_status" != "approved" ] && [ "$review_status" != "quick" ]; then
+  if [ "$review_status" != "approved" ] && [ "$review_status" != "quick" ] && [ "$review_status" != "lean" ]; then
     fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved' first (do NOT pass --by; the harness auto-attributes from \$ANTHROPIC_MODEL); only the implementer runs log-out, and only after that approval is recorded"
     exit 1
   fi
 
+  # The reviewer approved a specific state of the code: a change after it
+  # (a fix nobody reviewed) needs the reviewer again.
+  if [ "$review_status" = "approved" ]; then
+    case "$(review_verdict "$sid")" in
+      current) ;;
+      legacy) warn "the approval on session $sid predates review fingerprints: it can't be checked against the code being closed" ;;
+      *) fail "cannot log out session $sid: files changed after the reviewer approved them — the reviewer must review the change and record its verdict again"; exit 1 ;;
+    esac
+  fi
+
   # Whoever ran it, the full suite must have passed on exactly the code being
-  # closed: a change after the reviewer's ./init.sh needs another run.
-  case "$(init_verdict "$sid")" in
+  # closed: a change after the reviewer's ./init.sh needs another run. On the
+  # lean path the gate above has just run verify_command on this tree and
+  # passed (it refuses without one), so a missing or stale ./init.sh is no gap.
+  local init_state; init_state=$(init_verdict "$sid")
+  case "$init_state" in missing|stale) [ "$review_status" != lean ] || init_state=pass ;; esac
+  case "$init_state" in
     pass) ;;
     none) warn "no verify_command in .harness.json: closing without a test suite" ;;
     missing) fail "cannot log out session $sid: ./init.sh has not run in this session — run it and log out once it is green"; exit 1 ;;
@@ -1521,13 +2592,23 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[
   # trips `set -u` on bash 3.2.
   local changes_json; changes_json=$(json_array "${changes[@]+"${changes[@]}"}")
   record_diff_size "$sid" "${changes[@]+"${changes[@]}"}"
+  if hide_harness_on && [ ${#changes[@]} -gt 0 ] && git rev-parse --git-dir >/dev/null 2>&1; then
+    local hidden; hidden=$(hide_findings "${changes[@]}")
+    if [ -n "$hidden" ]; then
+      warn "hide_harness: these changes show the harness to git — reword them before any commit (scripts/harness.sh hide-check):"
+      printf '%s\n' "$hidden" | sed 's/^/          /'
+    fi
+  fi
   local now; now="$(now_iso)"
 
   sqlite3 "$DB_PATH" <<SQL
 .bail on
 BEGIN;
 UPDATE session_log SET changes='$(sql_escape "$changes_json")', verification='$(sql_escape "$verification")',
-  closure='$(sql_escape "$closure")', closed_at='$now' WHERE id=$sid AND review_status IN ('approved','quick') AND held_at IS NULL;
+  closure='$(sql_escape "$closure")', closed_at='$now' WHERE id=$sid AND review_status IN ('approved','quick','lean') AND held_at IS NULL
+  AND (review_status='lean') = EXISTS (SELECT 1 FROM features f WHERE f.id=session_log.feature_id AND f.mode IS NOT NULL)
+  AND NOT (review_status='lean' AND EXISTS (SELECT 1 FROM features f WHERE f.id=session_log.feature_id
+    AND (f.mode='risk' OR f.plan_approval=1) AND f.plan_approved_at IS NULL));
 UPDATE features SET status='done', updated_at='$now'
   WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid AND closed_at='$now');
 COMMIT;
@@ -1539,12 +2620,12 @@ SQL
     exit 1
   fi
   ok "session $sid logged out"
-  clean_feature_dir "$(db "SELECT name FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")"
+  local closed_name; closed_name=$(db "SELECT name FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")
+  clean_feature_dir "$closed_name"
+  lean_forget_baseline "$closed_name"
 
-  local source_id; source_id=$(db "SELECT source_id FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_done' 'Done')"
-  fi
+  push_notion_status "$(db "SELECT feature_id FROM session_log WHERE id=$sid;")"
+  sync_mirror
 }
 
 cmd_block() {
@@ -1783,10 +2864,7 @@ VALUES ('$(sql_escape "$pid")', $feature_id, '$(sql_escape "$agent")', '$now');"
 
   ok "reopened: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated")"
 
-  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$updated")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_in_progress' 'In Progress')"
-  fi
+  push_notion_status "$(jq -r '.[0].id' <<<"$updated")"
 }
 
 cmd_supersede() {
@@ -1867,6 +2945,7 @@ RETURNING id;" 2>&1)
 VALUES ($fid, '$(sql_escape "[$attribution] SUPERSEDED by $by_label (was $status_now): $reason")', '$now');"
   ok "superseded: $fnum $fname → $by_label (was $status_now)"
   clean_feature_dir "$fname"
+  lean_forget_baseline "$fname"
 
   # A dependent can never be claimed while its depends_on names a feature
   # that will never be 'done' — don't rewrite it silently, just say so.
@@ -1877,10 +2956,7 @@ WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL AND f.status 
     warn "these features depend on $fname and can't be claimed until their depends_on is fixed (e.g. point them at $(jq -r '.[0].name' <<<"$by_row") with 'set-depends-on'): $(tr '\n' ',' <<<"$dependents" | sed 's/,$//; s/,/, /g')"
   fi
 
-  local source_id; source_id=$(jq -r '.[0].source_id // empty' <<<"$row")
-  if [ -n "$source_id" ]; then
-    bash "$SCRIPT_DIR/notion_set_status.sh" "$source_id" "$(config '.notion_status_superseded' 'Done')"
-  fi
+  push_notion_status "$(jq -r '.[0].id' <<<"$row")"
 }
 
 cmd_unsupersede() {
@@ -2059,6 +3135,19 @@ cmd_forget() {
   ok "forgot #$id"
 }
 
+# session-base <name> — the BASE commit claim recorded on the feature's open
+# session, so lean/run.sh gates against the same commit log-out --lean does.
+cmd_session_base() {
+  local name="${1:-}" pid
+  [ -n "$name" ] || { fail "usage: session-base <feature_name>"; exit 1; }
+  pid="$(project_id)"
+  db "SELECT substr(e.entry, 17) FROM session_log_entries e
+  JOIN session_log s ON s.id = e.session_id JOIN features f ON f.id = s.feature_id
+  WHERE s.project_id='$(sql_escape "$pid")' AND s.closed_at IS NULL AND s.deleted_at IS NULL
+    AND s.paused_at IS NULL AND f.name='$(sql_escape "$name")' AND f.deleted_at IS NULL AND e.entry LIKE '[harness] BASE: %'
+  ORDER BY e.id LIMIT 1;"
+}
+
 cmd_status() {
   local pid; pid="$(project_id)"
   echo "project: $PROJECT_SLUG ($pid)"
@@ -2068,8 +3157,28 @@ cmd_status() {
   f.size, f.superseded_by
 FROM features f LEFT JOIN specs s ON s.feature_id = f.id AND s.deleted_at IS NULL
 WHERE f.project_id='$(sql_escape "$pid")' AND f.deleted_at IS NULL ORDER BY f.feature_number;"
+  local lean_rows
+  lean_rows=$(db -header -column "SELECT feature_number, name, mode,
+  CASE WHEN plan_approved_at IS NOT NULL THEN 'plan approved by ' || plan_approved_by
+       WHEN mode = 'risk' OR plan_approval = 1 THEN 'plan approval pending'
+       ELSE 'no plan approval needed' END AS plan
+FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND mode IS NOT NULL ORDER BY feature_number;")
+  if [ -n "$lean_rows" ]; then
+    echo "--- lean mode (close with log-out --lean; lean/README.md) ---"
+    echo "$lean_rows"
+  fi
   echo "--- open session ---"
   db -header -column "SELECT id, agent, started_at, review_status, reviewed_by, held_at FROM session_log WHERE project_id='$(sql_escape "$pid")' AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL;"
+  local open_sid; open_sid="$(current_session_id)"
+  if [ -n "$open_sid" ]; then
+    local open_fid; open_fid=$(db "SELECT feature_id FROM session_log WHERE id=$open_sid;")
+    [ -z "$open_fid" ] || print_out_of_scope "$open_fid"
+    local surf; surf="$(session_surfaces "$open_sid" | paste -sd ' ' -)"
+    if [ -n "$surf" ]; then echo "surfaces: $surf"
+    elif [ "$(db "SELECT surfaces_required FROM session_log WHERE id=$open_sid;")" = 1 ] && [ -z "$(db "SELECT mode FROM features WHERE id=${open_fid:-0};")" ]; then
+      echo "surfaces: none declared yet (set-surfaces)"
+    fi
+  fi
   local paused
   paused=$(db -header -column "SELECT sl.id, f.feature_number, f.name AS feature, sl.paused_at, sl.review_status FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id WHERE sl.project_id='$(sql_escape "$pid")' AND sl.closed_at IS NULL AND sl.deleted_at IS NULL AND sl.paused_at IS NOT NULL;")
   if [ -n "$paused" ]; then
@@ -2110,6 +3219,7 @@ UPDATE features SET deleted_at='$now', updated_at='$now' WHERE id=$fid;
 UPDATE specs SET deleted_at='$now', updated_at='$now' WHERE feature_id=$fid AND deleted_at IS NULL;
 COMMIT;"
   ok "soft-deleted feature $target (and its specs)"
+  lean_forget_baseline "$(db "SELECT name FROM features WHERE id=$fid;")"
 }
 
 # record-usage/stats live in scripts/agent_usage.py (python3 stdlib only).
@@ -2127,8 +3237,21 @@ cmd_record_usage() {
     warn "record-usage needs python3 and scripts/agent_usage.py (re-run install.sh) — skipping"
     return 0
   fi
+  # Still best-effort (exit 0), but a collector that fails outright (e.g. a
+  # stale agent_usage.py that rejects an option) is a [WARN] with its stderr,
+  # never a silent "no agent runs recorded".
+  local errf rc=0
+  errf="$(mktemp "${TMPDIR:-/tmp}/harness_usage.XXXXXX")" || errf=/dev/null
   python3 "$SCRIPT_DIR/agent_usage.py" --db "$DB_PATH" --project-slug "$PROJECT_SLUG" \
-    collect --project-root "$(pwd)" --reopen-warn-tokens "$(reopen_warn_tokens)" "$@" || true
+    collect --project-root "$(pwd)" --reopen-warn-tokens "$(reopen_warn_tokens)" "$@" 2>"$errf" || rc=$?
+  if [ "$errf" != /dev/null ]; then
+    if [ "$rc" -ne 0 ]; then
+      warn "record-usage failed: scripts/agent_usage.py exited $rc, nothing recorded — $(grep -v '^[[:space:]]*$' "$errf" | tail -n 2 | tr '\n' ' ' | sed 's/ *$//') (a stale copy? re-run install.sh in the main checkout; in a linked worktree, harness.sh link-worktree from the main checkout replaces it)"
+    else
+      cat "$errf" >&2
+    fi
+    rm -f "$errf"
+  fi
   warn_token_budget
 }
 
@@ -2165,7 +3288,10 @@ FROM features f WHERE f.id = (SELECT feature_id FROM session_log
 # re-running. With files and .harness.json::test_targeted_command set, runs
 # only those (its {files} placeholder is replaced with the shell-quoted paths,
 # {files:FLAG} with "FLAG path" per file, or they're appended if it has
-# neither); otherwise runs verify_command.
+# neither); otherwise runs verify_command. While a feature with a lean mode has an open
+# session (paused or not), the tree may hold code its sandboxed sessions wrote: the command
+# runs under their rules, like ./init.sh and the gate (lean/lib.sh lean_sandboxed), or with a
+# [WARN] where the platform can't sandbox it.
 cmd_test() {
   local targeted verify cmd quoted="" f
   targeted="$(config '.test_targeted_command' '')"
@@ -2192,9 +3318,32 @@ cmd_test() {
     exit 1
   fi
 
-  local log="progress/test_last.log" rc
+  local log="progress/test_last.log" rc lean_feature runner=plain
   mkdir -p progress
-  { printf '$ %s\n' "$cmd"; bash -c "$cmd"; } > "$log" 2>&1
+  lean_feature=$(db "SELECT f.name FROM session_log s JOIN features f ON f.id = s.feature_id
+    WHERE s.project_id='$(sql_escape "$(project_id)")' AND s.closed_at IS NULL AND s.deleted_at IS NULL
+    AND f.mode IS NOT NULL AND f.deleted_at IS NULL ORDER BY s.paused_at IS NOT NULL, s.id DESC LIMIT 1;" 2>/dev/null || true)
+  if [ -n "$lean_feature" ]; then
+    if ! declare -F lean_sandbox_prepare >/dev/null; then
+      warn "lean feature $lean_feature has an open session, but lean/lib.sh is missing: the tests run UNSANDBOXED with your full permissions"
+    else
+      lean_sandbox_prepare "$(pwd)"
+      [ -z "$LEAN_SANDBOX_WARN" ] || while IFS= read -r w; do warn "${w#\[WARN\] }"; done <<<"$LEAN_SANDBOX_WARN"
+      case "$LEAN_SANDBOX" in
+        sandbox) ok "lean feature $lean_feature has an open session: the tests run under its sessions' sandbox rules"; runner=lean ;;
+        unsandboxed:*) warn "lean feature $lean_feature has an open session, but the tests run UNSANDBOXED (${LEAN_SANDBOX#unsandboxed: }): code its sessions wrote runs with your full permissions"; runner=lean ;;
+        session:*) fail "lean feature $lean_feature has an open session, ${LEAN_SANDBOX#session: }"
+           return 1 ;;
+        *) fail "lean feature $lean_feature has an open session and its sandbox can't run here (${LEAN_SANDBOX#broken: }): run outside any sandbox, or set LEAN_GATE_UNSANDBOXED=1"
+           return 1 ;;
+      esac
+    fi
+  fi
+  if [ "$runner" = lean ]; then
+    { printf '$ %s\n' "$cmd"; lean_sandboxed "$(pwd)" "$cmd"; } > "$log" 2>&1
+  else
+    { printf '$ %s\n' "$cmd"; bash -c "$cmd"; } > "$log" 2>&1
+  fi
   rc=$?
   if [ "$rc" -eq 0 ]; then
     ok "tests passed: $cmd (log: $log)"
@@ -2205,6 +3354,119 @@ cmd_test() {
   return "$rc"
 }
 
+# wt_owns_path <wt> <rel> — true when <wt>/<rel> is the worktree's own path:
+# no directory between <wt> and <rel> (the existing ones) is a symlink, and the
+# deepest existing one resolves inside the worktree's real directory
+# (LINK_WT_REAL) and not into the main checkout (LINK_MAIN_REAL) unless the
+# worktree itself sits inside it. A worktree whose .claude links to main's
+# .claude would otherwise let a repair delete main's own files through it.
+LINK_WT_REAL="" LINK_MAIN_REAL=""
+# path_within <physical path> <dir> — true when <path> is <dir> or below it,
+# compared by inode (-ef) at each ancestor rather than as strings: on a
+# case-insensitive volume `pwd -P` keeps the case as typed, so /Repo/app and
+# /repo/app are the same directory but not the same string.
+path_within() {
+  local d="$1"
+  while :; do
+    [ ! "$d" -ef "$2" ] || return 0
+    case "$d" in /|"") return 1 ;; esac
+    d="${d%/*}"; [ -n "$d" ] || d=/
+  done
+}
+wt_owns_path() {
+  local wt="$1" rel="$2" rest sub="" last="" part real
+  case "$rel" in */*) rest="${rel%/*}" ;; *) rest="" ;; esac
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    if [ "$part" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+    sub="${sub:+$sub/}$part"
+    [ ! -L "$wt/$sub" ] || return 1
+    [ -d "$wt/$sub" ] || break
+    last="$sub"
+  done
+  real="$(cd "$wt${last:+/$last}" 2>/dev/null && pwd -P)" || return 1
+  path_within "$real" "$LINK_WT_REAL" || return 1
+  if path_within "$real" "$LINK_MAIN_REAL"; then
+    # Only a worktree nested inside the main checkout may be under it.
+    path_within "$LINK_WT_REAL" "$LINK_MAIN_REAL" && [ ! "$LINK_WT_REAL" -ef "$LINK_MAIN_REAL" ] || return 1
+  fi
+  return 0
+}
+
+# relink_stale_copy <main> <wt> <rel> — when <wt>/<rel> is a regular file
+# copy of a file the toolkit installs (<rel> is listed in the main checkout's
+# harness/installed-files.txt, written by install.sh) and the worktree doesn't
+# track it, replace it with a link to <main>/<rel>. Anything else — a project
+# file that is merely git-ignored (scripts/local.json), user config such as
+# .codex/config.toml, mock-data/ — is never touched, nor is a path reached
+# through a linked directory or one that is main's own file (wt_owns_path, -ef).
+# A copy that differs is moved to <wt>/progress/stale_harness_copies/<rel> (a
+# timestamp suffix when a backup is already there; sets RELINK_MOVED) instead
+# of deleted, and only when that backup path is the worktree's own
+# (wt_owns_path; cmd_link_worktree makes a linked progress/ local first):
+# otherwise the copy is left, with a [WARN] naming where it is. The link is
+# created beside the file and checked first; when a step fails (ln, mkdir, mv)
+# or the result does not resolve to main's regular file, a [WARN] names the
+# path and what was restored, and <rel> is added to RELINK_FAILED. Returns 1
+# when it leaves the file.
+RELINK_MOVED="" RELINK_FAILED=""
+relink_stale_copy() {
+  local main="$1" wt="$2" rel="$3" aside tmp src_dir
+  case "$rel" in mock-data|mock-data/*) return 1 ;; esac
+  [ -f "$main/harness/installed-files.txt" ] && grep -qxF -- "$rel" "$main/harness/installed-files.txt" || return 1
+  [ -f "$wt/$rel" ] && [ ! -L "$wt/$rel" ] && [ -f "$main/$rel" ] && [ ! -L "$main/$rel" ] || return 1
+  wt_owns_path "$wt" "$rel" || return 1
+  [ ! "$wt/$rel" -ef "$main/$rel" ] || return 1
+  src_dir="$(cd "$(dirname "$main/$rel")" 2>/dev/null && pwd -P)" || return 1
+  ! path_within "$src_dir" "$LINK_WT_REAL" || return 1
+  ! git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || return 1
+  if ! cmp -s "$main/$rel" "$wt/$rel" && ! wt_owns_path "$wt" "progress/stale_harness_copies/$rel"; then
+    warn "not replacing $wt/$rel: its backup would go through a link (progress/ is not the worktree's own); the copy stays at $LINK_WT_REAL/$rel"
+    RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+  fi
+  tmp="$wt/$rel.harness-relink.$$"
+  if ! { rm -f "$tmp" && ln -s "$main/$rel" "$tmp"; } 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    warn "could not create a link for $wt/$rel (ln -s failed): the copy stays where it was, unchanged"
+    RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+  fi
+  if [ ! -f "$tmp" ] || [ ! "$tmp" -ef "$main/$rel" ]; then
+    rm -f "$tmp"
+    warn "the new link for $wt/$rel did not resolve to $main/$rel: removed it; the copy stays where it was, unchanged"
+    RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+  fi
+  if cmp -s "$main/$rel" "$wt/$rel"; then
+    aside="$wt/$rel.harness-relink-bak.$$"
+  else
+    aside="$wt/progress/stale_harness_copies/$rel"
+    { [ ! -e "$aside" ] && [ ! -L "$aside" ]; } || aside="$aside.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    if ! mkdir -p "$(dirname "$aside")" 2>/dev/null; then
+      rm -f "$tmp"
+      warn "could not create $(dirname "$aside") for the backup of $wt/$rel: the copy stays where it was, unchanged"
+      RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+    fi
+  fi
+  if ! mv "$wt/$rel" "$aside" 2>/dev/null; then
+    rm -f "$tmp"
+    warn "could not move $wt/$rel aside (mv failed): the copy stays where it was"
+    RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"; return 1
+  fi
+  if mv "$tmp" "$wt/$rel" 2>/dev/null && [ -L "$wt/$rel" ] && [ -f "$wt/$rel" ] && [ "$wt/$rel" -ef "$main/$rel" ] \
+      && [ -f "$main/$rel" ] && [ ! -L "$main/$rel" ]; then
+    case "$aside" in *.harness-relink-bak.$$) rm -f "$aside" ;; *) RELINK_MOVED=1 ;; esac
+    return 0
+  fi
+  rm -f "$tmp"
+  [ ! -L "$wt/$rel" ] || rm -f "$wt/$rel"
+  if mv "$aside" "$wt/$rel" 2>/dev/null; then
+    warn "could not put the link in place for $wt/$rel: restored the original copy there"
+  else
+    warn "could not put the link in place for $wt/$rel, nor move the original back: it is at $aside"
+  fi
+  RELINK_FAILED="${RELINK_FAILED:+$RELINK_FAILED }$rel"
+  return 1
+}
+
 # link-worktree <dir> — see the usage comment. Items are relative to the
 # project directory (the same subdirectory inside the worktree).
 cmd_link_worktree() {
@@ -2213,7 +3475,11 @@ cmd_link_worktree() {
   [ -d "$wt" ] || { fail "not a directory: $wt"; exit 1; }
   wt="$(cd "$wt" && pwd)"
   local main; main="$(pwd)"
-  [ "$wt" != "$main" ] || { fail "link-worktree takes the worktree's project directory, not this checkout"; exit 1; }
+  LINK_WT_REAL="$(cd "$wt" && pwd -P)"; LINK_MAIN_REAL="$(pwd -P)"
+  # Compared resolved too: a worktree directory that is a link to this checkout
+  # would make every "stale copy" one of main's own files.
+  [ "$wt" != "$main" ] && [ "$LINK_WT_REAL" != "$LINK_MAIN_REAL" ] && [ ! "$wt" -ef "$main" ] \
+    || { fail "link-worktree takes the worktree's project directory, not this checkout ($wt resolves to $LINK_MAIN_REAL)"; exit 1; }
   local common_main common_wt
   common_main="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
   common_wt="$(cd "$wt" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
@@ -2223,21 +3489,60 @@ cmd_link_worktree() {
 
   # Harness-owned: always shared. Project-owned: only when the worktree has no
   # copy of its own (e.g. excluded from git); a tracked one is the branch's.
-  local shared="AGENTS.md CLAUDE.md init.sh harness.db harness scripts .harness.json .claude/agents .codex mock-data"
+  local shared="AGENTS.md CLAUDE.md init.sh harness.db harness scripts .harness.json .claude/agents .codex lean mock-data"
   local fallback="docs CHECKPOINTS.md specs features.seed.json"
-  local item child linked=() kept=()
+  local item child rel sub srel linked=() kept=() repaired=() through=()
+  RELINK_MOVED="" RELINK_FAILED=""
+  # progress/ holds each agent's handoffs: a symlink there sends every write
+  # outside the worktree, which agent sandboxes and permission prompts treat
+  # as an external path. Made local before the repair below, so the backups of
+  # differing copies land in the worktree, not in main's progress/. The main
+  # checkout's progress/ is left as it is.
+  if [ -L "$wt/progress" ]; then
+    rm -f "$wt/progress" && ok "progress/ was a symlink to another checkout — replaced by a local directory"
+  fi
+  mkdir -p "$wt/progress"
   for item in $shared $fallback; do
     [ -e "$main/$item" ] || continue
+    # Under a linked directory (.claude -> main's .claude, or a folder outside
+    # the worktree) nothing is linked or repaired: it would write elsewhere.
+    if ! wt_owns_path "$wt" "$item"; then through+=("$item"); continue; fi
     if [ -L "$wt/$item" ] || [ -e "$wt/$item" ]; then
       # A real directory in the worktree (e.g. tracked project scripts next to
-      # the harness ones): link only the harness children it is missing.
+      # the harness ones): link the children it is missing, and replace stale
+      # regular copies of toolkit-installed ones (left by an install.sh run
+      # inside the worktree, or by an older link-worktree) with links. Only
+      # direct children, top-level files and the files of a real .codex/agents/,
+      # harness/instructions/ or lean/<subdir>/ (adapters/, instructions/, ...)
+      # are repaired (harness/installed-files.txt decides which; harness.db,
+      # .harness.json and mock-data/ never are). Nothing deeper is touched.
       if [ -d "$wt/$item" ] && [ ! -L "$wt/$item" ] && [ -d "$main/$item" ] && [[ " $shared " == *" $item "* ]]; then
         for child in "$main/$item"/*; do
           [ -e "$child" ] || continue
-          if [ ! -e "$wt/$item/${child##*/}" ] && [ ! -L "$wt/$item/${child##*/}" ]; then
-            ln -s "$child" "$wt/$item/${child##*/}" && linked+=("$item/${child##*/}")
+          rel="$item/${child##*/}"
+          if [ ! -e "$wt/$rel" ] && [ ! -L "$wt/$rel" ]; then
+            ln -s "$child" "$wt/$rel" && linked+=("$rel")
+          elif [ -d "$child" ] && [ ! -L "$child" ] && [ -d "$wt/$rel" ] && [ ! -L "$wt/$rel" ] \
+              && case "$rel" in .codex/agents|harness/instructions|lean/*) true ;; *) false ;; esac \
+              && wt_owns_path "$wt" "$rel/x"; then
+            # The toolkit's files one level further down (installed-files.txt
+            # lists them) when the worktree holds that directory for real: same
+            # rules as the direct children.
+            for sub in "$child"/*; do
+              [ -f "$sub" ] && [ ! -L "$sub" ] || continue
+              srel="$rel/${sub##*/}"
+              if [ ! -e "$wt/$srel" ] && [ ! -L "$wt/$srel" ]; then
+                ln -s "$sub" "$wt/$srel" && linked+=("$srel")
+              elif relink_stale_copy "$main" "$wt" "$srel"; then
+                repaired+=("$srel")
+              fi
+            done
+          elif relink_stale_copy "$main" "$wt" "$rel"; then
+            repaired+=("$rel")
           fi
         done
+      elif [ -f "$wt/$item" ] && relink_stale_copy "$main" "$wt" "$item"; then
+        repaired+=("$item")
       else
         kept+=("$item")
       fi
@@ -2246,14 +3551,6 @@ cmd_link_worktree() {
     mkdir -p "$(dirname "$wt/$item")"
     ln -s "$main/$item" "$wt/$item" && linked+=("$item")
   done
-
-  # progress/ holds each agent's handoffs: a symlink there sends every write
-  # outside the worktree, which agent sandboxes and permission prompts treat
-  # as an external path. The main checkout's progress/ is left as it is.
-  if [ -L "$wt/progress" ]; then
-    rm -f "$wt/progress" && ok "progress/ was a symlink to another checkout — replaced by a local directory"
-  fi
-  mkdir -p "$wt/progress"
 
   local prefix exclude_file begin end
   prefix="$(cd "$wt" && git rev-parse --show-prefix)"
@@ -2270,7 +3567,10 @@ cmd_link_worktree() {
   } > "$exclude_file.tmp" && mv "$exclude_file.tmp" "$exclude_file"
 
   ok "worktree $wt: linked ${#linked[@]} item(s)${linked[0]+: ${linked[*]}}; progress/ is local"
+  [ "${#repaired[@]}" -eq 0 ] || ok "replaced stale harness copies with links: ${repaired[*]}${RELINK_MOVED:+ (differing copies kept in $LINK_WT_REAL/progress/stale_harness_copies/)}"
   [ "${#kept[@]}" -eq 0 ] || ok "already present, left as they are: ${kept[*]}"
+  [ "${#through[@]}" -eq 0 ] || ok "inside a linked directory of the worktree, left as they are: ${through[*]}"
+  [ -z "$RELINK_FAILED" ] || warn "could not replace these stale harness copies with links (left as they were): $RELINK_FAILED"
 }
 
 cmd_stats() {
@@ -2284,7 +3584,8 @@ cmd_stats() {
   for a in "$@"; do
     if [ "$a" = "--no-refresh" ]; then refresh=0; else args+=("$a"); fi
   done
-  [ "$refresh" = 0 ] || cmd_record_usage --max-seconds 10 >/dev/null 2>&1 || true
+  # Only a failed collector's warning is shown: an empty table must not hide why.
+  [ "$refresh" = 0 ] || { cmd_record_usage --max-seconds 10 2>&1 >/dev/null | grep -F 'record-usage failed:' >&2; } || true
   python3 "$SCRIPT_DIR/agent_usage.py" --db "$DB_PATH" --project-slug "$PROJECT_SLUG" stats "${args[@]+"${args[@]}"}"
 }
 
@@ -2337,14 +3638,22 @@ main() {
     claim-spec) cmd_claim_spec "$@" ;;
     mark-spec-ready) cmd_mark_spec_ready ;;
     approve-spec) cmd_approve_spec "$@" ;;
+    approve-plan) cmd_approve_plan "$@" ;;
+    set-mode) cmd_set_mode "$@" ;;
     claim) cmd_claim "$@" ;;
     record-review) cmd_record_review "$@" ;;
     append-log) cmd_append_log "$@" ;;
     set-plan) cmd_set_array_field plan "$@" ;;
+    set-surfaces) cmd_set_surfaces "$@" ;;
+    add-surface) cmd_add_surface "$@" ;;
+    set-out-of-scope) cmd_set_out_of_scope "$@" ;;
+    tick-tasks) cmd_tick_tasks "$@" ;;
+    hide-check) cmd_hide_check "$@" ;;
     set-next-step) cmd_set_array_field next_step "$@" ;;
     log-out) cmd_log_out "$@" ;;
     delete-feature) cmd_delete_feature "$@" ;;
     status) cmd_status ;;
+    session-base) cmd_session_base "$@" ;;
     snapshot) cmd_snapshot ;;
     sync) cmd_sync ;;
     notion-check) cmd_notion_check ;;
@@ -2354,6 +3663,9 @@ main() {
     hold) cmd_hold "$@" ;;
     unhold) cmd_unhold "$@" ;;
     set-size) cmd_set_size "$@" ;;
+    drop-sdd) cmd_drop_sdd "$@" ;;
+    add-sdd) cmd_add_sdd "$@" ;;
+    notion-push) cmd_notion_push "$@" ;;
     set-request) cmd_set_request "$@" ;;
     learn) cmd_learn "$@" ;;
     recall) cmd_recall "$@" ;;

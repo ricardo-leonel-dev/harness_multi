@@ -22,6 +22,7 @@
 # Usage:
 #   notion_create_feature.sh (--project <slug> | --project-path <dir>) --title <text> \
 #                             --description <text> [--acceptance <text>] [--status <value, default "Backlog">] [--sdd]
+#                             [--mode normal|risk] [--approval]
 #
 # --sdd checks the database's optional "SDD" checkbox property (the same one
 # notion_check.sh reads back on import) on the created page. Pass it whenever the local
@@ -30,6 +31,13 @@
 # even though harness.db enforces the spec gate correctly regardless of what Notion shows.
 # A database without an "SDD" property just ignores the flag (same graceful-skip as the
 # optional Description/Acceptance Criteria properties below).
+#
+# --mode normal|risk sets the database's optional "Mode" select ("Normal"/"Risk", read back
+# by notion_check.sh) and --approval its optional "Plan approval" checkbox: pass them
+# exactly as given to `add-feature --mode/--approval`, so the board shows the lean flow
+# harness.db enforces. Same graceful skip when the database lacks either property (or
+# has it with another type). --mode risk --approval is accepted with a warning and
+# leaves the checkbox unticked.
 #
 # --project-path <dir> reads <dir>/.harness.json's project_slug directly instead of
 # trusting a hand-typed/guessed slug — use this whenever the target project's directory
@@ -59,6 +67,8 @@ DESCRIPTION=""
 ACCEPTANCE=""
 STATUS_VALUE="Backlog"
 SDD_FLAG=""
+MODE=""
+APPROVAL_FLAG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -69,6 +79,8 @@ while [ $# -gt 0 ]; do
     --acceptance) ACCEPTANCE="$2"; shift 2 ;;
     --status) STATUS_VALUE="$2"; shift 2 ;;
     --sdd) SDD_FLAG=1; shift ;;
+    --mode) MODE="${2-}"; shift; [ $# -eq 0 ] || shift ;;
+    --approval) APPROVAL_FLAG=1; shift ;;
     *) echo "[FAIL] unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -91,8 +103,30 @@ if [ -n "$TARGET_PROJECT_PATH" ]; then
 fi
 
 if [ -z "$TARGET_PROJECT" ] || [ -z "$TITLE" ] || [ -z "$DESCRIPTION" ]; then
-  echo "[FAIL] usage: notion_create_feature.sh (--project <slug> | --project-path <dir>) --title <text> --description <text> [--acceptance <text>] [--status <value>]" >&2
+  echo "[FAIL] usage: notion_create_feature.sh (--project <slug> | --project-path <dir>) --title <text> --description <text> [--acceptance <text>] [--status <value>] [--sdd] [--mode normal|risk] [--approval]" >&2
   exit 1
+fi
+
+# Same combinations add-feature accepts (and the same warning for risk with
+# --approval), so the card can't claim a flow the local feature doesn't have.
+case "$MODE" in
+  "") mode_label="" ;;
+  normal) mode_label="Normal" ;;
+  risk) mode_label="Risk" ;;
+  *) echo "[FAIL] --mode must be 'normal' or 'risk', got: $MODE" >&2; exit 1 ;;
+esac
+# --mode risk --approval: risk always needs approval, so the flag is redundant;
+# accepted with the same warning add-feature and notion-import give, and the checkbox is left
+# unticked so the card reads the same as any other risk card.
+if [ -n "$APPROVAL_FLAG" ] && [ "$MODE" = risk ]; then
+  echo "[WARN]  --approval with --mode risk: risk always requires approval; checkbox ignored" >&2
+  APPROVAL_FLAG=""
+fi
+if [ -n "$APPROVAL_FLAG" ] && [ "$MODE" != normal ]; then
+  echo "[FAIL] --approval only applies with --mode normal (risk always needs approval)" >&2; exit 1
+fi
+if [ -n "$MODE" ] && [ -n "$SDD_FLAG" ]; then
+  echo "[FAIL] --sdd and --mode are alternatives (the spec flow or the lean flow), not both" >&2; exit 1
 fi
 
 DATABASE_ID="$(config '.notion_database_id')"
@@ -150,6 +184,13 @@ sdd_prop=$(prop sdd)
 sdd_prop_id=$(jq -r '.id // empty' <<<"$sdd_prop")
 sdd_prop_type=$(jq -r '.type // empty' <<<"$sdd_prop")
 if [ -n "$SDD_FLAG" ]; then sdd_flag_json=true; else sdd_flag_json=false; fi
+mode_prop=$(prop mode)
+mode_prop_id=$(jq -r '.id // empty' <<<"$mode_prop")
+mode_prop_type=$(jq -r '.type // empty' <<<"$mode_prop")
+approval_prop=$(prop planapproval)
+approval_prop_id=$(jq -r '.id // empty' <<<"$approval_prop")
+approval_prop_type=$(jq -r '.type // empty' <<<"$approval_prop")
+if [ -n "$APPROVAL_FLAG" ]; then approval_flag_json=true; else approval_flag_json=false; fi
 
 if [ -z "$name_prop_id" ] || [ -z "$project_prop_id" ] || [ -z "$status_prop_id" ]; then
   echo "[FAIL] database $DATABASE_ID is missing a Name/Project/Status property" >&2
@@ -172,6 +213,8 @@ properties=$(jq -n \
   --arg desc_id "$desc_prop_id" --arg description "$DESCRIPTION" \
   --arg accept_id "$accept_prop_id" --arg acceptance "$ACCEPTANCE" \
   --arg sdd_id "$sdd_prop_id" --arg sdd_type "$sdd_prop_type" --argjson sdd_flag "$sdd_flag_json" \
+  --arg mode_id "$mode_prop_id" --arg mode_type "$mode_prop_type" --arg mode "$mode_label" \
+  --arg approval_id "$approval_prop_id" --arg approval_type "$approval_prop_type" --argjson approval_flag "$approval_flag_json" \
   '{
     ($name_id): {title: [{text: {content: $title}}]},
     ($project_id): {select: {name: $project}},
@@ -180,6 +223,8 @@ properties=$(jq -n \
   + (if $desc_id != "" then {($desc_id): {rich_text: [{text: {content: $description}}]}} else {} end)
   + (if $accept_id != "" and $acceptance != "" then {($accept_id): {rich_text: [{text: {content: $acceptance}}]}} else {} end)
   + (if $sdd_id != "" and $sdd_type == "checkbox" and $sdd_flag then {($sdd_id): {checkbox: true}} else {} end)
+  + (if $mode_id != "" and $mode_type == "select" and $mode != "" then {($mode_id): {select: {name: $mode}}} else {} end)
+  + (if $approval_id != "" and $approval_type == "checkbox" and $approval_flag then {($approval_id): {checkbox: true}} else {} end)
   ')
 
 payload=$(jq -n --arg db "$DATABASE_ID" --argjson props "$properties" \

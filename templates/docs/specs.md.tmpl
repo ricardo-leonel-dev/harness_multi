@@ -194,7 +194,8 @@ left `[ ]` without a documented justification in `progress/<name>/impl.md`.
 Every `R<n>` must be covered by **at least one concrete, currently-passing test**, and every case
 row by an assertion — a table-driven test (`it.each`, `@pytest.mark.parametrize`, subtests) is the
 natural shape: one test per rule, one row per case. Every `P<n>` needs one test proving the
-existing behavior still holds. No padding tests beyond that. The `implementer` documents the
+existing behavior still holds — its results, not the current text of the code, config or queries
+(`harness/instructions/testing.md` "What a test asserts"). No padding tests beyond that. The `implementer` documents the
 mapping in `progress/<name>/impl.md`:
 
 ```markdown

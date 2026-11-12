@@ -4,6 +4,7 @@
 #
 #   1. mark-spec-ready refuses more than spec_max_requirements (default 15) and
 #      accepts the limit; approve-spec refuses a spec edited above it; 0 disables.
+#      approve-spec refuses a missing approver name and the "user" placeholder.
 #   2. test runs test_targeted_command with {files}, keeps output in
 #      progress/test_last.log, propagates the exit status, falls back to
 #      verify_command.
@@ -72,6 +73,11 @@ out=$(H approve-spec alpha --by tester) && die "approve-spec should refuse a spe
 [ "$(q "SELECT status FROM specs;")" = ready ] || die "refused approval must leave the spec ready"
 pass "approve-spec refuses a spec edited above the limit"
 jq '.spec_max_requirements = 0' "$P/.harness.json" > "$P/c" && mv "$P/c" "$P/.harness.json"
+out=$(HARNESS_HUMAN_USER= H approve-spec alpha) && die "approve-spec with no name configured must refuse: $out"
+grep -q 'needs the approving human' <<<"$out" || die "refusal should say a name is needed: $out"
+out=$(H approve-spec alpha --by User) && die "approve-spec must refuse the placeholder 'user': $out"
+[ "$(q "SELECT status FROM specs;")" = ready ] || die "a refused approval must leave the spec ready"
+pass "approve-spec refuses a missing name and the 'user' placeholder"
 H approve-spec alpha --by tester >/dev/null || die "spec_max_requirements=0 should disable the gate"
 pass "spec_max_requirements=0 disables the gate"
 
@@ -106,11 +112,11 @@ echo "3. log-out review budget"
 P="$WORK/p3"; new_project "$P" '{"review_budget_lines":5}'
 (cd "$P" && git init -q && mkdir -p src && printf 'a\nb\n' > src/app.ts && git add src && \
   git -c user.email=t@t -c user.name=t commit -qm base) || die "git setup"
+H claim beta >/dev/null && H set-surfaces src bun.lock NOTES.md >/dev/null || die "claim beta"
 printf 'a\nB\nc\nd\n' > "$P/src/app.ts"                     # +3 -1 = 4 code lines
 mkdir -p "$P/src/x"; printf '1\n2\n3\n' > "$P/src/x/app.spec.ts"   # 3 test lines (untracked)
 printf 'lock\n%.0s' $(seq 1 50) > "$P/bun.lock"            # excluded
 printf 'doc\n' > "$P/NOTES.md"                              # excluded
-H claim beta >/dev/null || die "claim beta"
 H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "record-review"
 out=$(H log-out --changes src/app.ts src/x bun.lock NOTES.md --verification v --closure c) || die "log-out: $out"
 grep -q 'DIFF: code=4 lines, tests=3 lines, files=2' <<<"$out" || die "wrong DIFF: $out"
@@ -119,14 +125,15 @@ grep -q 'exceeds' <<<"$out" && die "4 code lines must not exceed a budget of 5: 
 pass "DIFF logged with code/test split, lockfile and prose excluded"
 [ "$(q "SELECT status FROM features WHERE name='beta';")" = done ] || die "log-out must still close"
 q "UPDATE features SET status='pending' WHERE name='beta';"
+H claim beta >/dev/null && H set-surfaces src >/dev/null || die "re-claim beta"
 printf 'x\n%.0s' $(seq 1 10) >> "$P/src/app.ts"
-H claim beta >/dev/null && H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "re-claim beta"
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "re-claim beta"
 out=$(H log-out --changes src/app.ts --verification v --closure c) || die "log-out over budget must not block: $out"
 grep -q 'exceeds review_budget_lines=5' <<<"$out" || die "over-budget warning missing: $out"
 pass "over budget warns and still closes"
 q "UPDATE features SET status='pending' WHERE name='beta';"
 (cd "$P" && git add src && git -c user.email=t@t -c user.name=t commit -qm wip) || die "git commit"
-H claim beta >/dev/null || die "re-claim beta for committed work"
+H claim beta >/dev/null && H set-surfaces src >/dev/null || die "re-claim beta for committed work"
 printf 'y\ny\n' >> "$P/src/app.ts"
 (cd "$P" && git add src && git -c user.email=t@t -c user.name=t commit -qm work) || die "git commit work"
 H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "record-review"
@@ -134,7 +141,7 @@ out=$(H log-out --changes src/app.ts --verification v --closure c) || die "log-o
 grep -q 'DIFF: code=2 lines' <<<"$out" || die "work committed before log-out must count from the session base: $out"
 pass "DIFF counts work committed during the session"
 q "UPDATE features SET status='pending' WHERE name='beta';"
-H claim beta >/dev/null || die "re-claim beta for a branch switch"
+H claim beta >/dev/null && H set-surfaces src >/dev/null || die "re-claim beta for a branch switch"
 (cd "$P" && git checkout -q -b right HEAD~2) || die "git checkout"   # base no longer in history
 printf 'z\n' >> "$P/src/app.ts"
 H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null || die "record-review"

@@ -21,6 +21,7 @@ install_into "$B"
 for project in "$A" "$B"; do
   mkdir -p "$project/mock-data/manifests"
   printf '{"version":"initial"}\n' > "$project/mock-data/manifests/initial.json"
+  mkdir -p "$project/progress/some_feature" && printf 'handoff\n' > "$project/progress/some_feature/impl.md"
 done
 cp "$A/mock-data/manifests/initial.json" "$WORK/dataset.before"
 git -C "$REPO" check-ignore -q "$A/mock-data/manifests/initial.json"
@@ -28,15 +29,25 @@ git -C "$REPO" check-ignore -q "$B/mock-data/manifests/initial.json"
 
 # Only project-owned files may show up for commit; harness-owned ones never do.
 untracked > "$WORK/visible"
-for f in .gitignore .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md \
+for f in .harness.json CHECKPOINTS.md docs/architecture.md docs/conventions.md \
          docs/verification.md specs/README.md; do
   grep -qxF "service-a/$f" "$WORK/visible"
   grep -qxF "svc [b]/$f" "$WORK/visible"
 done
-if grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|init\.sh|harness\.db|docs/specs\.md)$|/(harness|state|scripts|mock-data)/|/\.(claude|codex)/agents/' "$WORK/visible"; then
+if grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|init\.sh|harness\.db|docs/specs\.md)$|/(harness|lean|state|scripts|mock-data|progress)/|/\.(claude|codex)/agents/' "$WORK/visible"; then
   echo 'harness-owned file visible to git' >&2; exit 1
 fi
 [ -d "$A/state" ]
+# lean/ lands at the project root (harness.sh finds the gate at <scripts>/../lean/gate.sh), scripts executable.
+for f in gate.sh run.sh sandbox.sh adapters/claude.sh; do [ -x "$A/lean/$f" ]; done
+[ -f "$A/lean/instructions/planning.md" ]
+git -C "$REPO" check-ignore -q "$A/lean/gate.sh"
+# Without hide_harness the lean flow's plans and acceptance tests are the project's to commit.
+mkdir -p "$A/docs/features" "$A/acceptance"
+printf 'plan\n' > "$A/docs/features/x.md"; printf 'test\n' > "$A/acceptance/x.test.js"
+untracked | grep -qxF 'service-a/docs/features/x.md'
+untracked | grep -qxF 'service-a/acceptance/x.test.js'
+rm -rf "$A/docs/features" "$A/acceptance"
 pass 'monorepo installs hide every harness-owned file and keep project-owned ones visible'
 
 grep -qxF '/local-notes.txt' "$EXCLUDE"
@@ -97,6 +108,25 @@ install_into "$B"
 [ ! -e "$A/.claude/settings.json" ]
 jq -e '.permissions.allow == ["Bash(ls)"] and (.hooks.Stop | length) == 1 and .hooks.Stop[0].hooks[0].command == "echo mine" and (.hooks | has("SubagentStop") | not)' "$B/.claude/settings.json" >/dev/null
 pass 'reinstall removes the old harness hooks and keeps everything else'
+
+# Claude Code allow rules: the routine commands only, merged into the project's own, never duplicated.
+L="$A/.claude/settings.local.json"
+jq -e '.permissions.allow | index("Bash(./init.sh:*)") and index("Bash(scripts/harness.sh record-review:*)") and index("Bash(scripts/harness.sh log-out:*)")' "$L" >/dev/null
+if jq -e '.permissions.allow[] | select(test("approve-spec|cancel-session|supersede|harness\\.sh:\\*"))' "$L" >/dev/null; then
+  echo 'allow rules cover a gated harness command' >&2; exit 1
+fi
+printf '{"model":"x","permissions":{"allow":["Bash(ls)"],"deny":["Bash(rm:*)"]}}\n' > "$L"
+install_into "$A"
+cp "$L" "$WORK/local.before"
+install_into "$A"
+cmp "$WORK/local.before" "$L"
+jq -e '.model == "x" and .permissions.deny == ["Bash(rm:*)"] and .permissions.allow[0] == "Bash(ls)" and (.permissions.allow | length) == 17 and (.permissions.allow | index("Bash(scripts/harness.sh set-surfaces:*)") != null) and (.permissions.allow | index("Bash(scripts/harness.sh add-surface:*)") != null)' "$L" >/dev/null
+if untracked | grep -q 'settings.local.json'; then echo 'settings.local.json visible to git' >&2; exit 1; fi
+printf 'not json' > "$L"
+install_into "$A"
+grep -q 'settings.local.json is not valid JSON' "$WORK/install.log"
+[ "$(cat "$L")" = 'not json' ]
+pass 'reinstall merges the Claude Code allow rules into settings.local.json and hides it from git'
 
 N="$WORK/not a repo"; mkdir -p "$N"
 install_into "$N"

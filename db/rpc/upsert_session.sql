@@ -3,10 +3,19 @@
 -- or deleted state. Feature is resolved by local id, falling back to name
 -- (both nullable, for bootstrap entries with no associated feature). Exposed via
 -- POST /rest/v1/rpc/upsert_session.
--- Replaces the 13-argument signature (before p_feature_local_id) so
--- re-applying this file never leaves an ambiguous overload behind.
+-- Replaces the 13-argument signature (before p_feature_local_id), the
+-- 14-argument one (before the review fields of migration 0005) and the
+-- 17-argument one (before the surfaces of migration 0006) so re-applying this
+-- file never leaves an ambiguous overload behind. The review fields and
+-- p_surfaces default to NULL and p_surfaces_required to false (a session
+-- synced by a toolkit without surfaces never had to declare them), so a
+-- sync_postgres.sh that predates them keeps working.
 drop function if exists upsert_session(text, bigint, text, text, text[], text[], text[], text, text,
   timestamptz, timestamptz, timestamptz, timestamptz);
+drop function if exists upsert_session(text, bigint, text, text, text[], text[], text[], text, text,
+  timestamptz, timestamptz, timestamptz, timestamptz, bigint);
+drop function if exists upsert_session(text, bigint, text, text, text[], text[], text[], text, text,
+  timestamptz, timestamptz, timestamptz, timestamptz, bigint, text, text, timestamptz);
 
 create or replace function upsert_session(
   p_project_slug text,
@@ -22,7 +31,12 @@ create or replace function upsert_session(
   p_closed_at timestamptz default null,
   p_deleted_at timestamptz default null,
   p_paused_at timestamptz default null,
-  p_feature_local_id bigint default null
+  p_feature_local_id bigint default null,
+  p_review_status text default null,
+  p_reviewed_by text default null,
+  p_reviewed_at timestamptz default null,
+  p_surfaces jsonb default null,
+  p_surfaces_required boolean default false
 ) returns session_log
 language plpgsql as $$
 declare
@@ -46,9 +60,11 @@ begin
   end if;
 
   insert into session_log (project_id, local_id, feature_id, agent, plan, next_step,
-                            changes, verification, closure, started_at, closed_at, paused_at, deleted_at)
+                            changes, verification, closure, started_at, closed_at, paused_at, deleted_at,
+                            review_status, reviewed_by, reviewed_at, surfaces, surfaces_required)
     values (v_project_id, p_local_id, v_feature_id, p_agent, p_plan, p_next_step,
-            p_changes, p_verification, p_closure, p_started_at, p_closed_at, p_paused_at, p_deleted_at)
+            p_changes, p_verification, p_closure, p_started_at, p_closed_at, p_paused_at, p_deleted_at,
+            p_review_status, p_reviewed_by, p_reviewed_at, p_surfaces, coalesce(p_surfaces_required, false))
   on conflict (project_id, local_id)
     do update set
       feature_id = excluded.feature_id,
@@ -60,7 +76,12 @@ begin
       closure = excluded.closure,
       closed_at = excluded.closed_at,
       paused_at = excluded.paused_at,
-      deleted_at = excluded.deleted_at
+      deleted_at = excluded.deleted_at,
+      review_status = excluded.review_status,
+      reviewed_by = excluded.reviewed_by,
+      reviewed_at = excluded.reviewed_at,
+      surfaces = excluded.surfaces,
+      surfaces_required = excluded.surfaces_required
   returning * into result;
   return result;
 end;

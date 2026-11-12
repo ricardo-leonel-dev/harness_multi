@@ -35,6 +35,12 @@ CREATE TABLE features (
   superseded_from TEXT,                       -- status before supersede, restored by unsupersede
   size TEXT NOT NULL DEFAULT 'normal',        -- 'normal' or 'small' (validated in bash); small may close via log-out --quick
   request TEXT,                               -- the user's request verbatim (add-feature --request, Notion card text)
+  mode TEXT,                                  -- lean flow (lean/README.md): NULL (none), 'normal' or 'risk' (validated in bash)
+  plan_approval INTEGER NOT NULL DEFAULT 0,   -- 1 = the plan needs approve-plan before claim (always 1 for risk)
+  plan_approved_by TEXT,                      -- human who approved docs/features/<name>.md (approve-plan --by)
+  plan_approved_at TEXT,
+  plan_frozen TEXT,                           -- risk mode: shasum -a 256 manifest of the acceptance tests, frozen at approve-plan
+  out_of_scope TEXT NOT NULL DEFAULT '[]',    -- JSON array (0-5 lines): behaviour the change must not add (add-feature --out-of-scope)
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   deleted_at TEXT
@@ -69,6 +75,9 @@ CREATE TABLE session_log (
                                   -- (closed_at NULL) but stops occupying the project's slot
   held_at TEXT,                  -- set by `hold`, cleared by `unhold`: the session keeps the slot
                                   -- but log-out refuses it, so the work stops until the user decides
+  surfaces TEXT,                 -- JSON array of path globs the change may touch (set-surfaces/add-surface);
+                                  -- NULL = not declared yet
+  surfaces_required INTEGER NOT NULL DEFAULT 1, -- 0 = opened before surfaces existed: log-out only warns
   deleted_at TEXT
 );
 

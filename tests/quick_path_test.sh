@@ -5,11 +5,14 @@
 #   1. Older harness.db files gain features.size, session_log.held_at and the
 #      learnings table; add-feature --size / set-size record the size.
 #   2. log-out --quick closes a small feature without a reviewer only when every
-#      quick-gate signal is clean (files already uncommitted at claim excluded), refuses (and logs why) otherwise, never
+#      quick-gate signal is clean (files already uncommitted at claim count only what changed since), refuses (and logs why) otherwise, never
 #      applies to normal features and never bypasses requested changes. A
-#      normal close needs ./init.sh green on the exact tree it closes.
+#      normal close needs the approval and ./init.sh green on the exact tree it
+#      closes (contents, so a commit doesn't invalidate either).
+#      Tests kept out of git (.git/info/exclude) count toward that tree too.
 #   3. hold keeps the slot: claim and log-out refuse until unhold.
-#   4. learn caps notes at 300 characters; recall returns at most 5 ranked
+#   4. claim creates progress/<name>/, but never through a symlinked progress/.
+#   5. learn caps notes at 300 characters; recall returns at most 5 ranked
 #      matches; forget hides a note.
 #
 # Usage: bash tests/quick_path_test.sh   (exits non-zero on the first failure)
@@ -54,33 +57,83 @@ echo "2. log-out --quick"
 g init -q && mkdir -p "$P/src" "$P/progress" && printf 'a\nb\n' > "$P/src/app.ts" && printf 'x\n' > "$P/src/other.ts"
 printf 'progress/\nharness.db\nscripts/\nstate/\n.harness.json\n' > "$P/.gitignore"
 g add -A && g commit -qm base || die "git setup"
-H claim big >/dev/null || die "claim big"
+H claim big >/dev/null && H set-surfaces src package.json >/dev/null || die "claim big"
 out=$(H log-out --quick --changes src/app.ts --verification v --closure c) && die "--quick must refuse a normal feature"
 grep -q 'only for features marked small' <<<"$out" || die "wrong refusal for a normal feature: $out"
 pass "--quick refuses a normal-size feature"
-H record-review approved --by human:tester >/dev/null || die "record-review big"
 printf 'a\nb\nc\n' > "$P/src/app.ts"
+H record-review approved --by human:tester >/dev/null || die "record-review big"
 out=$(H log-out --changes src/app.ts --verification v --closure c) && die "an approval without ./init.sh must not close"
 grep -q 'init.sh has not run in this session' <<<"$out" || die "missing-init reason: $out"
 H record-init fail >/dev/null
 out=$(H log-out --changes src/app.ts --verification v --closure c) && die "an approval over a failed ./init.sh must not close"
 grep -q 'the last ./init.sh failed' <<<"$out" || die "failed-init reason: $out"
 H record-init pass >/dev/null && printf 'a\nb\n' > "$P/src/app.ts"
+out=$(H log-out --changes src/app.ts --verification v --closure c) && die "changes after the approval must not close"
+grep -q 'files changed after the reviewer approved them' <<<"$out" || die "stale-review reason: $out"
+H record-review approved --by human:tester >/dev/null
 out=$(H log-out --changes src/app.ts --verification v --closure c) && die "changes after the passing ./init.sh must not close"
 grep -q 'files changed after the last passing ./init.sh' <<<"$out" || die "stale-init reason: $out"
 H record-init none >/dev/null
 out=$(H log-out --changes src/app.ts --verification v --closure c) || die "no verify_command should close with a warning: $out"
 grep -q 'no verify_command' <<<"$out" || die "no-verify warning missing: $out"
-pass "a normal close needs ./init.sh green on the exact tree it closes"
+pass "a normal close needs the approval and ./init.sh green on the exact tree it closes"
+
+g add -A && g commit -qm big >/dev/null
+H add-feature --name committed --title Committed >/dev/null && H claim committed >/dev/null && H set-surfaces src package.json >/dev/null || die "claim committed"
+printf 'k\n' >> "$P/src/other.ts"
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
+g add src/other.ts && g commit -qm wip >/dev/null
+out=$(H log-out --changes src/other.ts --verification v --closure c) || die "committing the approved code must not invalidate init or the approval: $out"
+g add -A && g commit -qm committed >/dev/null; printf 'x\nlocal\n' > "$P/src/other.ts"
+H add-feature --name legacy --title Legacy >/dev/null && H claim legacy >/dev/null && H set-surfaces src package.json >/dev/null || die "claim legacy"
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
+q "DELETE FROM session_log_entries WHERE entry LIKE '[harness] REVIEW: %';"
+out=$(H log-out --changes src/other.ts --verification v --closure c) || die "an approval without a fingerprint should close with a warning: $out"
+grep -q 'predates review fingerprints' <<<"$out" || die "legacy approval warning missing: $out"
+pass "commits keep init and the approval valid; an older approval closes with a warning"
+
+g add -A && g commit -qm legacy >/dev/null
+H add-feature --name sandboxed --title Sandboxed >/dev/null && H claim sandboxed >/dev/null && H set-surfaces src package.json >/dev/null || die "claim sandboxed"
+printf 'sandbox\n' >> "$P/src/other.ts"; printf 'new\n' > "$P/src/sandboxed.ts"
+chmod -R a-w "$P/.git"                                    # Codex sandbox: .git is read-only
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
+fp_ro=$(q "SELECT entry FROM session_log_entries WHERE entry LIKE '[harness] REVIEW: %' ORDER BY id DESC LIMIT 1;")
+chmod -R u+w "$P/.git"
+grep -q "fp=$(g rev-parse HEAD^{tree})" <<<"$fp_ro" && die "a read-only .git must not fingerprint the last commit instead of the files: $fp_ro"
+out=$(H log-out --changes src/other.ts src/sandboxed.ts --verification v --closure c) \
+  || die "init and approval recorded with a read-only .git must stay valid with a writable one: $out"
+pass "fingerprints are the same with a read-only .git (Codex sandbox)"
+
+mkdir -p "$P/tests" && printf 'one\n' > "$P/tests/app.test.ts" && printf '/tests/\n' >> "$P/.git/info/exclude"
+H add-feature --name hidden_tests --title Hidden >/dev/null && H claim hidden_tests >/dev/null && H set-surfaces src package.json >/dev/null || die "claim hidden_tests"
+printf 'hidden\n' >> "$P/src/other.ts"
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
+printf 'two\n' > "$P/tests/app.test.ts"
+out=$(H log-out --changes src/other.ts --verification v --closure c) && die "a git-ignored test changed after the approval must not close"
+grep -q 'files changed after the reviewer approved them' <<<"$out" || die "stale-review reason for an ignored test: $out"
+H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
+H log-out --changes src/other.ts --verification v --closure c >/dev/null || die "re-approved hidden_tests should close"
+[ -z "$(g status --porcelain -- tests)" ] || die "the fingerprint must not make ignored tests visible to git"
+g add -A && g commit -qm hidden >/dev/null
+pass "a git-ignored test changed after the approval invalidates it, and stays out of git"
 
 printf 'pre\n' > "$P/src/pre.ts"; printf 'x\nlocal\n' > "$P/src/other.ts"   # uncommitted before the claim
-H claim tiny >/dev/null || die "claim tiny"
+out=$(H claim tiny) && H set-surfaces src package.json >/dev/null || die "claim tiny: $out"
+grep -q 'work folder: progress/tiny/' <<<"$out" && [ -d "$P/progress/tiny" ] || die "claim must create the work folder it announces: $out"
+pass "claim creates the work folder progress/<name>/ it prints"
 printf 'a\nB\n' > "$P/src/app.ts"
 out=$(H log-out --quick --changes src/app.ts --verification v --closure c) && die "--quick without handoff/init must refuse"
 grep -q 'handoff progress/tiny/quick.md is missing' <<<"$out" && grep -q 'init.sh has not passed' <<<"$out" \
+  && grep -q 'reviewer required' <<<"$out" && grep -q 'write progress/tiny/quick.md too' <<<"$out" \
   || die "missing reasons: $out"
 grep -q 'QUICK: refused' <<<"$(q "SELECT entry FROM session_log_entries;")" || die "refusal must be logged"
 pass "refuses without handoff or a passing init, and logs why"
+H record-init pass >/dev/null
+out=$(H log-out --quick --changes src/app.ts --verification v --closure c) && die "--quick without a handoff must refuse"
+grep -q 'refused — missing handoff: write progress/tiny/quick.md' <<<"$out" || die "missing-handoff message: $out"
+grep -q 'reviewer required' <<<"$out" && die "a missing handoff alone must not say reviewer required: $out"
+pass "a missing handoff alone says where to write it, not that a reviewer is required"
 handoff tiny "fix" "src/app.ts" "low"
 H record-init pass >/dev/null
 out=$(H log-out --quick --changes src/app.ts --verification v --closure c) && die "Risk: low must refuse"
@@ -126,22 +179,43 @@ grep -q 'quick gate passed: 2 lines, 1 files' <<<"$out" || die "pass summary mis
 pass "clean small change closes without a reviewer, ignoring files already uncommitted at claim"
 
 g add -A && g commit -qm tiny >/dev/null
-H set-size other small >/dev/null && H claim other >/dev/null || die "claim other"
+H set-size other small >/dev/null && H claim other >/dev/null && H set-surfaces src package.json >/dev/null || die "claim other"
 printf 'z\n' >> "$P/src/other.ts"
 handoff other "fix" "src/other.ts" "none"
 H record-init pass >/dev/null
 H record-review changes-requested --by human:tester >/dev/null
 out=$(H log-out --quick --changes src/other.ts --verification v --closure c) && die "--quick must not bypass requested changes"
 grep -q 'already requested changes' <<<"$out" || die "wrong refusal: $out"
-H record-review approved --by human:tester >/dev/null
 printf 'l\n%.0s' $(seq 1 90) >> "$P/src/other.ts"
+H record-review approved --by human:tester >/dev/null
 H record-init pass >/dev/null
 H log-out --quick --changes src/other.ts --verification v --closure c >/dev/null || die "a reviewer approval should win over the gate"
 pass "requested changes block --quick; an existing approval closes it"
 
+printf 'l\n%.0s' $(seq 1 200) > "$P/src/wip.ts"; printf 'w\n%.0s' $(seq 1 150) >> "$P/src/app.ts"   # earlier feature, uncommitted
+H add-feature --name small2 --title Small2 --size small >/dev/null && H claim small2 >/dev/null && H set-surfaces src package.json >/dev/null || die "claim small2"
+printf 'extra\n' >> "$P/src/wip.ts"; printf 'extra\n' >> "$P/src/app.ts"
+handoff small2 "fix" "src/wip.ts, src/app.ts" "none"
+H record-init pass >/dev/null
+out=$(H log-out --quick --changes src/wip.ts src/app.ts --verification v --closure c) || die "edits on files left uncommitted by an earlier feature should count only this session's lines: $out"
+grep -q 'quick gate passed: 2 lines, 2 files' <<<"$out" || die "gate should count 2 lines: $out"
+grep -q 'DIFF: code=2 lines' <<<"$out" || die "DIFF should count 2 lines: $out"
+pass "files uncommitted at claim count only the lines changed since the claim"
+g add -A && g commit -qm small2 >/dev/null
+H add-feature --name small3 --title Small3 --size small >/dev/null && H claim small3 >/dev/null && H set-surfaces src package.json >/dev/null || die "claim small3"
+printf 'l\n%.0s' $(seq 1 90) >> "$P/src/wip.ts"
+H cancel-session --force "$(q "SELECT id FROM session_log WHERE closed_at IS NULL;")" "slot" >/dev/null || die "cancel small3"
+H claim small3 >/dev/null && H set-surfaces src package.json >/dev/null || die "resume small3"
+handoff small3 "fix" "src/wip.ts" "none"
+H record-init pass >/dev/null
+out=$(H log-out --quick --changes src/wip.ts --verification v --closure c) && die "a resumed session must still count the feature's earlier work"
+grep -q '90 changed lines > quick_max_diff_lines=80' <<<"$out" || die "resume should measure from the original claim: $out"
+H record-review approved --by human:tester >/dev/null && H log-out --quick --changes src/wip.ts --verification v --closure c >/dev/null || die "close small3"
+pass "a resumed session measures from the cancelled session's claim"
+
 echo "3. hold"
 H add-feature --name held --title Held >/dev/null && H add-feature --name next --title Next >/dev/null
-H claim held >/dev/null || die "claim held"
+H claim held >/dev/null && H set-surfaces src package.json >/dev/null || die "claim held"
 H hold "user rejected the escalation" >/dev/null || die "hold"
 out=$(H claim next) && die "claim must refuse while a session is held"
 grep -q 'on hold' <<<"$out" || die "claim refusal should mention hold: $out"
@@ -154,7 +228,17 @@ H log-out --changes src/app.ts --verification v --closure c >/dev/null || die "l
 grep -q 'UNHOLD: user approved after all' <<<"$(q "SELECT entry FROM session_log_entries;")" || die "unhold not logged"
 pass "hold keeps the slot (claim and log-out refuse) until unhold"
 
-echo "4. learnings"
+echo "4. work folder through a link"
+OUT_DIR="$WORK/elsewhere" && mkdir -p "$OUT_DIR" && mv "$P/progress" "$P/progress.real" && ln -s "$OUT_DIR" "$P/progress"
+H add-feature --name linked --title Linked >/dev/null || die "add-feature linked"
+out=$(H claim linked) || die "claim must not fail when it can't create the work folder: $out"
+grep -q 'not creating progress/linked/' <<<"$out" || die "a symlinked progress/ should warn: $out"
+[ ! -e "$OUT_DIR/linked" ] || die "claim must not create the work folder through a symlinked progress/"
+out=$(H cancel-session --force "$(q "SELECT id FROM session_log WHERE closed_at IS NULL AND deleted_at IS NULL;")" "slot") || die "cancel linked: $out"
+rm "$P/progress" && mv "$P/progress.real" "$P/progress"
+pass "a symlinked progress/ warns and is not written through"
+
+echo "5. learnings"
 out=$(H learn "$(printf 'x%.0s' $(seq 1 301))") && die "notes over 300 characters must be refused"
 for i in 1 2 3 4 5 6; do H learn --feature held "canDeactivate lesson $i" >/dev/null || die "learn $i"; done
 H learn "i18n keys go through jq" >/dev/null || die "learn i18n"

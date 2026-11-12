@@ -5,12 +5,16 @@
 #   1. features.request keeps the user's request verbatim (add-feature
 #      --request, set-request, notion-import) and the snapshot shows it.
 #   2. mark-spec-ready refuses a requirements.md without its "Request
-#      (verbatim)" and "Assumptions" sections.
+#      (verbatim)" and "Assumptions" sections; drop-sdd only applies before a
+#      spec exists.
 #   3. Each feature works in progress/<name>/: claim names it, log-out and
 #      supersede delete it, and the quick gate also finds a handoff named by
 #      feature number or in the older flat progress/quick_<x>.md form.
 #   4. log-out's DIFF says tests=n/a when the project keeps tests/ out of git.
-#   5. link-worktree shares the harness with a git worktree but keeps
+#      With no mirror configured, record-review/log-out stay quiet about the sync.
+#   5. A Notion push that fails on the network names notion-push, which retries it.
+#   6. tick-tasks ticks several tasks.md checkboxes at once and logs them.
+#   7. link-worktree shares the harness with a git worktree but keeps
 #      progress/ local, replacing an existing progress/ symlink.
 #
 # Usage: bash tests/feature_flow_test.sh   (exits non-zero on the first failure)
@@ -67,6 +71,19 @@ printf '\n## Assumptions\n- S1: none\n' >> "$P/specs/spec_one/requirements.md"
 out=$(H mark-spec-ready) || die "mark-spec-ready with both sections: $out"
 grep -q 'R=1, T=1' <<<"$out" || die "the sections must not count as requirements: $out"
 pass "mark-spec-ready requires the request and assumptions sections"
+out=$(H drop-sdd spec_one "complete") && die "drop-sdd must refuse a feature whose spec exists"
+H add-feature --name clear_one --title "Clear one" --sdd >/dev/null || die "add-feature clear_one"
+out=$(H drop-sdd clear_one) && die "drop-sdd needs a reason"
+H drop-sdd clear_one "one field, nothing to decide" >/dev/null || die "drop-sdd clear_one"
+[ "$(q "SELECT sdd FROM features WHERE name='clear_one';")" = 0 ] || die "drop-sdd must set sdd=0"
+[ "$(q "SELECT entry FROM feature_notes n JOIN features f ON f.id=n.feature_id WHERE f.name='clear_one';")" = "SDD dropped: one field, nothing to decide" ] || die "drop-sdd must keep the reason"
+pass "drop-sdd turns a pending feature without a spec into sdd=0 and keeps the reason"
+H add-sdd clear_one "el usuario pidió spec" >/dev/null || die "add-sdd clear_one"
+[ "$(q "SELECT sdd || size FROM features WHERE name='clear_one';")" = 1normal ] || die "add-sdd must set sdd=1 and size normal"
+[ "$(q "SELECT count(*) FROM feature_notes n JOIN features f ON f.id=n.feature_id WHERE f.name='clear_one' AND entry='SDD added: el usuario pidió spec';")" = 1 ] || die "add-sdd must keep the reason"
+out=$(H add-sdd clear_one "again") && die "add-sdd must refuse a feature that is already sdd=1"
+[ "$(q "SELECT count(*) FROM features WHERE name='clear_one';")" = 1 ] || die "add-sdd must not re-create the feature"
+pass "add-sdd turns a pending sdd=0 feature into sdd=1 in place and keeps the reason"
 
 echo "3. work folder"
 g init -q && mkdir -p "$P/tests"
@@ -75,11 +92,25 @@ printf 'a\n' > "$P/src/app.ts" && g add -A && g commit -qm base || die "git setu
 out=$(H claim plain) || die "claim plain: $out"
 grep -q 'work folder: progress/plain/' <<<"$out" || die "claim should name the work folder: $out"
 mkdir -p "$P/progress/plain" && printf 'handoff\n' > "$P/progress/plain/impl.md"
+H set-surfaces src/app.ts >/dev/null || die "set-surfaces plain"
 printf 'b\n' >> "$P/src/app.ts"
-H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
-H log-out --changes src/app.ts --verification v --closure c >/dev/null || die "log-out plain"
+# A mirror sync that fails: log-out still closes, warns, and its exit code stays 0.
+SYNCS="$WORK/syncs"; : > "$SYNCS"
+printf '#!/usr/bin/env bash\necho sync >> "%s"\necho "mirror down" >&2\nexit 3\n' "$SYNCS" > "$P/scripts/sync_postgres.sh"
+syncs() { wc -l < "$SYNCS" | tr -d ' '; }
+H record-init pass >/dev/null
+# Refused closes don't sync: no review yet, and --quick on a normal-size feature.
+H log-out --changes src/app.ts --verification v --closure c >/dev/null && die "log-out without a review must refuse"
+H log-out --quick --changes src/app.ts --verification v --closure c >/dev/null && die "log-out --quick on a normal feature must refuse"
+[ "$(syncs)" = 0 ] || die "a refused close must not sync the mirror (got $(syncs))"
+H record-review approved --by human:tester >/dev/null
+[ "$(syncs)" = 1 ] || die "record-review should sync the mirror once (got $(syncs))"
+out=$(H log-out --changes src/app.ts --verification v --closure c) || die "log-out plain (a failing sync must not fail it): $out"
+[ "$(syncs)" = 2 ] || die "log-out should sync the mirror once (got $(syncs))"
+grep -q '^\[WARN\].*mirror sync failed' <<<"$out" || die "a failing sync should warn: $out"
+[ "$(q "SELECT status FROM features WHERE name='plain';")" = done ] || die "plain should be done despite the failing sync"
 [ ! -e "$P/progress/plain" ] || die "log-out must delete progress/plain/"
-pass "claim names progress/<name>/ and log-out deletes it"
+pass "claim names progress/<name>/ and log-out deletes it; log-out syncs the mirror, a failing sync only warns, a refused close doesn't sync"
 
 H add-feature --name gone --title Gone >/dev/null && mkdir -p "$P/progress/gone" && printf 'split\n' > "$P/progress/gone/split.md"
 H supersede gone --by spec_one --reason "absorbed" >/dev/null || die "supersede"
@@ -91,25 +122,69 @@ for form in number flat; do
   H add-feature --name "q_$form" --title Q --size small >/dev/null
   num=$(q "SELECT feature_number FROM features WHERE name='q_$form';")
   H claim "q_$form" >/dev/null || die "claim q_$form"
+  H set-surfaces src/app.ts >/dev/null || die "set-surfaces q_$form"
   printf 'c%s\n' "$form" >> "$P/src/app.ts"
   if [ "$form" = number ]; then mkdir -p "$P/progress/$num"; f="$P/progress/$num/quick.md"; else f="$P/progress/quick_$num.md"; fi
   printf 'Cambio: x\nArchivos: src/app.ts\nRisk: none\nMotivo: t\n' > "$f"
   H record-init pass >/dev/null
+  before=$(syncs)
   out=$(H log-out --quick --changes src/app.ts --verification v --closure c) || die "quick gate should accept the $form-named handoff: $out"
+  [ "$(syncs)" = $((before + 1)) ] || die "log-out --quick should sync the mirror once"
   g add -A && g commit -qm "q $form" >/dev/null
 done
-pass "the quick gate accepts handoffs named by feature number and the older flat form"
+pass "the quick gate accepts handoffs named by feature number and the older flat form; log-out --quick syncs"
 
 echo "4. DIFF with ignored tests"
 printf 'tests/\n' >> "$P/.gitignore" && g add -A && g commit -qm ignore-tests >/dev/null
-H add-feature --name t_ignored --title T >/dev/null && H claim t_ignored >/dev/null
+H add-feature --name t_ignored --title T >/dev/null && H claim t_ignored >/dev/null && H set-surfaces src tests >/dev/null
 printf 'd\n' >> "$P/src/app.ts" && printf 'test\n' > "$P/tests/app.test.ts"
-H record-init pass >/dev/null && H record-review approved --by human:tester >/dev/null
+# The real sync script from here on: with no mirror configured the lifecycle commands stay quiet,
+# a configured mirror that fails (its env vars unset) still warns.
+cp "$TOOLKIT_DIR/scripts/sync_postgres.sh" "$P/scripts/"
+cp "$P/.harness.json" "$WORK/harness.json"
+jq '. + {supabase_url_env: "T_NO_SUCH_URL", supabase_key_env: "T_NO_SUCH_KEY"}' "$WORK/harness.json" > "$P/.harness.json"
+H record-init pass >/dev/null
+out=$(H record-review approved --by human:tester) || die "record-review t_ignored: $out"
+grep -q '^\[WARN\].*T_NO_SUCH_URL' <<<"$out" || die "a configured mirror that fails should warn: $out"
+cp "$WORK/harness.json" "$P/.harness.json"
 out=$(H log-out --changes src/app.ts tests/app.test.ts --verification v --closure c) || die "log-out t_ignored: $out"
+grep -qi 'mirror\|supabase' <<<"$out" && die "with no mirror configured log-out should not mention the sync: $out"
 grep -q 'tests=n/a (tests/ is ignored by git)' <<<"$out" || die "DIFF should say tests are not visible: $out"
-pass "DIFF reports tests=n/a when tests/ is ignored by git"
+pass "DIFF reports tests=n/a when tests/ is ignored by git; the sync is quiet without a mirror and warns when a configured one fails"
 
-echo "5. link-worktree"
+echo "5. Notion push failure"
+mkdir -p "$WORK/bin" && printf '#!/bin/sh\necho "curl: (6) Could not resolve host" >&2\nexit 6\n' > "$WORK/bin/curl" && chmod +x "$WORK/bin/curl"
+jq '. + {notion_database_id:"db1", notion_token_env:"T_NOTION"}' "$P/.harness.json" > "$WORK/hj" && cp "$WORK/hj" "$P/.harness.json"
+H add-feature --name carded --title Carded >/dev/null && H link-notion carded page1 >/dev/null || die "link-notion"
+num=$(q "SELECT feature_number FROM features WHERE name='carded';")
+out=$(PATH="$WORK/bin:$PATH" T_NOTION=x H claim carded) || die "claim must not fail when Notion is unreachable: $out"
+grep -q "still shows its previous status — retry with network: scripts/harness.sh notion-push $num" <<<"$out" || die "claim should name the retry command: $out"
+out=$(PATH="$WORK/bin:$PATH" T_NOTION=x H notion-push carded) || die "notion-push must not fail: $out"
+grep -q "notion-push $num" <<<"$out" || die "notion-push should warn again while offline: $out"
+out=$(T_NOTION= H notion-push carded) || die "notion-push without a token: $out"
+grep -q "retry with network" <<<"$out" && die "a missing token is not a network failure: $out"
+sid=$(q "SELECT max(id) FROM session_log;")
+H cancel-session --force "$sid" "test cleanup" >/dev/null || die "cancel-session"
+jq 'del(.notion_database_id, .notion_token_env)' "$P/.harness.json" > "$WORK/hj" && cp "$WORK/hj" "$P/.harness.json"
+pass "an unreachable Notion leaves a warning that names notion-push, and notion-push retries it"
+
+echo "6. tick-tasks"
+# carded is still in_progress after section 5, so claim resumes it with a new session.
+out=$(H claim carded) || die "resume carded: $out"
+mkdir -p "$P/specs/carded"
+printf '# Tasks\n\n- [ ] T1 first\n- [ ] T2 second\n- [ ] T10 tenth\n- [x] T11 done\n' > "$P/specs/carded/tasks.md"
+cp "$P/specs/carded/tasks.md" "$WORK/tasks.before"
+out=$(H tick-tasks T1 T9) && die "an unknown task id must be refused: $out"
+cmp -s "$WORK/tasks.before" "$P/specs/carded/tasks.md" || die "a refused tick must leave tasks.md unchanged"
+out=$(H tick-tasks T1 T10 T11) || die "tick-tasks: $out"
+[ "$(grep -c '^- \[x\]' "$P/specs/carded/tasks.md")" = 3 ] && grep -qxF -- '- [ ] T2 second' "$P/specs/carded/tasks.md" \
+  || die "only T1 and T10 should be newly ticked: $(cat "$P/specs/carded/tasks.md")"
+sid=$(q "SELECT max(id) FROM session_log;")
+[ "$(q "SELECT count(*) FROM session_log_entries WHERE session_id=$sid AND entry='[harness] TICKED: T1 T10 T11';")" = 1 ] || die "tick-tasks must log the ids"
+H cancel-session --force "$sid" "test cleanup" >/dev/null || die "cancel-session"
+pass "tick-tasks ticks several tasks in one call, refuses unknown ids and logs them"
+
+echo "7. link-worktree"
 g add -A && g commit -qm wt >/dev/null
 g worktree add -q "$WORK/wt" 2>/dev/null || die "git worktree add"
 W="$WORK/wt/app"

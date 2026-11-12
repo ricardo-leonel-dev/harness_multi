@@ -13,6 +13,9 @@ URL_ENV="$(config '.supabase_url_env')"
 KEY_ENV="$(config '.supabase_key_env')"
 
 if [ -z "$URL_ENV" ] || [ -z "$KEY_ENV" ]; then
+  # Lifecycle commands (record-review, approve-plan, approve-spec, log-out) sync after each
+  # step; in a project without a mirror they stay quiet. init.sh and `sync` still warn.
+  [ -n "${HARNESS_SYNC_QUIET_UNCONFIGURED:-}" ] && exit 0
   warn "no supabase_url_env/supabase_key_env configured in $HARNESS_CONFIG — skipping mirror sync"
   exit 0
 fi
@@ -57,6 +60,39 @@ rpc() {
   printf '%s' "$body"
 }
 
+# rpc_compat <name> <json-payload> <jq array of 0006 keys> <jq array of 0005 keys>:
+# rpc, and when PostgREST answers "function not found" (PGRST202, HTTP 404),
+# the same call without the keys of the newest migration (0006: scope
+# surfaces), then, on a second PGRST202, without those of 0005 (lean mode)
+# too — a mirror whose RPCs predate them keeps syncing everything else. Any
+# other failure (timeout, other 4xx/5xx) is printed and returned as-is, no
+# further retry. Warns once per migration per sync run (the row loops run in
+# subshells, hence the marker files).
+COMPAT_MARK="$(mktemp -d "${TMPDIR:-/tmp}/harness_sync_compat.XXXXXX")"
+trap 'rm -rf "$COMPAT_MARK"' EXIT
+rpc_compat() {
+  local name="$1" payload="$2" keys6="$3" keys5="$4" out stripped
+  if out=$(rpc "$name" "$payload" 2>&1); then printf '%s' "$out"; return 0; fi
+  if ! grep -qE '^HTTP 404: .*"code" *: *"PGRST202"' <<<"$out"; then printf '%s' "$out"; return 1; fi
+  stripped=$(jq -c --argjson k "$keys6" 'delpaths($k | map([.]))' <<<"$payload")
+  if out=$(rpc "$name" "$stripped" 2>&1); then
+    if [ ! -e "$COMPAT_MARK/0006" ]; then
+      : > "$COMPAT_MARK/0006"
+      warn "mirror RPCs predate scope surfaces — synced without out_of_scope/surfaces fields; apply db/migrations/0006_scope_surfaces.sql, then db/rpc/upsert_feature.sql and db/rpc/upsert_session.sql"
+    fi
+    printf '%s' "$out"; return 0
+  fi
+  if ! grep -qE '^HTTP 404: .*"code" *: *"PGRST202"' <<<"$out"; then printf '%s' "$out"; return 1; fi
+  if ! out=$(rpc "$name" "$(jq -c --argjson k "$keys5" 'delpaths($k | map([.]))' <<<"$stripped")" 2>&1); then
+    printf '%s' "$out"; return 1
+  fi
+  if [ ! -e "$COMPAT_MARK/0005" ]; then
+    : > "$COMPAT_MARK/0005"
+    warn "mirror RPCs predate lean mode — synced without mode/plan approval/review/scope fields; apply db/migrations/0005_lean_mode.sql and 0006_scope_surfaces.sql, then db/rpc/upsert_feature.sql and db/rpc/upsert_session.sql"
+  fi
+  printf '%s' "$out"
+}
+
 if ! curl -sS -m 5 -o /dev/null -w '' "$REST_ROOT/" -H "apikey: $SUPABASE_KEY"; then
   warn "cannot reach $REST_ROOT — skipping mirror sync"
   exit 0
@@ -73,7 +109,8 @@ payload=$(jq -n --arg slug "$PROJECT_SLUG" --arg desc "$desc" \
   '{p_slug:$slug, p_description:$desc, p_one_feature_at_a_time:$one_at_a_time, p_require_tests_to_close:$require_tests}')
 out=$(rpc bootstrap_project "$payload") || { warn "bootstrap_project sync failed: $out"; exit 0; }
 
-sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, acceptance, sdd, status, deleted_at
+sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, acceptance, sdd, status, deleted_at,
+  mode, plan_approval, plan_approved_by, plan_approved_at, out_of_scope
   FROM features WHERE project_id='$(sql_escape "$pid")';" | jq -c '.[]' | while IFS= read -r row; do
   payload=$(jq -n --arg slug "$PROJECT_SLUG" \
     --argjson local_id "$(jq '.id' <<<"$row")" \
@@ -87,8 +124,11 @@ sqlite3 -json "$DB_PATH" "SELECT id, feature_number, name, title, description, a
     --arg deleted_at "$(jq -r '.deleted_at // ""' <<<"$row")" \
     '{p_project_slug:$slug, p_local_id:$local_id, p_feature_number:$number, p_name:$name, p_title:$title,
       p_description:$desc, p_acceptance:$acceptance, p_status:$status, p_sdd:$sdd,
-      p_deleted_at: (if $deleted_at == "" then null else $deleted_at end)}')
-  out=$(rpc upsert_feature "$payload") || warn "upsert_feature failed for local_id $(jq '.id' <<<"$row"): $out"
+      p_deleted_at: (if $deleted_at == "" then null else $deleted_at end)}
+    + ($row | fromjson | {p_mode: .mode, p_plan_approval: (.plan_approval == 1),
+        p_plan_approved_by: .plan_approved_by, p_plan_approved_at: .plan_approved_at,
+        p_out_of_scope: ((.out_of_scope // "[]") | fromjson)})' --arg row "$row")
+  out=$(rpc_compat upsert_feature "$payload" '["p_out_of_scope"]' '["p_mode","p_plan_approval","p_plan_approved_by","p_plan_approved_at"]') || warn "upsert_feature failed for local_id $(jq '.id' <<<"$row"): $out"
 done
 
 sqlite3 -json "$DB_PATH" "SELECT s.id, f.name AS feature_name, s.path, s.status, s.requirements_count,
@@ -120,7 +160,8 @@ sqlite3 -json "$DB_PATH" "SELECT s.id, f.name AS feature_name, s.path, s.status,
 done
 
 sqlite3 -json "$DB_PATH" "SELECT sl.id, f.name AS feature_name, sl.feature_id, sl.agent, sl.plan, sl.next_step, sl.changes,
-  sl.verification, sl.closure, sl.started_at, sl.closed_at, sl.paused_at, sl.deleted_at
+  sl.verification, sl.closure, sl.started_at, sl.closed_at, sl.paused_at, sl.deleted_at,
+  sl.review_status, sl.reviewed_by, sl.reviewed_at, sl.surfaces, sl.surfaces_required
   FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id
   WHERE sl.project_id='$(sql_escape "$pid")';" | jq -c '.[]' | while IFS= read -r row; do
   sid=$(jq '.id' <<<"$row")
@@ -145,8 +186,12 @@ sqlite3 -json "$DB_PATH" "SELECT sl.id, f.name AS feature_name, sl.feature_id, s
       p_verification:$verification, p_closure:$closure, p_started_at:$started_at,
       p_closed_at: (if $closed_at == "" then null else $closed_at end),
       p_paused_at: (if $paused_at == "" then null else $paused_at end),
-      p_deleted_at: (if $deleted_at == "" then null else $deleted_at end)}')
-  out=$(rpc upsert_session "$payload") || warn "upsert_session failed for local_id $sid: $out"
+      p_deleted_at: (if $deleted_at == "" then null else $deleted_at end)}
+    + ($row | fromjson | {p_review_status: .review_status, p_reviewed_by: .reviewed_by,
+        p_reviewed_at: .reviewed_at,
+        p_surfaces: (if .surfaces then (.surfaces | fromjson) else null end),
+        p_surfaces_required: (.surfaces_required == 1)})' --arg row "$row")
+  out=$(rpc_compat upsert_session "$payload" '["p_surfaces","p_surfaces_required"]' '["p_review_status","p_reviewed_by","p_reviewed_at"]') || warn "upsert_session failed for local_id $sid: $out"
 
   sqlite3 -json "$DB_PATH" "SELECT id, entry, created_at, deleted_at FROM session_log_entries WHERE session_id=$sid;" \
     | jq -c '.[]' | while IFS= read -r erow; do

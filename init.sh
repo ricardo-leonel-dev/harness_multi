@@ -123,7 +123,32 @@ else
   # output read on every run is one of the biggest token costs of a feature.
   # Agents grep the log instead of re-running the suite to read it.
   mkdir -p progress
-  if { printf '$ %s\n' "$VERIFY_COMMAND"; bash -c "$VERIFY_COMMAND"; } > progress/test_last.log 2>&1; then
+  # While a lean-mode feature has an open session, paused (blocked) or not, the tree may hold
+  # code its sandboxed sessions wrote: the suite runs under the same rules as their gate
+  # (lean/gate.sh, lean/lib.sh lean_sandboxed). The active session's feature is preferred.
+  run_verify() { bash -c "$VERIFY_COMMAND"; }
+  LEAN_FEATURE=$(sqlite3 "$DB_PATH" "SELECT f.name FROM session_log s JOIN features f ON f.id = s.feature_id
+    JOIN projects p ON p.id = s.project_id WHERE p.slug = '$(jq -r '.project_slug // empty' .harness.json | sed "s/'/''/g")'
+    AND s.closed_at IS NULL AND s.deleted_at IS NULL AND f.mode IS NOT NULL AND f.deleted_at IS NULL
+    ORDER BY s.paused_at IS NOT NULL, s.id DESC LIMIT 1;" 2>/dev/null || true)
+  if [ -n "$LEAN_FEATURE" ] && [ ! -f lean/lib.sh ]; then
+    warn "lean feature $LEAN_FEATURE is open, but lean/lib.sh is missing: the verification command runs UNSANDBOXED with your full permissions"
+  elif [ -n "$LEAN_FEATURE" ]; then
+    # shellcheck source=lean/lib.sh
+    . lean/lib.sh
+    lean_sandbox_prepare "$PWD"
+    [ -z "$LEAN_SANDBOX_WARN" ] || while IFS= read -r w; do warn "${w#\[WARN\] }"; done <<<"$LEAN_SANDBOX_WARN"
+    case "$LEAN_SANDBOX" in
+      sandbox) ok "lean feature $LEAN_FEATURE is open: the verification command runs under its sessions' sandbox rules"
+               run_verify() { lean_sandboxed "$PWD" "$VERIFY_COMMAND"; } ;;
+      unsandboxed:*) warn "lean feature $LEAN_FEATURE is open, but the verification command runs UNSANDBOXED (${LEAN_SANDBOX#unsandboxed: })" ;;
+      session:*) fail "lean feature $LEAN_FEATURE is open, ${LEAN_SANDBOX#session: }"
+         run_verify() { echo "not run: ${LEAN_SANDBOX}"; return 1; } ;;
+      *) fail "lean feature $LEAN_FEATURE is open and its sandbox can't run here (${LEAN_SANDBOX#broken: }): run ./init.sh outside any sandbox, or set LEAN_GATE_UNSANDBOXED=1"
+         run_verify() { echo "not run: ${LEAN_SANDBOX}"; return 1; } ;;
+    esac
+  fi
+  if { printf '$ %s\n' "$VERIFY_COMMAND"; run_verify; } > progress/test_last.log 2>&1; then
     ok "Verification command passed (output: progress/test_last.log)"
   else
     tail -n 30 progress/test_last.log
@@ -199,6 +224,8 @@ else
     ok "agent usage: $USAGE_RECORDED"
   elif [ -n "$USAGE_RECORDED" ]; then
     warn "agent usage: $USAGE_RECORDED; $USAGE_WARNS warning(s) — run scripts/harness.sh record-usage for details"
+  elif USAGE_FAILED="$(printf '%s\n' "$USAGE_OUT" | grep -m 1 'record-usage failed:' | sed 's/^\[WARN\][[:space:]]*//')" && [ -n "$USAGE_FAILED" ]; then
+    warn "agent usage not recorded (continuing): ${USAGE_FAILED#record-usage failed: }"
   else
     warn "agent usage not recorded — run scripts/harness.sh record-usage for details (continuing)"
   fi

@@ -13,11 +13,16 @@ You are the lead agent for this repository. Your only job is to **decompose and 
 
 Read `harness/instructions/persona.md` (toolkit source: `shared/persona.md`) before anything else and
 follow it in every reply, report, and commit. Never add `Co-Authored-By` or any AI attribution to commits
-or PR descriptions; use conventional commits only.
+or PR descriptions; use conventional commits only. With `.harness.json::hide_harness: true`, follow
+persona.md "Hidden harness": run `scripts/harness.sh hide-check --message "<text>"` before every commit and
+PR, and tell each subagent you launch that harness words and ids stay out of everything git can see.
 
 ## Startup Protocol
 
-1. Read `AGENTS.md` for guidance.
+1. `AGENTS.md` is already in your context (Claude Code and Codex CLI both load it): don't read it again. Don't
+   read the other agents' definitions (`.claude/agents/*`, `.codex/agents/*`) either — each agent reads its own,
+   and you only need their reply lines, quoted in this file. Read `harness/instructions/*.md` only when its
+   trigger in `AGENTS.md` applies to a step you are about to take, not up front.
 2. Run `scripts/harness.sh status` to see current features and any open session — this is the SQLite-backed replacement
    for reading `feature_list.json`/`progress/current.md` directly.
 3. Run `./init.sh`. If it fails, stop and report the issue.
@@ -57,8 +62,8 @@ subagent) before doing anything else. This is what turns "the user said yes in c
 spec, and `claim` refuses any `sdd=1` feature whose spec isn't recorded as approved.
 
 How to get the name: read `$HARNESS_HUMAN_USER` if set; else read `.harness.json::human_user` (set by
-`install.sh` at install time); only as a last resort pass `--by "user"` literal (legacy default,
-audit-noise — the install-time prompt makes this case unreachable in normal use). If the user
+`install.sh` at install time). If neither has a name, ask the user for theirs; never pass a placeholder
+such as `user` (`approve-spec` refuses it). If the user
 explicitly says "approve as <different name>" in this turn, that overrides everything — pass that
 name literally. Do not invent or shorten the name; if the project owner is "Ricardo Aguilar", pass
 `--by "Ricardo Aguilar"` exactly.
@@ -67,6 +72,16 @@ name literally. Do not invent or shorten the name; if the project owner is "Rica
 running `approve-spec`.** `claim` will refuse an unapproved spec on its own now, but never rely on that
 as the *only* check — treat `approve-spec` as the explicit, intentional act of recording approval, not
 an incidental side effect of `claim` failing and you fixing it after the fact.
+
+**Before launching the `spec_author`, check whether the request is already complete.** It is when it fits in
+3 rules or fewer with no "depends" or "or", leaves no contract, validation or error case to decide, adds no
+screen or flow, and could be resumed from the request plus the diff. Then ask once, in one line, before
+anything else: "<N> looks complete: <the request in one phrase>. Do it without SDD? If you say no, I keep SDD."
+Only on an explicit yes run `scripts/harness.sh drop-sdd <N> "<why it is complete>"` and treat it as an `sdd=0`
+feature (classify its size as in "Small Tasks"). On no, silence or any doubt, keep SDD. Never drop SDD on your
+own, never ask twice for the same feature, and never suggest adding SDD. When the user asks for SDD on a feature
+already created without it, run `scripts/harness.sh add-sdd <N> "<their words>"`; never delete and re-add a
+feature to change it.
 
 Once approved, decomposition proceeds exactly like any other feature — 1 implementer, then 1 reviewer —
 except the implementer additionally works from `specs/<name>/{requirements,design,tasks}.md`, and the
@@ -80,10 +95,16 @@ For each received task:
    `add-feature ... --request "<their words, unedited>"` (your own summary goes in `--description`). For an
    existing feature without one (`state/features/*.md` has no "Request" section) that the user describes now,
    `scripts/harness.sh set-request <feature> "<their words>"`. Notion intake stores the card text by itself.
+   When the user excludes behaviour ("sin paginación", "no new dependencies"), also pass each exclusion as
+   `--out-of-scope "<line>"` (repeatable, at most 5 short lines; `set-out-of-scope <feature> "<line>"...`
+   later). Only what the user stated or the request makes clear; none is fine. `claim` prints them and the
+   reviewer rejects a diff that adds any of them.
 
 1. Identify whether it requires **one** or **multiple** features (`scripts/harness.sh status` lists them).
 2. If the task names a specific feature, pass that reference (number or name) through to the `implementer` so it can
    `scripts/harness.sh claim <target>` explicitly instead of defaulting to the lowest-numbered pending one.
+   Estimate the budget yourself and give it with numbers (`BUDGET: 25m impl + 10m review`), never the
+   `<Xm impl>` template: no file holds the values, so the implementer would go looking for them.
 3. **Default: 1 `implementer` subagent, no research subagent.** If the task or feature description already gives
    exact file paths to use as reference or context — whether inside this project or in another project explicitly
    cited by path (e.g. "use `/Users/.../other-project/src/x.js` as a pattern") — do not spawn a research subagent to
@@ -133,6 +154,27 @@ For each received task:
    never rely on that mechanical gate as the only check; treat "spawn the reviewer before log-out" as the
    actual rule, not something the tooling exists to catch after the fact.
 
+## Waiting for subagents
+
+Every step you take while a subagent works re-reads your whole context, so waiting costs tokens, not just time.
+Wait in one call until the subagent answers and act only on its reply line:
+
+<!--claude-only-->- Claude Code: a foreground `Agent` call already returns with the reply. For a background agent, end your
+<!--claude-only-->  turn and let its completion notification wake you; never loop on `sleep`, `Bash` or status checks.
+<!--codex-only-->- Codex CLI: `wait_agent` with `timeout_ms: 3600000`, the maximum (it returns as soon as a message arrives,
+<!--codex-only-->  so a long timeout costs no time; 60000 or less only adds wake-ups). If it times out, call it again the
+<!--codex-only-->  same way, with no message to the user in between. Never wait with `sleep` or short timeouts.
+- Meanwhile, don't read the diff, `progress/` files, `state/` or the spec to follow its progress, and don't send
+  the user progress messages: report once, when the reply arrives. Interrupting at 2x the `BUDGET` is the only
+  reason to act before it.
+
+## Notion push failures
+
+`claim`, `mark-spec-ready`, `log-out` and `supersede` update the feature's Notion card themselves. When their
+output has a `[WARN] Notion card of feature <N> still shows its previous status` line (typically a subagent
+sandbox without network), run the command it names, `scripts/harness.sh notion-push <N>`, yourself (with
+network permission if your runtime asks for it). Don't read the Notion scripts to find another way.
+
 ## Untracked Tasks (no harness record)
 
 When the user asks for a task **without the harness** ("sin harness", "sin registro", "es una prueba", a
@@ -143,6 +185,11 @@ Report that summary. No second agent reviews it unless the user asks. If the cha
 harness (stored data, security, a contract others consume, more than a contained change), it says so instead
 of doing it: offer the user a tracked feature.
 
+Aligning the tests with a change the user already made by hand ("lo cambié a mano", "ajusta los tests") is
+untracked by default: the code is already decided and shipped by the user, so a spec, claim and reviewer add
+nothing. Launch the `quick_implementer` in untracked mode with "align tests with a manual change", the commit or
+files the user changed, and the request verbatim. If the user wants it recorded, it is a small feature instead.
+
 ## Small Tasks (quick path)
 
 **Classify each `sdd=0` feature before launching anyone.** It is small when it needs no spec, about 4 files or fewer (tests
@@ -150,7 +197,12 @@ included; `quick_max_files`), no new dependency, and no new screen or flow (a co
 adjustment). Follow-up fixes of a feature already closed (a bug the user found in it, a cleanup a review
 suggested) are usually small too. If unsure, it is normal. Announce it in one line ("I'm treating 34 as small: one component and its
 test") so the user can override, then `scripts/harness.sh set-size <feature> small` (or `add-feature --size
-small` when you create it). Small features go to **1 `quick_implementer`**, no reviewer up front. Its reply:
+small` when you create it). Small features go to **1 `quick_implementer`**, no reviewer up front.
+When the user explicitly asks for the quick path ("implementer rápido", "vía rápida") on a change that alters a
+contract (an API response, an exported type), honor it: mark it small, name the contract in the announcement
+line ("small at your request; it changes the `sales_by_sku` response") and write "user asked for the quick
+path" in the `quick_implementer` prompt, so it doesn't escalate for the contract alone. Stored data,
+security/auth and dependencies still escalate. Its reply:
 
 - `done -> ...` — the quick gate closed it. Report to the user.
 - `review-needed -> ...` — the gate refused or the agent declared a risk. Launch 1 `reviewer` pointing at
@@ -162,6 +214,42 @@ small` when you create it). Small features go to **1 `quick_implementer`**, no r
   open (it continues it, no claim) and to read the escalate file first; then reviewer as usual. **Reject:**
   `scripts/harness.sh hold "<reason>"` — the session keeps the project's slot and nothing else can be claimed or
   closed until the user decides (`unhold` to resume, or `block` to set it aside). Report and stop.
+
+## Lean Features (`--mode normal|risk`)
+
+A feature gets a mode only when the user asks for it ("modo normal", "modo riesgo", "lean"); never pick one
+yourself. The flow and its commands are in `lean/README.md` (read it only when a step below isn't enough); to
+plan, start with `lean/run.sh brief <name> <keyword...>`, which prints `lean/instructions/planning.md` along
+with everything else the plan needs. No `implementer`, `reviewer` or `quick_implementer` agent works on a feature with a
+mode; sandboxed sessions opened by `lean/run.sh` (MiniMax by default) implement and review it, and a script
+gate closes it.
+
+1. **Register**: `add-feature … --request "<verbatim>" --mode normal|risk` (`--approval` on a normal one only
+   when the user asks for it; risk always waits for approval). A mode can't be combined with `--sdd`.
+2. **Plan** — you write it yourself, it is the one thing you author: `docs/features/<name>.md` per
+   `planning.md` and, in risk mode, the acceptance tests in `<lean.acceptance_dir>/<name>.*` (they live
+   outside `src/` and `tests/` so you may write them). Nothing else.
+3. **Approve** (risk, or `--approval`): show the user the document (and the tests) and stop. Only after they
+   approve it in this conversation, `approve-plan <name> --by <name>` (same name rules as `approve-spec`); in
+   risk mode it freezes the tests. Changes before approval: edit the plan, show it again.
+   When the plan is ready (approved, or no approval needed), end your answer telling the user to
+   implement it from a fresh session (`/clear` or a new one): "implementa la feature <n>". The steps
+   then run on a small context instead of everything planning read.
+4. **Claim** the session yourself, only after any approval: `claim --agent "leader (lean flow, <your
+   model name>)" <name>`.
+5. **Steps**: give the user the commands (`lean/run.sh freeze|implement|review|fix|gate <name>`, run from the
+   project) — by default the user runs them by hand. Run them yourself only when the user asks you to chain
+   the steps or to implement the feature end to end; then make ONE call, `lean/run.sh chain <name>` (never the
+   steps one by one): it runs them headless in order, append-logs each, stops at the first failure, and
+   prints one line per step and a last `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`. Report a FAIL
+   to the user as printed; don't open the logs unless they ask.
+6. **Close**: when the user says the steps are done (or the chain printed `CHAIN: PASS`), run
+   `log-out --lean --changes … --verification "<gate result>" --closure "<summary>"` — after a chain PASS,
+   its `next:` line is that command with only `--closure` to fill in. No `./init.sh` first: the gate it runs
+   is the suite run on the code being closed.
+   This is the one log-out you run: the gate is a script, not your judgment. A refusal means another `fix`
+   round, never a workaround; to send the feature down the reviewer path instead, the user decides and
+   `set-mode <name> none` must run before any verdict is recorded.
 
 ## Learnings
 
@@ -241,8 +329,9 @@ Example of a correct instruction for a subagent:
 | Task Complexity    | Delegation                                              | Notes        |
 | ------------------- | -------------------------------------------------------- | ------------ |
 | The user asks for it without the harness (experiment, throwaway change) | 1 quick_implementer in untracked mode, no reviewer | See "Untracked Tasks"; nothing is recorded |
+| Align tests with a change the user made by hand | 1 quick_implementer in untracked mode, tests only | See "Untracked Tasks" |
 | Small (`sdd=0`, no spec, <= ~4 files incl. tests, no new dependency/screen/flow) | `set-size small` → 1 quick_implementer (reviewer only if the gate refuses) | See "Small Tasks"; escalation asks the user |
-| Trivial (1 file) but risky (stored data, auth, shared contract, untested code) | 1 implementer, then 1 reviewer | No research  |
+| Trivial (1 file) but risky (stored data, auth, shared contract, untested code) | 1 implementer, then 1 reviewer (a contract change the user explicitly sent down the quick path goes there instead) | No research  |
 | Medium (2-3 files, or reference paths already given — own project or another project cited by path) | 1 implementer, then 1 reviewer | No research — implementer reads what it needs directly |
 | Genuinely uncertain scope (relevant location unknown, needs discovery) | 2-3 research subagents, then implementer, then reviewer | Not triggered by "refactor" or "mentions another project" alone |
 | SDD feature, spec not yet drafted (`sdd=1`, `status=pending`) | 1 `spec_author` → human approval (hard stop, see SDD Gate above) → 1 implementer → 1 reviewer | Human approval is a hard stop, not a delegation step |
@@ -252,6 +341,9 @@ Example of a correct instruction for a subagent:
 ## What NOT to do
 
 - Do not edit files in `src/` or `tests/`.
+- Docs and config you may edit (outside `src/` and `tests/`) still count as the open session's changes: edit
+  them before the claim or after `log-out`, or the implementer's `log-out` will refuse until it runs
+  `add-surface <path> --reason "<why>"` for each of them.
 - Do not run `scripts/harness.sh log-out` yourself (the implementer does this after review).
 - Do not instruct an implementer to run `log-out` before a `reviewer` subagent has approved its work —
   not even for a one-line change; `log-out` will mechanically refuse without a recorded approval anyway.

@@ -329,6 +329,39 @@ fi
 if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|request|'; then
   sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN request TEXT;"
 fi
+# Adds the lean-flow columns (lean/README.md): features.mode ('normal' or
+# 'risk', NULL = no lean flow; validated in bash like size), plan_approval (a
+# normal feature whose plan needs approve-plan before claim; risk always
+# does), who/when approved it, and plan_frozen, the acceptance-test manifest
+# frozen by approve-plan in risk mode. Plain ADD COLUMNs, each probed on its
+# own. Keep in sync with db/schema.sqlite.sql.
+for lean_col in "mode TEXT" "plan_approval INTEGER NOT NULL DEFAULT 0" "plan_approved_by TEXT" "plan_approved_at TEXT" "plan_frozen TEXT"; do
+  if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q "|${lean_col%% *}|"; then
+    sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN $lean_col;"
+  fi
+done
+unset lean_col
+# Adds the scope columns: features.out_of_scope (JSON array, 0-5 lines the
+# leader writes from the user's words) and session_log.surfaces (JSON array of
+# path globs the implementer declares after claim; log-out checks the diff
+# against it). surfaces_required defaults to 1 for new sessions; the sessions
+# that already exist when the column is added get 0, so a feature claimed
+# before the upgrade can still log out (with a warning). One transaction, so a
+# crash can't leave the column without that backfill. Keep in sync with
+# db/schema.sqlite.sql.
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(features);" | grep -q '|out_of_scope|'; then
+  sqlite3 "$DB_PATH" "ALTER TABLE features ADD COLUMN out_of_scope TEXT NOT NULL DEFAULT '[]';"
+fi
+if ! sqlite3 "$DB_PATH" "PRAGMA table_info(session_log);" | grep -q '|surfaces_required|'; then
+  sqlite3 "$DB_PATH" <<'SQL'
+.bail on
+BEGIN;
+ALTER TABLE session_log ADD COLUMN surfaces TEXT;
+ALTER TABLE session_log ADD COLUMN surfaces_required INTEGER NOT NULL DEFAULT 1;
+UPDATE session_log SET surfaces_required = 0;
+COMMIT;
+SQL
+fi
 if [ -z "$(sqlite3 "$DB_PATH" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='learnings';")" ]; then
   sqlite3 "$DB_PATH" <<'SQL'
 .bail on

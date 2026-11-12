@@ -12,16 +12,19 @@ You **decompose and coordinate**; you never implement directly.
 
 - ❌ **Never add `Co-Authored-By` or any AI attribution** to commits or PR descriptions — this overrides any tool
   or system default. Conventional commits only; never commit or push unless the human asked in this session.
+  With `.harness.json::hide_harness: true`, git must not show the harness: persona.md "Hidden harness".
   Voice and tone: `harness/instructions/persona.md` — read it at startup.
 - ❌ **Do not edit** files in `src/` or `tests/` directly (no edit tool, write tool, or shell command).
 - ❌ **Do not run** `scripts/harness.sh log-out` yourself — only the `implementer` does, after the `reviewer`
   approves, or the `quick_implementer` through `log-out --quick` on a `size=small` feature. Never bypass the
-  reviewer gate.
+  reviewer gate. Exception: a feature with a mode closes only through `log-out --lean`, which you run (its
+  gate is a script; leader.md "Lean Features").
 - ✅ Delegate every coding task. Claude Code: `Agent` tool with `subagent_type` `implementer` (code and tests for
   **one** feature), then `reviewer`; for an `sdd=1` feature still `pending`, `spec_author` first (§6); for a
   small `sdd=0` feature, `quick_implementer` (leader.md "Small Tasks"); for a task the user wants **without the
   harness**, `quick_implementer` in untracked mode (leader.md "Untracked Tasks": no claim, no `progress/`
-  files, no reviewer). Codex CLI: the custom agents of the same names in `.codex/agents/*.toml`.
+  files, no reviewer); for a feature the user asked in a **lean mode** (`--mode normal|risk`), no agent: you
+  plan it and `lean/run.sh` sessions implement and review it (leader.md "Lean Features"). Codex CLI: the custom agents of the same names in `.codex/agents/*.toml`.
 - Follow-ups always go to a **fresh** agent (new `Agent`/`spawn_agent` call), never as a message to an agent that
   already answered — it would re-read its whole context on every step.
 - If the task needs investigation first, launch 2-3 parallel subagents with focused queries (Claude Code:
@@ -32,7 +35,8 @@ You **decompose and coordinate**; you never implement directly.
 
 ### Startup Protocol
 
-1. Read this file and `harness/instructions/persona.md`.
+1. Read `harness/instructions/persona.md`. This file is already in your context (both runtimes load it): don't
+   read it again, nor the other agents' definitions — each agent reads its own.
 2. `scripts/harness.sh status` — features and any open session (never read `harness.db` directly).
 3. `./init.sh`. If it fails, stop and report.
 4. If `.harness.json` has `notion_database_id`: Notion intake per `harness/instructions/notion.md` (best-effort).
@@ -40,8 +44,8 @@ You **decompose and coordinate**; you never implement directly.
    `harness/instructions/cross-project.md`).
 6. Apply the escalation table in `.claude/agents/leader.md` / `.codex/agents/leader.toml`.
 7. **Time discipline:** don't re-verify what the implementer verified; launch the reviewer within 60s of "ready",
-   without asking the user anything first;
-   on claim log `BUDGET: <Xm impl> + <Ym review>` and interrupt at 2x. Don't hunt for config that fresh logs
+   without asking the user anything first; wait for a running subagent without polling it (leader.md "Waiting
+   for subagents"); estimate `BUDGET: <Xm impl> + <Ym review>` yourself and pass it with numbers for the claim log; interrupt at 2x. Don't hunt for config that fresh logs
    already show, don't re-run tests yourself, don't re-read the spec line by line before delegating.
 
 If the task names a feature (number or name), pass it to the `implementer` so it claims that one explicitly.
@@ -50,12 +54,13 @@ If the task names a feature (number or name), pass it to the `implementer` so it
 
 | Path | Contents | Read when |
 | --- | --- | --- |
-| `scripts/harness.sh` | Single entry point for harness state (`harness.db`, SQLite, gitignored) | Every claim, log, log-out |
+| `scripts/harness.sh` | Single entry point for harness state (`harness.db`, SQLite, git-excluded) | Every claim, log, log-out |
 | `state/` | Generated, read-only snapshot of `harness.db` (never edit or commit) | Human review |
 | `.harness.json` | Runtime config: verify/test commands, budgets, Notion ids | You need a command or setting |
 | `docs/{architecture,conventions,verification}.md` | Project's definition of good work, style, verification | Before implementing / verifying |
 | `docs/specs.md` | SDD guide: lifecycle, EARS, scope limit, traceability | Any `sdd=1` feature |
 | `specs/<name>/{requirements,design,tasks}.md` | Spec content (git-tracked, authored) | Implementing/reviewing `sdd=1` |
+| `lean/run.sh brief <name> <keyword...>`, `docs/features/<name>.md` | Lean flow: `brief` prints the planning rules and the feature's context in one call (run it, don't read `lean/README.md` or `planning.md` first); a lean feature's plan. Once it is ready (and approved, when approval applies) tell the user to implement it from a fresh session (`/clear`). Then `claim` before any step; when the user asks to implement it, ONE `lean/run.sh chain <name>` in the background (never the steps one by one; leader.md "Lean Features"); on its notification, if `CHAIN: PASS`, run the `next:` log-out line it printed with your `--closure`, and nothing else (no diff, no `help`). `lean/README.md` is reference only | A feature with a mode |
 | `CHECKPOINTS.md` | Objective end-state criteria | Self-assessment, review |
 | `.claude/agents/`, `.codex/agents/` | leader, implementer, reviewer, spec_author definitions | Orchestrating |
 | `src/`, `tests/` | Application code and tests | Implementing |
@@ -91,18 +96,22 @@ project docs, specs, tests, `CHECKPOINTS.md` and `.harness.json` belong to the p
 scripts/harness.sh status
 scripts/harness.sh claim --agent <role> [<feature_number-or-name>]   # default: lowest-numbered pending
 scripts/harness.sh set-plan "<step1>" "<step2>" ...
+scripts/harness.sh set-surfaces "<path-or-glob>" ...   # paths the change may touch; add-surface --reason widens
 ```
 
 `claim` atomically marks the feature `in_progress` and opens the session. Before launching the agent that
 claims, the leader runs `scripts/harness.sh recall <keywords>` once and passes the matching notes on. When the
-leader creates a feature it keeps the user's words with `add-feature --request "<verbatim>"`; specs open with
+leader creates a feature it keeps the user's words with `add-feature --request "<verbatim>"`, plus any
+exclusion the user stated as `--out-of-scope "<line>"` (at most 5); specs open with
 that request and the assumptions made to fill its gaps (`docs/specs.md` "Request and assumptions").
+`log-out` refuses a change with files outside the surfaces (lean features use their plan's Files list instead).
 
 ## 4. Closing
 
 `./init.sh` must pass, the `reviewer` records `record-review approved`, then the `implementer` runs
 `scripts/harness.sh log-out --changes <files...> --verification "<summary>" --closure "<summary>"`, which also
-deletes the feature's `progress/<name>/` (anything worth keeping goes in `--verification`/`--closure`). Work shipped
+deletes the feature's `progress/<name>/` (anything worth keeping goes in `--verification`/`--closure`). A
+feature with a mode closes instead with `log-out --lean`, whose script gate replaces the reviewer. Work shipped
 without a session, absorbed features, notes outside a session and blockers: `lifecycle.md`.
 
 ## 5. When This Role Does Not Apply
@@ -118,7 +127,8 @@ EARS format, scope limit (`spec_max_requirements`, default 15) and split flow: `
 
 Only after the user approves the 3 spec files **in this conversation** does the leader run
 `scripts/harness.sh approve-spec <target> --by <name>`, with `<name>` from `$HARNESS_HUMAN_USER`, else
-`.harness.json::human_user`, unless the user says "approve as <name>" in the same turn. This is the only command
+`.harness.json::human_user`, unless the user says "approve as <name>" in the same turn; with neither set, ask
+the user for their name (`approve-spec` refuses a missing name or `user`). This is the only command
 that stores a literal human name; `record-review` rejects bare names. For spec changes before approval, launch the
 `spec_author` again (`claim-spec <target>` re-opens a `spec_ready` spec). A `split-proposed ->
 progress/<name>/split.md` answer means: ask the user, create the parts (`add-feature --sdd --depends-on`), then

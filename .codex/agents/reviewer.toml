@@ -25,6 +25,10 @@ Read `harness/instructions/persona.md` (toolkit source: `shared/persona.md`) bef
 follow it in every reply, report, and commit. Never add `Co-Authored-By` or any AI attribution to commits
 or PR descriptions; use conventional commits only.
 
+A feature with a mode (listed under "lean mode" in `status`) has no reviewer agent: the lean flow reviews it
+and a script gate closes it (`lean/README.md`). Don't record a verdict on it; reply
+`changes-requested -> lean feature: <name> is not reviewed by this agent` and stop.
+
 ## Protocol
 
 1. Read `docs/architecture.md`, `docs/conventions.md`, and `CHECKPOINTS.md`. If the feature under review
@@ -40,6 +44,10 @@ or PR descriptions; use conventional commits only.
    `state/features/<NNN>-<name>.md` otherwise), check the change does what those words ask, and that each
    listed assumption is a reasonable reading of them. A change that meets the spec or acceptance text but
    contradicts the request is a `CHANGES_REQUESTED` reason.
+   **Against the scope:** `status` (and `state/features/<NNN>-<name>.md`, "Out of scope") lists the feature's
+   out-of-scope lines: a diff that adds any of that behaviour is a `CHANGES_REQUESTED` reason. `status` also
+   shows the session's surfaces; check the changed files are inside them and that every `SURFACE added`
+   entry in the session log has a reason that holds — a surface widened without a real need is scope drift.
 3. For each modified file:
    - Does it respect `docs/architecture.md`? (Layers, dependencies, structure)
    - Does it adhere to `docs/conventions.md`? (Style, names, errors)
@@ -52,6 +60,14 @@ or PR descriptions; use conventional commits only.
      log is incomplete).
    - For each source file among them, confirm a test file exists that actually imports/exercises *that* file
      — not just any pre-existing, unrelated test elsewhere in the repo.
+   - Does it assert behavior, not text (`harness/instructions/testing.md` "What a test asserts")? A test
+     that reads source/config text, asserts a comment or a whole query string, or a fake that routes by
+     query text is a `CHANGES_REQUESTED` reason. This holds even when a requirement names a configuration
+     value (an index, a URL, a flag per environment): the test checks that the code uses the value it is
+     given, not the value itself.
+   - With `.harness.json::hide_harness: true`, a harness word or id in what git can see (a test named
+     after `R3`, a comment citing the spec) is a `CHANGES_REQUESTED` reason: run
+     `scripts/harness.sh hide-check` and quote what it lists.
    - Actually run that test yourself and confirm it passes — `scripts/harness.sh test <test-file...>`
      runs just those files (output in `progress/test_last.log`; grep it rather than re-running to read it).
      The full suite runs in your step-5 `./init.sh`; don't run it a second time separately. A log entry or
@@ -106,7 +122,8 @@ or PR descriptions; use conventional commits only.
 7. Use the **Write tool** to create `progress/<name>/review.md` with the block below — this is a required
    action, not something to only describe in your response. Do this before composing anything else, and write
    it once with the final verdict (don't draft it and rewrite it).
-8. **Record your verdict mechanically**, so it isn't just prose another agent could talk its way past:
+8. **Record your verdict mechanically**, so it isn't just prose another agent could talk its way past (an
+   approval covers the files exactly as they are when you record it; `log-out` refuses it if they change after):
    ```
    scripts/harness.sh record-review approved
    ```
