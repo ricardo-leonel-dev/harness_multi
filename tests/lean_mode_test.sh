@@ -28,6 +28,8 @@
 #      with a mode; set-mode is refused after a reviewer verdict or on hold and
 #      clears a quick/lean pass; --lean refuses requested changes; a lean pass
 #      never closes a feature without a mode.
+#   7. the feature's dirty.sha (lean/lib.sh lean_pin) is recorded at its first claim and removed
+#      by log-out --lean, supersede, delete-feature and set-mode none.
 #
 # Usage: bash tests/lean_mode_test.sh   (exits non-zero on the first failure)
 
@@ -131,7 +133,9 @@ out=$(H set-mode m bogus) && die "set-mode bogus should be refused"
 out=$(H set-mode m risk --approval 2>&1) || die "set-mode risk --approval should warn, not refuse: $out"
 grep -q '^\[WARN\].*--approval ignored' <<<"$out" && [ "$(q "SELECT mode || plan_approval FROM features WHERE name='m';")" = risk1 ] \
   || die "set-mode risk --approval: $out"
+mkdir -p "$CACHE/lean/m" && : > "$CACHE/lean/m/dirty.sha"
 H set-mode m none >/dev/null || die "set-mode none after risk"
+[ ! -e "$CACHE/lean/m/dirty.sha" ] || die "set-mode none must remove the feature's dirty.sha"
 out=$(H set-mode m none --approval) && die "set-mode none --approval should be refused"
 out=$(H status)
 grep -q 'lean mode' <<<"$out" && grep -q 'plan approval pending' <<<"$out" && grep -q 'no plan approval needed' <<<"$out" \
@@ -213,6 +217,7 @@ pass "approve-plan refuses what it can't approve; risk freezes the acceptance te
 echo "4. log-out --lean, normal mode"
 H claim n2 >/dev/null || die "an approved normal --approval feature should claim"
 [ -s "$CACHE/lean/n2/trusted.sha" ] || die "claim should pin the trusted hashes"
+[ -f "$CACHE/lean/n2/dirty.sha" ] || die "the first claim should record dirty.sha"
 grep -q '  lean/gate.sh$' "$CACHE/lean/n2/trusted.sha" && grep -q '  scripts/harness.sh$' "$CACHE/lean/n2/trusted.sha" \
   || die "trusted hashes at claim: $(cat "$CACHE/lean/n2/trusted.sha")"
 printf 'hello world\n' > "$P/src/app.txt"
@@ -268,6 +273,7 @@ grep -q 'init.sh' <<<"$out" && die "log-out --lean must not ask for ./init.sh: $
   || die "review_status should be lean"
 grep -q 'LEAN: passed (mode normal) — ALL CHECKS PASS' <<<"$(q "SELECT entry FROM session_log_entries;")" || die "the pass and the gate's last line must be logged"
 [ "$(q "SELECT status FROM features WHERE name='n2';")" = done ] || die "n2 should be done"
+[ -f "$CACHE/lean/n2/trusted.sha" ] && [ ! -e "$CACHE/lean/n2/dirty.sha" ] || die "log-out --lean must remove dirty.sha (only)"
 g add -A && g commit -qm n2 >/dev/null
 pass "log-out --lean refuses each failing check (logged) and closes once the gate passes, no ./init.sh run needed"
 
@@ -388,5 +394,16 @@ out=$(lean_out) && die "log-out --lean must refuse a risk feature without an app
 grep -q 'needs an approved plan and has none' <<<"$out" || die "unapproved-risk reason: $out"
 [ "$(q "SELECT status FROM features WHERE name='x3';")" = in_progress ] || die "x3 must stay open"
 pass "an approval-requiring mode can't be added after the claim, and --lean never closes it unapproved"
+
+echo "7. dirty.sha goes when the feature's lean lifecycle ends"
+for f in k1 k2 k3; do
+  H add-feature --name "$f" --title "$f" --mode normal >/dev/null || die "add $f"
+  mkdir -p "$CACHE/lean/$f" && : > "$CACHE/lean/$f/dirty.sha"
+done
+out=$(H supersede k1 --by k2 --reason test) || die "supersede k1: $out"
+H delete-feature k3 >/dev/null || die "delete k3"
+[ ! -e "$CACHE/lean/k1/dirty.sha" ] && [ ! -e "$CACHE/lean/k3/dirty.sha" ] && [ -f "$CACHE/lean/k2/dirty.sha" ] \
+  || die "supersede and delete-feature must remove that feature's dirty.sha only"
+pass "dirty.sha is removed by log-out --lean, supersede, delete-feature and set-mode none"
 
 echo "all $PASS checks passed"

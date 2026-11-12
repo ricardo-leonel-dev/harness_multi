@@ -20,7 +20,8 @@
 # table (the sessions this chain opened, a sum over them, and how many earlier ones
 # `run.sh usage <name>` shows: lean/lib.sh lean_usage_table), on PASS with
 # scripts/harness.sh present a `next:` line holding the log-out --lean command to run (its
-# --changes: the files the gate checked, lean/lib.sh lean_repo_changes, relative to the
+# --changes: the files the gate checked, lean/lib.sh lean_feature_changes (files changed
+# before the feature and left as they were are not among them), relative to the
 # project, quoted for the shell, progress/ and state/ left out; only --closure to fill in),
 # and a last line `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`. Exit 0 only on PASS.
 #
@@ -77,7 +78,7 @@ lean_chain_close_line() {
   prefix=$(git rev-parse --show-prefix 2>/dev/null || true)
   while IFS= read -r f; do
     [ -n "$f" ] && files="$files $(lean_chain_quote "$f")"
-  done < <(lean_repo_changes "$b" 2>/dev/null \
+  done < <(lean_feature_changes "$project" "$name" "$b" 2>/dev/null \
     | awk -v p="$prefix" 'p == "" || index($0, p) == 1 { print substr($0, length(p) + 1) }' \
     | { grep -vE '^(progress|state)/' || true; })
   printf 'next: scripts/harness.sh log-out --lean%s --verification "lean chain PASS: %s ok, gate ALL CHECKS PASS" --closure "<fill in>"\n' \
@@ -199,7 +200,7 @@ lean_chain() {
   [ "$n" = 0 ] || echo "total: $(fmt_dur "$total")${cost_total:+, cost \$$cost_total}"
   if [ -n "$gate_log" ]; then
     echo "gate:"
-    { grep -E '^(ALL CHECKS PASS|HEAD MOVED|SANDBOX UNAVAILABLE|SUITE FAILS|FROZEN |ACCEPTANCE TESTS FAIL|ASSERTION LINES REMOVED|MISSING: |CHANGED BUT NOT LISTED|PATHS WITH A NEWLINE|FOLDERS THE GATE|CLAUDE\.md / |CHANGED OUTSIDE|\[WARN\])' "$gate_log" || true; } \
+    { grep -E '^(ALL CHECKS PASS|HEAD MOVED|SANDBOX UNAVAILABLE|SUITE FAILS|FROZEN |ACCEPTANCE TESTS FAIL|ASSERTION LINES REMOVED|MISSING: |CHANGED BUT NOT LISTED|PATHS WITH A NEWLINE|FOLDERS THE GATE|CLAUDE\.md / |CHANGED OUTSIDE|gate: ignoring |\[WARN\])' "$gate_log" || true; } \
       | cut -c1-160 | head -10 | sed 's/^/  /'
     echo "  full report: $gate_log"
   fi

@@ -11,8 +11,15 @@
 #      file is listed under **Changed tests** in docs/features/<name>.md;
 #   3. every changed file is listed under **Files** (the plan files, frozen acceptance files
 #      — this feature's and other features' — and the harness's progress/ and state/ excepted);
+#      A file already changed when the feature was first pinned (<lean state>/lean/<name>/dirty.sha,
+#      recorded once, lean/lib.sh lean_pin: the user's own uncommitted edits, never the feature's
+#      plan, review report or acceptance tests) and still with that content and mode is not the
+#      feature's change: checks 2-5 leave it out and one `gate: ignoring ...` line names it;
+#      changed since, it counts like any other. No dirty.sha (pinned by an older version): none.
 #   4. with --frozen (risk mode): the acceptance files match the manifest, nothing else
-#      changed in the acceptance directory, and the acceptance tests pass.
+#      changed in the acceptance directory, and the acceptance tests pass
+#      (.harness.json::lean.acceptance_command with {paths} replaced or the paths appended, else
+#      verify_command with the paths appended and a [WARN] when it is a compound command).
 #   5. nothing changed outside <project_dir> when it is a subfolder of its repository (a
 #      changed or untracked, non-ignored file there fails, named by its repository-root path);
 #   6. one pass over every path in the project, git-ignored ones included: no nested CLAUDE.md /
@@ -72,12 +79,21 @@ z_lines() { lean_z_lines; }
 # root (lean/lib.sh lean_repo_changes, also behind lean/chain.sh's close line); split into the
 # ones inside the project (changed_rel, relative to it) and the ones outside it
 # (changed_outside, from the root).
+# Files already changed before the feature (the feature's dirty.sha, lean/lib.sh lean_pin) whose
+# content is still the recorded one are not its changes: left out here (baseline_ignored, from
+# the root; baseline_ignored_rel, the ones inside the project, relative to it). One changed since
+# counts, even when git no longer lists it (put back to <rev>). No dirty.sha: nothing left out.
 collect_changes() {
-  local root
-  root=$(lean_repo_changes "$base")
+  local root split
+  split=$(lean_baseline_split "$project" "$name")
+  baseline_ignored=$(sed -n 's/^= //p' <<<"$split")
+  baseline_ignored_rel=$(awk -v p="$prefix" 'p == "" || index($0, p) == 1 { print substr($0, length(p) + 1) }' <<<"$baseline_ignored")
+  root=$(lean_feature_changes "$project" "$name" "$base")
   changed_rel=$(awk -v p="$prefix" 'p == "" || index($0, p) == 1 { print substr($0, length(p) + 1) }' <<<"$root")
   changed_outside=$(awk -v p="$prefix" 'p != "" && index($0, p) != 1' <<<"$root")
 }
+# not_baseline — stdin without the baseline_ignored_rel paths.
+not_baseline() { grep -vxF -f <(printf '%s\n' "$baseline_ignored_rel" | sed '/^$/d'; echo $'\x01') || true; }
 collect_changes
 # to_project_relative — a listed path, per the rule in the header: kept when the project has
 # something at it, otherwise read from the repository root when it starts with the prefix.
@@ -105,6 +121,7 @@ acc_dir="${acc_dir%/}"
 # checks them.
 other_frozen=$(find "$(lean_state_dir "$project")/frozen" -name '*.sha' ! -name "$name.sha" -exec cat {} + 2>/dev/null | manifest_paths | sort -u)
 [ -n "$verify" ] || { echo "no verify_command in .harness.json" >&2; exit 2; }
+lean_acceptance_valid "$project" || { echo "$LEAN_ACCEPTANCE_INVALID" >&2; exit 2; }
 # The gate's own temp files live in the lean state folder, which the suite's sandbox can neither
 # read nor write (the user temp dir and /private/tmp are writable from it).
 gate_tmp="$(lean_state_dir "$project")/tmp"
@@ -155,15 +172,21 @@ if [ -n "$frozen" ]; then
     bad=$(shasum -c "$frozen_rel" 2>&1 | grep -v ': OK$' || true)
     # Anything else that changed in the acceptance directory (a file added next to this
     # feature's), other features' frozen files aside.
-    acc_changed=$( { git diff -z --name-only --relative "$base" -- "$acc_dir"; git ls-files -z --others --exclude-standard -- "$acc_dir"; } | z_lines | sort -u)
+    acc_changed=$( { git diff -z --no-renames --name-only --relative "$base" -- "$acc_dir"; git ls-files -z --others --exclude-standard -- "$acc_dir"; } | z_lines | not_baseline | sort -u)
     extra=$(comm -23 <(printf '%s\n' "$acc_changed" | sed '/^$/d') <( printf '%s\n' "$frozen_paths" "$other_frozen" | sed '/^$/d' | sort -u))
     if [ -n "$bad$extra" ]; then
       fail=1
       echo "FROZEN ACCEPTANCE TESTS CHANGED (restore them exactly; object in the document instead):"
       printf '%s\n' "$bad" "$extra" | sed '/^$/d'
     fi
+    # lean.acceptance_command when set (lean/lib.sh lean_acceptance_command), else verify_command
+    # with the paths appended, warned about when it is a compound command.
+    acc_paths=()
+    while IFS= read -r l; do [ -z "$l" ] || acc_paths+=("$l"); done <<<"$frozen_paths"
+    lean_acceptance_command "$project" ${acc_paths[@]+"${acc_paths[@]}"}
+    [ -z "$LEAN_ACCEPTANCE_WARN" ] || echo "$LEAN_ACCEPTANCE_WARN"
     if [ "${sandbox%%:*}" = broken ]; then :
-    elif ! acc_out=$(run_suite "$verify $(tr '\n' ' ' <<<"$frozen_paths")" 2>&1); then
+    elif ! acc_out=$(run_suite "$LEAN_ACCEPTANCE_CMD" 2>&1); then
       fail=1
       echo "ACCEPTANCE TESTS FAIL:"
       { grep -E '^\(fail\)|FAIL|✗' <<<"$acc_out" || tail -15 <<<"$acc_out"; } | head -20
@@ -187,6 +210,7 @@ changed_tests=$(section_paths "Changed tests")
 existing_tests=$(git ls-tree -z -r --name-only "$base" | z_lines | grep -E '(\.test|\.spec|_test)\.[A-Za-z]+$|(^|/)test_[^/]+\.py$' || true)
 while IFS= read -r t; do
   [ -n "$t" ] || continue
+  [ -n "$(not_baseline <<<"$t")" ] || continue   # changed before the feature, still as it was
   removed=$(git diff --no-relative --no-ext-diff --no-textconv "$base" -- ":(literal)$t" | grep -E '^-' | grep -vE '^---' | grep -E 'expect\(|assert|test\(|it\(' || true)
   [ -n "$removed" ] || continue
   if grep -qxF "$t" <<<"$changed_tests"; then
@@ -297,6 +321,13 @@ if [ -n "$changed_outside" ]; then
   fail=1
   echo "CHANGED OUTSIDE THE PROJECT DIRECTORY $prefix (paths from the repository root; undo the change):"
   echo "$changed_outside"
+fi
+
+# The files left out as changed before the feature, in one line (the feature document aside).
+ignored_shown=$(printf '%s\n' "$baseline_ignored" | awk -v p="$prefix" 'NF { print (p != "" && index($0, p) == 1) ? substr($0, length(p) + 1) : $0 }' \
+  | { grep -vE '^docs/features/' || true; })
+if [ -n "$ignored_shown" ]; then
+  echo "gate: ignoring $(wc -l <<<"$ignored_shown" | tr -d ' ') file(s) changed before the feature, unchanged since: $(awk 'NR <= 8 { printf "%s%s", (NR > 1 ? ", " : ""), $0 } END { if (NR > 8) printf ", ... (%d more)", NR - 8 }' <<<"$ignored_shown")"
 fi
 
 [ "$fail" = 0 ] && echo "ALL CHECKS PASS"

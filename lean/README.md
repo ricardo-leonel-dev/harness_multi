@@ -45,11 +45,23 @@ think of.
 4. **Review**: `lean/run.sh review <name>`.
 5. **Fix** (when the review asks for changes or the gate fails): `lean/run.sh fix <name>`.
 6. **Gate**: `lean/run.sh gate <name>`: `HEAD` still the base commit; suite green; no assertion removed from an existing test file
-   unless the document lists it under **Changed tests**; every changed file listed under **Files**;
+   unless the document lists it under **Changed tests**; every changed file listed under **Files** (a deleted file too, and a rename under both its paths);
    no nested `CLAUDE.md` / `CLAUDE.local.md` or nested `.claude/` file (git-ignored ones included)
    unless git tracks it unchanged at the base or it was already there, unchanged, when the feature
    was first pinned (`<lean state>/lean/<name>/nested.sha`: e.g. an npm package that ships a
-   `.claude/` folder); risk mode: the frozen tests unchanged and passing.
+   `.claude/` folder); risk mode: the frozen tests unchanged and passing (run with
+   `lean.acceptance_command`, else `verify_command` with the paths appended).
+   Files already changed when the feature was first pinned (your own uncommitted edits: modified,
+   deleted, untracked and not ignored, a rename under both paths) are recorded with a hash of
+   their content and mode in `<lean state>/lean/<name>/dirty.sha`; while they keep both the gate
+   leaves them out (one `gate: ignoring N file(s) …` line names them) and `chain`'s `next:` line
+   doesn't list them. Changed since (even put back to `HEAD`, or a `chmod`), they count and must
+   be under **Files**. The feature's own plan, review report and acceptance tests are never
+   recorded: they stay in `next:`'s `--changes`. `dirty.sha` is written once, before the
+   feature's first session, and never again (a later `claim`, or deleting `trusted.sha` to
+   re-pin, leaves it as it is); it goes when the feature closes (`log-out --lean`), is
+   superseded or deleted, or `set-mode <name> none`. A feature pinned before `dirty.sha` existed
+   counts every change, as before.
 
 7. **Chain** (instead of 2–6, when the steps should run unattended): `lean/run.sh chain <name>
    [--base <rev>] [--step-minutes N]` runs them headless in one call, each as its own `run.sh
@@ -139,6 +151,7 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 | `reviewer` | `claude:claude-haiku-5-5` (risk only) | tool for the review (any tool: `claude[:<model>]`, `claude-mini`, `codex[:<model>]`, `codex-m3`). Risk mode: report only, must be another model than the implementer (`claude-mini` and `codex-m3` are both MiniMax: one can't review the other). Normal mode: used only when set (no default; unset, the implementer reviews), same review as the implementer's (one pass, may fix once), may equal the implementer. A string serves both modes; an object picks one per mode, each key optional (a missing or empty key takes that mode's fallback): `"reviewer": {"normal": "codex:gpt-5.1", "risk": "claude:claude-haiku-5-5"}`. Any other value (number, boolean, array, an object with other keys or non-string values) stops every step with exit 2 |
 | `risk_questions` | `backend` | list in `lean/risk-questions/`; a project's own `docs/risk-questions.md` wins |
 | `acceptance_dir` | `acceptance` | where risk-mode acceptance tests live (outside `src/` and `tests/`, so the planner may write them) |
+| `acceptance_command` | unset | the command that runs risk mode's acceptance tests (gate and `run.sh freeze`): `{paths}` is replaced with the shell-quoted paths, else they are appended (`"npm test -- {paths}"`). Unset: `verify_command` with the paths appended, and a `[WARN]` when it is compound (`&&`, `\|\|`, `;`, `\|`, a lone `&` or a newline at its top level), where the paths reach only its last command. Not a string: every step exits 2 before a session opens, and so does the gate |
 | `allowed_domains` | `[]` | hosts the sandboxed sessions may reach besides localhost |
 | `allowed_read` | `[]` | paths (`~` expanded, `..` normalised, links resolved) the sessions and the gate may read in `$HOME` besides the toolchain list; an entry reaching credentials or the lean state is refused whole |
 | `deny_ports` | `[]` | TCP ports (integers 1-65535) the gate's profile denies on every address besides `LEAN_DENY_PORTS` in `sandbox.sh` (the mirror's 54329 and 3001); an invalid entry fails the profile build |

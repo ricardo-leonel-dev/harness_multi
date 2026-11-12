@@ -23,7 +23,8 @@ At most about 60 lines. Start with the user's request verbatim, then these secti
 
 - **Decisions**: what the request does not say and how you decided it, one line each.
 - **Out of scope**: what this feature must not change.
-- **Files**: every file the feature creates or changes, one path per line (tests included), relative
+- **Files**: every file the feature creates, changes or deletes (a rename or move: both its old and
+  its new path), one path per line (tests included), relative
   to the project directory (the one with `.harness.json`, even when it is a subfolder of the git
   repository: `src/x.rs`, not `backend/src/x.rs`). The gate compares this list with the files
   actually changed: name paths exactly. Its rule: a path names `<project>/<path>`; only when nothing

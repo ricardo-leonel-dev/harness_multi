@@ -618,6 +618,7 @@ RETURNING feature_number || ' ' || name;")
     [ -z "$cleared" ] || db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($open_sid, '[harness] set-mode $(sql_escape "$mode"): cleared the earlier gate pass (it belonged to the other close path)', '$(now_iso)');"
   fi
   if [ "$mode" = none ]; then
+    lean_forget_baseline "${updated#* }"
     ok "feature $updated has no lean mode (reviewer path)"
   else
     ok "feature $updated is now mode $mode$([ "$plan_approval" = 1 ] && echo ', plan approval required')"
@@ -1161,6 +1162,17 @@ lean_claim_pin() {
   fi
   if [ -n "$keep" ]; then lean_pin "$(pwd)" "$name" || warn "could not pin feature $name's hashes in $state/lean/$name"
   else lean_pin "$(pwd)" "$name" --again || warn "could not pin feature $name's hashes in $state/lean/$name"; fi
+}
+
+# lean_forget_baseline <name> — the feature's lean lifecycle ended (log-out closed it, it was
+# superseded or deleted, or set-mode none put it on the reviewer path): its dirty.sha (the files
+# already changed before its first pin, lean/lib.sh lean_pin) goes. It is recorded once per
+# feature and never again, so nothing later can take it for this feature's baseline.
+lean_forget_baseline() {
+  local state
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
+  state=$(lean_state_dir "$(pwd)" 2>/dev/null) || return 0
+  rm -f "$state/lean/$1/dirty.sha"
 }
 
 # approve-plan <TARGET> [--by NAME] — record the human's approval of a lean
@@ -2506,6 +2518,8 @@ $LEAN_REPORT}")', '$(now_iso)');"
 INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] LEAN: passed (mode $lmode) — $last_line")', '$(now_iso)');"
     ok "lean gate passed (mode $lmode): $last_line"
     printf '%s\n' "$LEAN_REPORT" | grep '^\[WARN\]' | sed 's/^\[WARN\] *//' | while IFS= read -r w; do warn "lean gate: $w"; done
+    # Files changed before the feature and left as they were (lean/gate.sh): named, not refused.
+    printf '%s\n' "$LEAN_REPORT" | grep '^gate: ignoring ' | while IFS= read -r w; do ok "lean $w"; done
     review_status=lean
   fi
 
@@ -2606,7 +2620,9 @@ SQL
     exit 1
   fi
   ok "session $sid logged out"
-  clean_feature_dir "$(db "SELECT name FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")"
+  local closed_name; closed_name=$(db "SELECT name FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")
+  clean_feature_dir "$closed_name"
+  lean_forget_baseline "$closed_name"
 
   push_notion_status "$(db "SELECT feature_id FROM session_log WHERE id=$sid;")"
   sync_mirror
@@ -2929,6 +2945,7 @@ RETURNING id;" 2>&1)
 VALUES ($fid, '$(sql_escape "[$attribution] SUPERSEDED by $by_label (was $status_now): $reason")', '$now');"
   ok "superseded: $fnum $fname → $by_label (was $status_now)"
   clean_feature_dir "$fname"
+  lean_forget_baseline "$fname"
 
   # A dependent can never be claimed while its depends_on names a feature
   # that will never be 'done' — don't rewrite it silently, just say so.
@@ -3202,6 +3219,7 @@ UPDATE features SET deleted_at='$now', updated_at='$now' WHERE id=$fid;
 UPDATE specs SET deleted_at='$now', updated_at='$now' WHERE feature_id=$fid AND deleted_at IS NULL;
 COMMIT;"
   ok "soft-deleted feature $target (and its specs)"
+  lean_forget_baseline "$(db "SELECT name FROM features WHERE id=$fid;")"
 }
 
 # record-usage/stats live in scripts/agent_usage.py (python3 stdlib only).
