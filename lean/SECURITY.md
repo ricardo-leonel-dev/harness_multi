@@ -95,9 +95,22 @@ Not sandboxed: a `claude-mini` or `codex-m3` started by hand, and a suite you st
   of a feature pinned before `nested.sha` existed) trusts what the session left, so only re-pin
   when you know why. The same holds for a new feature after one whose gate never passed: what
   that one's sessions left is there at the new feature's first pin.
-- **The state the gate trusts** (risk mode's frozen manifest, the pinned hashes) lives in
+- **The state the gate trusts** (risk mode's frozen manifest, the pinned hashes, and
+  `dirty.sha`: the files already changed before the feature, which the gate leaves out while
+  their content and mode are the recorded ones) lives in
   `~/.cache/harness/projects/<folder>-<hash of the resolved path>`, outside the project and keyed
-  by something a session can't edit.
+  by something a session can't edit (the sessions' profile denies reading and writing
+  `~/.cache/harness`). `dirty.sha` is written once per feature, at its first pin, when nothing
+  was pinned or run for it yet, so before any of its sessions. Nothing rewrites it: not a later
+  `claim` (`--again`), not a re-pin after `trusted.sha` was deleted (after editing
+  `.harness.json`), so no session's work can be recorded as "already there". Unlike
+  `nested.sha`, which only trusts instruction files, it exempts any file from the **Files**
+  check, hence the stricter rule. It never holds the feature's own plan, review report or
+  acceptance tests, and it is removed when the feature closes (`log-out --lean`), is superseded
+  or deleted, or goes back to the reviewer path (`set-mode <name> none`). A recorded file a
+  session changed (content or mode), even back to `HEAD`, counts as the feature's change.
+  Deleting the feature's lean state by hand (its `lean/<name>/` folder and its sessions'
+  results next to it) loses that record: a pin afterwards is a first pin again.
 - **Processes outside the sandbox** (gate profile only): mach services are denied but for an
   allowlist (`LEAN_MACH_ALLOW` in `sandbox.sh`, plus `lean.allowed_mach`), which never includes
   LaunchServices (`open`), Apple Events (`osascript`), the pasteboard or cfprefsd's agent (other

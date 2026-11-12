@@ -25,7 +25,8 @@
 # for both modes, or {"normal": <tool>, "risk": <tool>} with each key optional; risk review:
 # default "claude:claude-haiku-5-5", must differ from the implementer; normal review: only
 # when set, else the implementer; any other shape exits 2), risk_questions (default "backend"), acceptance_dir
-# (default "acceptance"), allowed_domains (default none), max_turns ({"implement","review","fix"}:
+# (default "acceptance"), acceptance_command (a string, {paths} placeholder; default verify_command
+# with the paths appended; any other type exits 2), allowed_domains (default none), max_turns ({"implement","review","fix"}:
 # a headless claude session's turn cap, default 120 / 40 / 60; anything but positive integers
 # exits 2). A tool is "claude[:<model>]",
 # "claude-mini", "codex[:<model>]" or "codex-m3" (lean/adapters/<tool>.sh). claude-mini and
@@ -155,6 +156,9 @@ jq -e '.lean.max_turns as $m
   echo "invalid .harness.json::lean.max_turns: use an object with optional keys \"implement\", \"review\", \"fix\", each an integer from 1 to 10000 (got: $(jq -c '.lean.max_turns' .harness.json 2>/dev/null || echo unreadable))" >&2
   exit 2
 }
+# lean.acceptance_command: a string (lean/lib.sh lean_acceptance_command); anything else stops
+# every step here, the chain included, before any session.
+lean_acceptance_valid "$project" || { echo "$LEAN_ACCEPTANCE_INVALID (got: $(jq -c '.lean.acceptance_command' .harness.json 2>/dev/null || echo unreadable))" >&2; exit 2; }
 if [ "$step" = chain ]; then
   # shellcheck source=chain.sh
   . "$LEAN_DIR/chain.sh"
@@ -279,7 +283,12 @@ case "$step" in
     fi
     # Red before green: acceptance tests that already pass check nothing. They run under the
     # sessions' sandbox rules, like the gate (lean/lib.sh lean_sandboxed).
-    verify=$(conf '.verify_command')
+    # lean.acceptance_command when set, else verify_command with the paths appended (lean/lib.sh
+    # lean_acceptance_command), as the gate runs them.
+    acc_paths=()
+    while IFS= read -r f; do [ -z "$f" ] || acc_paths+=("$f"); done <<<"$files"
+    lean_acceptance_command "$project" ${acc_paths[@]+"${acc_paths[@]}"}
+    [ -z "$LEAN_ACCEPTANCE_WARN" ] || log "$LEAN_ACCEPTANCE_WARN"
     lean_sandbox_prepare "$project"
     [ -z "$LEAN_SANDBOX_WARN" ] || printf '%s\n' "$LEAN_SANDBOX_WARN" | while IFS= read -r w; do log "$w"; done
     case "$LEAN_SANDBOX" in
@@ -287,8 +296,7 @@ case "$step" in
       broken:*) echo "${LEAN_SANDBOX#broken: }: the acceptance tests did not run (LEAN_GATE_UNSANDBOXED=1 runs them unsandboxed)" >&2; exit 2 ;;
       session:*) echo "${LEAN_SANDBOX#session: }: the acceptance tests did not run" >&2; exit 2 ;;
     esac
-    # shellcheck disable=SC2086
-    out=$(lean_sandboxed "$project" "$verify $(echo $files)" 2>&1 || true)
+    out=$(lean_sandboxed "$project" "$LEAN_ACCEPTANCE_CMD" 2>&1 || true)
     log "before implementing: $(grep -Eo '^ *[0-9]+ (pass|fail)' <<<"$out" | tr -s ' ' | tr '\n' ' ')"
     ;;
   implement)

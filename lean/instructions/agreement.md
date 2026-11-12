@@ -24,7 +24,8 @@ project runs them when the feature closes.
 
 - **Decisions**: what the request does not say and how it was decided.
 - **Out of scope**: what this feature must not change.
-- **Files**: every file the feature creates or changes, one path per line, tests included.
+- **Files**: every file the feature creates, changes or deletes (a rename: both paths), one path per
+  line, tests included.
 - **Changed tests**: existing test files whose assertions must change because the feature changes
   what they pin, one path per line with the reason; "none" otherwise.
 - **Steps**: the order of the work.
@@ -37,8 +38,8 @@ project runs them when the feature closes.
 - Do not delete or weaken existing tests. When the feature changes what an existing assertion pins,
   update that assertion to the new behavior and list its file under **Changed tests** with the reason.
   Add tests for what the feature changes.
-- Change only the files listed under **Files**. If another one is truly needed, add it to that list
-  with a short reason.
+- Change only the files listed under **Files** (a file you delete or rename, both paths, counts). If
+  another one is truly needed, add it to that list with a short reason.
 - Never delete, rewrite or migrate existing rows in a database by hand (`psql`, scripts, ad hoc
   SQL), even local ones: only the migrations and tests the feature adds may change data. When
   existing data stops a migration or a test, stop and say so in your final message, with the query

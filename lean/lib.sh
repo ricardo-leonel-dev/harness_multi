@@ -5,7 +5,8 @@
 # State: the lean flow keeps each project's pinned state outside the project, in
 # lean_state_dir: frozen/<name>.sha (risk mode's acceptance manifest), lean/<name>/trusted.sha
 # (the hashes of the harness-owned files the flow runs or trusts), lean/<name>/nested.sha (the
-# nested instruction files there before the feature's first run) and run results. The folder is keyed by the project's resolved path,
+# nested instruction files there before the feature's first run), lean/<name>/dirty.sha (the
+# files already changed before it, lean_dirty_manifest) and run results. The folder is keyed by the project's resolved path,
 # never by .harness.json (a session could edit that and point the next step at fresh state).
 
 LEAN_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,18 +81,183 @@ lean_nested_manifest() {
 # only when it isn't there yet (--again: afresh), it records the nested instruction files
 # already in the project in <state>/lean/<name>/nested.sha (lean_nested_manifest): the gate
 # accepts those as they are (an npm package that ships a .claude/ folder), not new or changed
-# ones. Deleting trusted.sha to accept a harness-file change keeps nested.sha.
+# ones. Deleting trusted.sha to accept a harness-file change keeps nested.sha. Once per
+# feature, at its first pin (lean_first_pin: nothing pinned or run for it yet), it also records
+# the files already changed in <state>/lean/<name>/dirty.sha (lean_dirty_manifest), which the
+# gate leaves out while they keep that content. Never again: not with --again (a later claim),
+# not when trusted.sha is deleted to re-pin, so no session's work can be recorded as already
+# there; it goes when the feature's lean lifecycle ends (scripts/harness.sh
+# lean_forget_baseline). A feature pinned before dirty.sha existed never gets one.
 lean_pin() {
-  local project="$1" name="$2" again="${3:-}" dir n
+  local project="$1" name="$2" again="${3:-}" dir n first=0
   dir="$(lean_state_dir "$project")/lean/$name" || return 1
   mkdir -p "$dir" || return 1
   [ "$again" = --again ] || [ ! -f "$dir/trusted.sha" ] || return 0
+  ! lean_first_pin "$project" "$name" || first=1
   lean_trusted_manifest "$project" > "$dir/trusted.tmp" && mv "$dir/trusted.tmp" "$dir/trusted.sha" || return 1
   echo "[lean] pinned the hashes of $(wc -l < "$dir/trusted.sha" | tr -d ' ') harness-owned file(s) in $dir/trusted.sha" >&2
   if [ "$again" = --again ] || [ ! -f "$dir/nested.sha" ]; then
     lean_nested_manifest "$project" > "$dir/nested.tmp" && mv "$dir/nested.tmp" "$dir/nested.sha" || return 1
     n=$(wc -l < "$dir/nested.sha" | tr -d ' ')
     [ "$n" = 0 ] || echo "[lean] recorded $n nested CLAUDE.md / .claude/ file(s) already in the project in $dir/nested.sha (the gate accepts them unchanged)" >&2
+  fi
+  if [ "$first" = 1 ]; then
+    lean_dirty_manifest "$project" "$name" > "$dir/dirty.tmp" && mv "$dir/dirty.tmp" "$dir/dirty.sha" || return 1
+    n=$(wc -l < "$dir/dirty.sha" | tr -d ' ')
+    [ "$n" = 0 ] || echo "[lean] recorded $n file(s) already changed before the feature in $dir/dirty.sha (the gate ignores them while their content stays the same)" >&2
+  fi
+}
+
+# lean_first_pin <project> <name> — true when nothing was pinned or run for the feature yet: its
+# <state>/lean/<name>/ holds nothing (no trusted.sha, nested.sha, dirty.sha, usage.tsv; a
+# leftover *.tmp aside) and no session of it left a result (<state>/lean/<name>.system.md,
+# <name>.<step>.*.json, <name>.review.json). A chain's log folder doesn't count: the chain makes
+# it before its first step pins.
+lean_first_pin() {
+  local runs="$(lean_state_dir "$1")/lean" f
+  [ -z "$(find "$runs/$2" -mindepth 1 -maxdepth 1 ! -name '*.tmp' -print 2>/dev/null | head -1)" ] || return 1
+  for f in "$runs/$2.system.md" "$runs/$2.review.json" "$runs/$2".implement.*.json "$runs/$2".review.*.json "$runs/$2".fix.*.json; do
+    [ ! -e "$f" ] || return 1
+  done
+  return 0
+}
+
+# lean_dirty_hash <path> — what lean_dirty_manifest records for a repository-root path (run from
+# the root): "deleted" when nothing is there, "link:<sha256 of the target text>" for a link,
+# "dir:<HEAD>" for a folder (a submodule), else "<mode>:<sha256>" of the file, the mode as git
+# tracks it (100755 executable, else 100644): a chmod counts as a change.
+lean_dirty_hash() {
+  if [ -L "$1" ]; then printf 'link:%s\n' "$(readlink -- "$1" | shasum -a 256 | cut -d' ' -f1)"
+  elif [ -d "$1" ]; then printf 'dir:%s\n' "$(git -C "$1" rev-parse --verify --quiet HEAD 2>/dev/null || echo none)"
+  elif [ -e "$1" ]; then printf '%s:%s\n' "$([ -x "$1" ] && echo 100755 || echo 100644)" "$(shasum -a 256 -- "$1" | cut -d' ' -f1)"
+  else echo deleted
+  fi
+}
+
+# lean_dirty_manifest <project> <name> — "<lean_dirty_hash>  <path>" for every file of the
+# project's repository already changed against HEAD (modified, staged, deleted, untracked and
+# not ignored: lean_repo_changes, a rename under both its paths) at the feature's first pin,
+# paths from the repository root, sorted. Left out: the harness's progress/ and state/ (the
+# gate excepts them anyway), names holding a newline (the gate fails on those), and the
+# feature's own files, which are its work whenever they were written: its plan
+# (docs/features/<name>.md), its review report (docs/features/<name>.review.md), its acceptance
+# tests (<lean.acceptance_dir>/<name>.*) and the files of its frozen manifest
+# (<state>/frozen/<name>.sha). Git-ignored files, the hidden harness's included, are not listed
+# by git, so they are not here either.
+lean_dirty_manifest() {
+  local frozen
+  frozen="$(lean_state_dir "$1")/frozen/$2.sha" || return 1
+  (
+    cd "$1" || exit 1
+    local top prefix f acc own
+    git rev-parse --git-dir >/dev/null 2>&1 || exit 0
+    top=$(git rev-parse --show-toplevel) || exit 1
+    prefix=$(git rev-parse --show-prefix 2>/dev/null || true)
+    git rev-parse --verify --quiet HEAD >/dev/null 2>&1 || exit 0   # unborn: nothing to compare with
+    acc=$(jq -r '.lean.acceptance_dir // "acceptance"' .harness.json 2>/dev/null || echo acceptance)
+    acc="${acc%/}"
+    # The frozen manifest's paths ("<sha>  <path>", from the project), as written and from the root.
+    own=$( { [ ! -f "$frozen" ] || awk 'NF { sub(/^[^ ]+ [ *]/, ""); print }' "$frozen"; } \
+      | while IFS= read -r f; do [ -z "$f" ] || printf '%s\n%s%s\n' "$f" "$prefix" "$f"; done)
+    lean_repo_changes HEAD | while IFS= read -r f; do
+      case "$f" in
+        "\$'"*) continue ;;
+        "${prefix}progress/"*|"${prefix}state/"*) continue ;;
+        "${prefix}docs/features/$2.md"|"${prefix}docs/features/$2.review.md"|"${prefix}$acc/$2."*) continue ;;
+      esac
+      ! grep -qxF -- "$f" <<<"$own" || continue
+      printf '%s  %s\n' "$(cd "$top" && lean_dirty_hash "$f")" "$f"
+    done | LC_ALL=C sort -k2
+  )
+}
+
+# lean_baseline_split <project> <name> — compares the files recorded in the feature's dirty.sha
+# (lean_pin) with what is there now, from the repository root: "= <path>" when the content is
+# still the recorded one (not this feature's change), "! <path>" when it differs (a change of
+# this feature, even one back to HEAD that git no longer lists). Nothing without dirty.sha (a
+# feature pinned before it existed: every change counts, as before).
+lean_baseline_split() {
+  local file top line h p
+  file="$(lean_state_dir "$1")/lean/$2/dirty.sha" || return 0
+  [ -f "$file" ] || return 0
+  top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    h="${line%%  *}"; p="${line#*  }"
+    if [ "$(cd "$top" && lean_dirty_hash "$p")" = "$h" ]; then printf '= %s\n' "$p"; else printf '! %s\n' "$p"; fi
+  done < "$file"
+}
+
+# lean_feature_changes <project> <name> <base> — lean_repo_changes <base> (run in <project>) as
+# the gate counts them: the dirty.sha files still as they were dropped, the ones changed since
+# added (lean_baseline_split). Sorted, from the repository root.
+lean_feature_changes() {
+  local split
+  split=$(lean_baseline_split "$1" "$2")
+  { (cd "$1" && lean_repo_changes "$3"); sed -n 's/^! //p' <<<"$split"; } | sed '/^$/d' | sort -u \
+    | { grep -vxF -f <(sed -n 's/^= //p' <<<"$split" | sed '/^$/d'; echo $'\x01') || true; }
+}
+
+# LEAN_COMPOUND_WARN — the [WARN] for appending acceptance test paths to a compound
+# verify_command (lean_acceptance_command).
+LEAN_COMPOUND_WARN="[WARN] lean: verify_command is a compound command (&&, ||, ;, |, & or a newline at its top level): the acceptance test paths are appended to its last command only; set .harness.json::lean.acceptance_command (e.g. \"npm test -- {paths}\")"
+
+# lean_is_compound <command> — true when it holds &&, ||, ;, |, a lone & (not a redirection:
+# 2>&1, &>) or a newline outside quotes, backticks, backslash escapes and parentheses ($(...),
+# subshells): the paths appended to it reach its last part only.
+lean_is_compound() {
+  local s="$1" i c n=${#1} q="" depth=0 nx pv
+  for ((i = 0; i < n; i++)); do
+    c="${s:i:1}"
+    if [ "$q" = "'" ]; then [ "$c" != "'" ] || q=""; continue; fi
+    if [ "$c" = '\' ]; then i=$((i + 1)); continue; fi
+    if [ "$q" = '"' ]; then [ "$c" != '"' ] || q=""; continue; fi
+    if [ "$q" = '`' ]; then [ "$c" != '`' ] || q=""; continue; fi
+    case "$c" in
+      "'"|'"'|'`') q="$c" ;;
+      '(') depth=$((depth + 1)) ;;
+      ')') [ "$depth" = 0 ] || depth=$((depth - 1)) ;;
+      ';'|'|'|$'\n') [ "$depth" != 0 ] || return 0 ;;
+      '&')
+        [ "$depth" = 0 ] || continue
+        nx="${s:i+1:1}" pv=""
+        [ "$i" = 0 ] || pv="${s:i-1:1}"
+        [ "$nx" != '&' ] || return 0
+        [ "$nx" = '>' ] || [ "$pv" = '>' ] || [ "$pv" = '<' ] || return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# lean_acceptance_valid <project> — .harness.json::lean.acceptance_command is unset or a string.
+lean_acceptance_valid() {
+  jq -e '(.lean.acceptance_command // null) as $a | $a == null or ($a | type) == "string"' "$1/.harness.json" >/dev/null 2>&1
+}
+LEAN_ACCEPTANCE_INVALID="invalid .harness.json::lean.acceptance_command: use a string, with {paths} where the acceptance test paths go (else they are appended)"
+
+# lean_acceptance_command <project> <path...> — the command that runs the acceptance tests:
+# .harness.json::lean.acceptance_command (non-empty) with each {paths} replaced by the
+# shell-quoted paths, or the paths appended when it has none; unset, verify_command with the
+# paths appended as before, and LEAN_ACCEPTANCE_WARN set to LEAN_COMPOUND_WARN when it is a
+# compound command (lean_is_compound). Run it in the current shell (not $(...)) for the warning.
+lean_acceptance_command() {
+  local project="$1" acc q="" f out="" rest; shift
+  LEAN_ACCEPTANCE_WARN="" LEAN_ACCEPTANCE_CMD=""
+  acc=$(jq -r '.lean.acceptance_command // empty | strings' "$project/.harness.json" 2>/dev/null || true)
+  if [ -z "$acc" ]; then
+    acc=$(jq -r '.verify_command // empty' "$project/.harness.json" 2>/dev/null || true)
+    ! lean_is_compound "$acc" || LEAN_ACCEPTANCE_WARN="$LEAN_COMPOUND_WARN"
+    LEAN_ACCEPTANCE_CMD="$acc $*"
+    return 0
+  fi
+  for f in "$@"; do q="$q $(printf '%q' "$f")"; done
+  q="${q# }"
+  rest="$acc"
+  if [[ "$rest" == *"{paths}"* ]]; then
+    while [[ "$rest" == *"{paths}"* ]]; do out="$out${rest%%"{paths}"*}$q"; rest="${rest#*"{paths}"}"; done
+    LEAN_ACCEPTANCE_CMD="$out$rest"
+  else
+    LEAN_ACCEPTANCE_CMD="$acc $q"
   fi
 }
 
@@ -371,12 +537,12 @@ lean_z_lines() {
 }
 
 # lean_repo_changes <base> — every changed (against <base>) or untracked, non-ignored file of
-# the current directory's repository, from its root (git diff --no-relative), sorted, one per
-# line. lean/gate.sh checks this set; lean/chain.sh lists it in its close line.
+# the current directory's repository, from its root (git diff --no-relative --no-renames: a
+# rename is listed under both its paths), sorted, one per line. lean/gate.sh checks this set; lean/chain.sh lists it in its close line.
 lean_repo_changes() {
   local top
   top=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-  { git diff -z --no-relative --name-only "$1"; git -C "$top" ls-files -z --others --exclude-standard; } \
+  { git diff -z --no-relative --no-renames --name-only "$1"; git -C "$top" ls-files -z --others --exclude-standard; } \
     | lean_z_lines | sed '/^$/d' | sort -u
 }
 
