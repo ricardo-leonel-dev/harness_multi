@@ -462,7 +462,7 @@ fi
 # does not read this file.
 LOCAL_SETTINGS="$TARGET_DIR/.claude/settings.local.json"
 HARNESS_ALLOW='["Bash(./init.sh:*)"'
-for sub in status recall check-blockers claim claim-spec set-plan set-surfaces add-surface append-log tick-tasks test record-init record-review mark-spec-ready log-out; do
+for sub in status recall check-blockers claim claim-spec set-plan set-surfaces add-surface append-log tick-tasks test record-init record-review mark-spec-ready prepare-close log-out; do
   HARNESS_ALLOW="$HARNESS_ALLOW,\"Bash(scripts/harness.sh $sub:*)\""
 done
 HARNESS_ALLOW="$HARNESS_ALLOW]"
