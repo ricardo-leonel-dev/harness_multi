@@ -87,7 +87,12 @@ lib() { (cd "$P" && bash -c '. "$1/lib.sh"; shift; "$@"' _ "$L" "$@"); }
 state() { lib lean_state_dir "$P"; }
 gate() { (cd "$P" && bash "$L/gate.sh" "$P" f "$@") > "$WORK/out" 2>&1; }
 out() { cat "$WORK/out"; }
-conf() { jq "$2" "$1/.harness.json" > "$WORK/h" && mv "$WORK/h" "$1/.harness.json"; }
+# conf <project> <jq filter> — the user's own .harness.json edit, accepted when the feature's
+# harness-owned files are pinned (the gate fails on ones that don't match: lean/run.sh accept-config).
+conf() {
+  jq "$2" "$1/.harness.json" > "$WORK/h" && mv "$WORK/h" "$1/.harness.json" || return 1
+  [ ! -f "$(lib lean_state_dir "$1")/lean/f/trusted.sha" ] || (cd "$1" && bash "$L/run.sh" accept-config f) >/dev/null 2>&1
+}
 
 echo "1. files changed before the feature"
 P="$WORK/p1"; new_project "$P"; dirty "$P"

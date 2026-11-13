@@ -16,6 +16,8 @@
 # repository's .git/info/exclude so they never reach the project's history.
 # .claude/settings.local.json gets allow rules for ./init.sh and the routine
 # harness.sh subcommands (Claude Code only), merged into any existing rules.
+# In-flight lean features are re-pinned for the harness-owned files this install
+# refreshed (lean_repin_after_install below), so a reinstall doesn't stop them.
 
 set -u
 TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -253,6 +255,108 @@ if [ -n "$LINKED" ]; then
   fail "$n harness path(s) are links, install.sh would copy harness files through them into another place: $shown. $hint"
   exit 1
 fi
+
+# In-flight lean features pin the hashes of the harness-owned files (lean/lib.sh lean_pin,
+# <lean state>/lean/<name>/trusted.sha) and every lean step and log-out --lean stop when one
+# changes. A reinstall changes them on purpose: before copying, the trusted files' hashes of this
+# checkout and of the worktrees linked to it are recorded for each project with a pinned feature;
+# after the install, lean_repin_after_install re-pins, for each feature, exactly the files this
+# install changed whose pinned hash still was the one before the install. A file that already
+# differed from its pin (an edit nobody accepted, a session's) stays as pinned: that feature gets
+# one [WARN] line with the accept-config command to run once the change is checked.
+LEAN_PRE_DIR=""
+LEAN_PRE_PROJECTS=""
+# lean_pinned_projects — this checkout and its linked worktrees (harness.sh link-worktree) that
+# have a lean feature with pinned hashes, one per line.
+lean_pinned_projects() {
+  local here wt prefix dir
+  here="$(cd "$TARGET_DIR" && pwd -P)"
+  {
+    printf '%s\n' "$TARGET_DIR"
+    if git -C "$TARGET_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+      prefix="$(git -C "$TARGET_DIR" rev-parse --show-prefix)"
+      git -C "$TARGET_DIR" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | while IFS= read -r wt; do
+        dir="$wt/$prefix"; dir="${dir%/}"
+        [ -d "$dir" ] && [ "$(cd "$dir" && pwd -P)" != "$here" ] || continue
+        [ "$(link_target_dir "$dir/harness.db")" = "$here" ] && printf '%s\n' "$dir"
+      done
+    fi
+  } | while IFS= read -r dir; do
+    ls "$(lean_state_dir "$dir")"/lean/*/trusted.sha >/dev/null 2>&1 && printf '%s\n' "$dir"
+  done
+}
+# lean_merge_pin <pinned> <before> <after> — the pin with each path whose hash changed between
+# <before> and <after> (this install's change) and whose pinned line was the one in <before>
+# (or which neither had) taken from <after> (dropped when <after> has none); sorted by path as
+# lean_trusted_manifest sorts.
+lean_merge_pin() {
+  awk '
+    function path(l) { return substr(l, index(l, "  ") + 2) }
+    FILENAME == ARGV[1] { pin[path($0)] = $0; next }
+    FILENAME == ARGV[2] { pre[path($0)] = $0; all[path($0)] = 1; next }
+    { post[path($0)] = $0; all[path($0)] = 1 }
+    END {
+      for (p in all) if (pre[p] != post[p] && pin[p] == pre[p]) { if (post[p] == "") delete pin[p]; else pin[p] = post[p] }
+      for (p in pin) if (pin[p] != "") print p "\t" pin[p]
+    }' "$1" "$2" "$3" | LC_ALL=C sort -t "$(printf '\t')" -k1,1 | cut -f2-
+}
+if [ -f "$TOOLKIT_DIR/lean/lib.sh" ] && . "$TOOLKIT_DIR/lean/lib.sh" 2>/dev/null; then
+  LEAN_PRE_PROJECTS="$(lean_pinned_projects 2>/dev/null || true)"
+  [ -z "$LEAN_PRE_PROJECTS" ] || LEAN_PRE_DIR="$(mktemp -d 2>/dev/null)" || LEAN_PRE_DIR=""
+  if [ -n "$LEAN_PRE_DIR" ]; then
+    # An exit before the re-pin (a failed step below) leaves the pins as they were; the temp dir goes.
+    trap 'rm -rf "$LEAN_PRE_DIR"' EXIT
+    n=0
+    while IFS= read -r dir; do
+      n=$((n + 1)); lean_trusted_manifest "$dir" > "$LEAN_PRE_DIR/$n.sha" 2>/dev/null || rm -f "$LEAN_PRE_DIR/$n.sha"
+    done <<<"$LEAN_PRE_PROJECTS"
+  fi
+fi
+# lean_repin_after_install — see above. Best effort: a feature it can't handle keeps its pin.
+lean_repin_after_install() {
+  [ -n "$LEAN_PRE_DIR" ] || return 0
+  local n=0 dir pin name post merged changed left inflight copies f line
+  while IFS= read -r dir; do
+    n=$((n + 1))
+    [ -f "$LEAN_PRE_DIR/$n.sha" ] || continue
+    post="$LEAN_PRE_DIR/$n.post"
+    lean_trusted_manifest "$dir" > "$post" 2>/dev/null || continue
+    cmp -s "$LEAN_PRE_DIR/$n.sha" "$post" && continue   # this install changed nothing there
+    for pin in "$(lean_state_dir "$dir")"/lean/*/trusted.sha; do
+      [ -f "$pin" ] || continue
+      name="$(basename "$(dirname "$pin")")"
+      # In flight: its lean lifecycle hasn't ended (harness.sh lean_forget_baseline removes these).
+      # A finished feature is re-pinned too (harmless if it is reopened), without a word.
+      inflight=0
+      [ ! -f "$(dirname "$pin")/plan.lists" ] && [ ! -f "$(dirname "$pin")/dirty.sha" ] || inflight=1
+      merged="$(lean_merge_pin "$pin" "$LEAN_PRE_DIR/$n.sha" "$post")"
+      if [ "$merged" != "$(cat "$pin")" ] && printf '%s\n' "$merged" > "$pin.tmp" && mv "$pin.tmp" "$pin"; then
+        changed="$(diff <(cat "$LEAN_PRE_DIR/$n.sha") "$post" | sed -n 's/^[<>] [0-9a-f]*  //p' | LC_ALL=C sort -u | paste -sd ' ' -)"
+        # The copies kept at the pin follow, only for the files re-pinned here (their line after
+        # the install is now the pinned one): the copy of a file left as pinned (an earlier change
+        # nobody accepted) keeps the pinned content, so that change still shows (lean_config_diff).
+        # (No case statement inside $(...): bash 3.2 can't parse one there.)
+        copies=""
+        for f in $LEAN_PIN_COPIES; do
+          line="$(lean_manifest_line "$post" "$f")"
+          [ "$line" != "$(lean_manifest_line "$LEAN_PRE_DIR/$n.sha" "$f")" ] || continue
+          [ "$line" = "$(lean_manifest_line "$pin" "$f")" ] && copies="$copies $f"
+        done
+        # shellcheck disable=SC2086
+        [ -z "$copies" ] || lean_pin_copies "$dir" "$name" $copies 2>/dev/null || true
+        if [ "$inflight" = 1 ]; then
+          ok "lean feature $name ($dir): re-pinned the harness-owned files this install refreshed"
+          (cd "$dir" && lean_note "$name" "lean: install.sh re-pinned the harness-owned files it refreshed: $changed") || true
+        fi
+      fi
+      if [ "$inflight" = 1 ] && [ "$merged" != "$(cat "$post")" ]; then
+        left="$(lean_trusted_diff "$pin" "$(cat "$post")" | sed 's/^ *//' | paste -sd ' ' -)"
+        warn "lean feature $name: harness-owned files changed before this install still differ from its pin ($left) — check them, then run in $dir: lean/run.sh accept-config $name"
+      fi
+    done
+  done <<<"$LEAN_PRE_PROJECTS"
+  rm -rf "$LEAN_PRE_DIR"
+}
 
 echo "── 1. Copying harness-core files ───────────────────────"
 
@@ -598,6 +702,7 @@ refresh_linked_worktrees() {
   done < <(git -C "$TARGET_DIR" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
 }
 refresh_linked_worktrees
+lean_repin_after_install
 
 echo ""
 ok "install complete. Fill in docs/*.md and CHECKPOINTS.md, then run ./init.sh."

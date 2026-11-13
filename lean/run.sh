@@ -13,6 +13,9 @@
 #   lean/run.sh usage     <name>   the feature's sessions: tool, model, turns, tokens, time, cost
 #   lean/run.sh replan    <name>   the leader accepts a change to the plan's Files / Changed tests
 #                                  (pinned once a session ran; --by <name> when the plan was approved)
+#   lean/run.sh accept-config <name>  the leader accepts their own change to the harness-owned files
+#                                  (.harness.json): shows it, pins their hashes afresh (--by <name>
+#                                  when the plan was approved)
 #
 # Options: --headless (claude -p / codex exec instead of an interactive session; the result JSON is
 # kept under the project's lean state, lean/lib.sh), --base <rev> (gate base; default the
@@ -36,7 +39,7 @@
 set -euo pipefail
 
 LEAN_DIR="$(cd "$(dirname "$0")" && pwd)"
-usage() { sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '3,23p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 step="${1:-}"; name="${2:-}"
 [ -n "$step" ] && [ -n "$name" ] || usage
 shift 2
@@ -133,7 +136,7 @@ if [ "$step" = replan ]; then
   lean_adopt_legacy "$project"
   file=$(lean_plan_file "$project" "$name")
   approved=0
-  { grep -q '^# approved' "$file" 2>/dev/null || [ -f "$(lean_state_dir "$project")/frozen/$name.sha" ]; } && approved=1
+  ! lean_plan_approved "$project" "$name" || approved=1
   if [ -f "$file" ]; then
     drift=$(lean_plan_drift "$project" "$name")
     [ -n "$drift" ] || { echo "[lean] nothing to accept: $doc lists what $file pins"; exit 0; }
@@ -155,6 +158,58 @@ if [ "$step" = replan ]; then
   if [ -f scripts/harness.sh ]; then
     bash scripts/harness.sh append-log "lean replan $name: accepted $(printf '%s' "$drift" | sed 's/^ *//' | paste -sd ';' -)${by:+ (approved by $by)}" >/dev/null 2>&1 || true
   fi
+  exit 0
+fi
+
+# accept-config <name> [--by <name>] — the leader accepts a change they (or the user) made to the
+# harness-owned files (lean/lib.sh LEAN_TRUSTED_PATHS: a .harness.json edit a Leader action asked
+# for): prints what changed since the pin, the paths and, for the files whose copy the pin kept
+# (lean_pin_copies: .harness.json ...), a diff of their content (secret-looking values masked), so
+# the leader sees what is accepted (verify_command now `true`, say). Then pins their hashes afresh
+# in <state>/lean/<name>/trusted.sha and refreshes the copies, nothing else (not nested.sha: nested
+# CLAUDE.md / .claude/ files a session created stay refused; not plan.lists, dirty.sha). The gate
+# then leaves those files out of its **Files** check: their hashes guard them. An approved plan
+# (approve-plan, or a frozen risk-mode manifest: lean_plan_approved) needs --by <the human who
+# approved the change> (not empty, not "user"), as replan does: the config decides what the gate
+# runs. Refused inside a session (sessions can't write those files, nor the lean state). Recorded
+# best effort (lean_note: the session log, else a note on the feature).
+# A change made while a chain ran is a session's, not the leader's: restore it instead.
+if [ "$step" = accept-config ]; then
+  case "$name" in ""|*[!A-Za-z0-9_-]*) echo "feature name must be letters, digits, _ or -" >&2; exit 2 ;; esac
+  by=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --by) [ $# -ge 2 ] || usage; by="$2"; shift 2 ;;
+      *) echo "unknown option: $1" >&2; usage ;;
+    esac
+  done
+  [ -f .harness.json ] || { echo "run lean/run.sh from a project with a .harness.json" >&2; exit 2; }
+  # shellcheck source=lib.sh
+  . "$LEAN_DIR/lib.sh"
+  project="$(pwd)"
+  if lean_in_session "$project"; then
+    echo "inside a lean session: accept-config is the leader's, outside any session (add the change to the plan's Leader actions instead)" >&2; exit 2
+  fi
+  [ -f "docs/features/$name.md" ] || { echo "no feature document: docs/features/$name.md" >&2; exit 2; }
+  lean_adopt_legacy "$project"
+  file="$(lean_state_dir "$project")/lean/$name/trusted.sha"
+  [ -f "$file" ] || { echo "[lean] nothing pinned for $name yet ($file): the first step pins the harness-owned files as they are"; exit 0; }
+  now=$(lean_trusted_manifest "$project")
+  [ "$now" != "$(cat "$file")" ] || { echo "[lean] nothing to accept: the harness-owned files match $file"; exit 0; }
+  changed=$(lean_trusted_diff "$file" "$now")
+  echo "[lean] harness-owned files changed since $name was pinned:"
+  printf '%s\n' "$changed"
+  cdiff=$(lean_config_diff "$project" "$name")
+  [ -z "$cdiff" ] || { echo "[lean] what changed (secret-looking values masked):"; printf '%s\n' "$cdiff"; }
+  if lean_plan_approved "$project" "$name"; then
+    case "$(printf '%s' "$by" | tr '[:upper:]' '[:lower:]')" in
+      ""|user) echo "the plan of $name was approved: a change to the harness-owned files (the config decides what the gate runs) needs the user's approval. Show them the change above; after they approve it, run lean/run.sh accept-config $name --by \"<their name>\"" >&2; exit 1 ;;
+    esac
+  fi
+  printf '%s\n' "$now" > "$file.tmp" && mv "$file.tmp" "$file" || { echo "could not write $file" >&2; exit 2; }
+  lean_pin_copies "$project" "$name" || echo "[WARN] could not refresh the copies kept in $(dirname "$file")/pinned" >&2
+  echo "[lean] accepted: pinned their hashes afresh in $file"
+  lean_note "$name" "lean accept-config $name: $(printf '%s' "$changed" | sed 's/^ *//' | paste -sd ';' - | sed 's/;/; /g')${by:+ (approved by $by)}"
   exit 0
 fi
 
@@ -287,8 +342,12 @@ open_session() {
   else
     "$LEAN_DIR/adapters/$adapter.sh" "$project" interactive "$model" "$system" "$prompt" || rc=$?
     lean_usage_record "$project" "$name" "$step" "$mode_name" "$adapter" "$model" "$((SECONDS - t0))" - || true
-    [ "$rc" = 0 ] || exit "$rc"
   fi
+  # What the session left for the leader (**Leader actions**; log-out --lean refuses while one is open).
+  local open_actions
+  open_actions=$(lean_leader_actions "$doc" "$review_file" | awk -F'\t' -v doc="$doc" '$1 == "open" { print "  - [ ] " $3 ($2 == doc ? "" : "  (in " $2 ")") }')
+  [ -z "$open_actions" ] || log "leader actions open in $doc (do them or relay them to the user, then mark them - [x]; log-out --lean refuses until then):"$'\n'"$open_actions"
+  [ "$rc" = 0 ] || exit "$rc"
 }
 
 # resolve_base — the gate's base: --base, else what log-out --lean checks against

@@ -4,7 +4,8 @@
 #
 # State: the lean flow keeps each project's pinned state outside the project, in
 # lean_state_dir: frozen/<name>.sha (risk mode's acceptance manifest), lean/<name>/trusted.sha
-# (the hashes of the harness-owned files the flow runs or trusts), lean/<name>/nested.sha (the
+# (the hashes of the harness-owned files the flow runs or trusts; lean/<name>/pinned/ keeps a copy
+# of the small config and instruction files among them, lean_pin_copies), lean/<name>/nested.sha (the
 # nested instruction files there before the feature's first run), lean/<name>/dirty.sha (the
 # files already changed before it, lean_dirty_manifest), lean/<name>/plan.lists (the plan's
 # **Files** / **Changed tests**, lean_plan_pin) and run results. The folder is keyed by the project's resolved path,
@@ -78,15 +79,17 @@ lean_nested_manifest() {
 }
 
 # lean_pin <project> <name> [--again] — pins the hashes of the trusted files under
-# <state>/lean/<name>/trusted.sha when they aren't pinned yet (--again: afresh). With them, and
+# <state>/lean/<name>/trusted.sha when they aren't pinned yet (--again: afresh), with a copy of
+# LEAN_PIN_COPIES (.harness.json ...) in <state>/lean/<name>/pinned/ (lean_pin_copies). With them, and
 # only when it isn't there yet (--again: afresh), it records the nested instruction files
 # already in the project in <state>/lean/<name>/nested.sha (lean_nested_manifest): the gate
 # accepts those as they are (an npm package that ships a .claude/ folder), not new or changed
-# ones. Deleting trusted.sha to accept a harness-file change keeps nested.sha. Once per
+# ones. Accepting a harness-file change (lean/run.sh accept-config, which rewrites trusted.sha
+# alone) keeps nested.sha. Once per
 # feature, at its first pin (lean_first_pin: nothing pinned or run for it yet), it also records
 # the files already changed in <state>/lean/<name>/dirty.sha (lean_dirty_manifest), which the
 # gate leaves out while they keep that content. Never again: not with --again (a later claim),
-# not when trusted.sha is deleted to re-pin, so no session's work can be recorded as already
+# not by accept-config or a deleted trusted.sha re-pinned, so no session's work can be recorded as already
 # there; it goes when the feature's lean lifecycle ends (scripts/harness.sh
 # lean_forget_baseline). A feature pinned before dirty.sha existed never gets one.
 # Every call ends with lean_plan_pin (the plan's **Files** / **Changed tests**, plan.lists).
@@ -97,6 +100,7 @@ lean_pin() {
   [ "$again" = --again ] || [ ! -f "$dir/trusted.sha" ] || { lean_plan_pin "$project" "$name"; return; }
   ! lean_first_pin "$project" "$name" || first=1
   lean_trusted_manifest "$project" > "$dir/trusted.tmp" && mv "$dir/trusted.tmp" "$dir/trusted.sha" || return 1
+  lean_pin_copies "$project" "$name" || true
   echo "[lean] pinned the hashes of $(wc -l < "$dir/trusted.sha" | tr -d ' ') harness-owned file(s) in $dir/trusted.sha" >&2
   if [ "$again" = --again ] || [ ! -f "$dir/nested.sha" ]; then
     lean_nested_manifest "$project" > "$dir/nested.tmp" && mv "$dir/nested.tmp" "$dir/nested.sha" || return 1
@@ -221,6 +225,119 @@ lean_plan_drift() {
   [ -f "$file" ] && [ -f "$doc" ] || return 0
   { diff <(grep -v '^#' "$file") <(lean_plan_lists "$doc") || true; } \
     | awk -F'\t' '/^[<>] / { printf "  %s %s: %s\n", (substr($1, 1, 1) == ">" ? "+" : "-"), substr($1, 3), $2 }'
+}
+
+# lean_leader_actions <file>... — the items of each existing file's **Leader actions** section:
+# what a session needs and only the leader or the user can do (harness config, a dependency, a
+# file outside **Files**). One "<open|done><TAB><file><TAB><text>" line per item.
+# The section starts at a `#...` heading, a `**Leader actions**` line or a `- **Leader actions**`
+# bullet (any case). Where it ends depends on how it opened:
+# - at a `#...` heading: only at a heading of the same or a higher level (`##` ends a `##`
+#   section, `###` doesn't). Sub-headings and bold-only lines (`**Risks**`, `**Note**`) inside it
+#   are notes, and every bullet is read as an item, bold-starting ones included
+#   (`- **Acceptance command**: ...`, `- **Steps**: ...`): an item never ends the section;
+# - at a bold line (the bullet-style plan, `- **Leader actions**` with indented items): at any
+#   `#...` heading, or at a `**<title>**` / `- **<title>**` line whose title is exactly another
+#   plan section's (Decisions, Decisions while implementing, Out of scope, Files, Changed tests,
+#   Steps, Risks, Request, Assumptions, Acceptance, Acceptance tests, Acceptance objections),
+#   followed by nothing or a colon. Any other bold-starting bullet is an item
+#   (`- **verify_command**: ...`, `- **Files** needed: x`, `- **Acceptance command**: x`).
+# Inside the section:
+# - items are the top-level bullets (`-`, `*`, `+`, or numbered `1.` / `1)`), at the indent of its
+#   first one; deeper bullets and indented lines belong to the item above them (a detail, a
+#   wrapped line), never items of their own;
+# - `[x]` is done, `[ ]` or no box is open, any other box (`[-]`, `[~]`) is open; "none" / "n/a"
+#   bullets are skipped;
+# - a line that looks like an item but isn't one of those (`-[ ] x`, `[ ] x` without a bullet, a
+#   `•` bullet) is an open item, its text starting "(not read as an item: fix its format)":
+#   fail closed, never dropped;
+# - fenced code (``` / ~~~, three or more) is skipped, here and everywhere else (an example
+#   section in a fence is no section; a `# comment` in a fence ends nothing); a fence closes only
+#   at a line of the same character, at least as long as the one that opened it, and nothing
+#   else (a ```` fence holding a ``` line stays open); CRLF line ends are read as LF.
+# A file without the section prints nothing. Its heading names no other section, so the section
+# never reads as part of **Files** / **Changed tests** (lean_plan_section): checking an item off
+# doesn't move the pinned lists.
+lean_leader_actions() {
+  local f
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    awk -v file="$f" -v bullet='•' '
+      function indent(s,   n, i, c) {
+        n = 0
+        for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); if (c == " ") n++; else if (c == "\t") n += 4; else break }
+        return n
+      }
+      function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+      # run(s, c) — how many times the character c repeats at the start of s.
+      function run(s, c,   n) { n = 0; while (substr(s, n + 1, 1) == c) n++; return n }
+      # bold_title(line) — the lowercased text of a leading **...** (after an optional "- "), else "".
+      function bold_title(l,   t) {
+        t = l; sub(/^- /, "", t)
+        if (t !~ /^\*\*[^*]+\*\*/) return ""
+        t = substr(t, 3); t = substr(t, 1, index(t, "**") - 1)
+        t = tolower(trim(t)); sub(/:$/, "", t)
+        return trim(t)
+      }
+      # other_section(line, title) — the line heads another plan section: exactly a known title,
+      # followed by nothing or a colon (`- **Files**: x` ends a bullet-style section,
+      # `- **Files** needed: x` and `- **Acceptance command**: x` are items).
+      function other_section(l, t,   r) {
+        if (t !~ /^(decisions|decisions while implementing|out of scope|files|changed tests|steps|risks|request|assumptions|acceptance|acceptance tests|acceptance objections)$/) return 0
+        r = l; sub(/^- /, "", r); r = substr(r, 3); r = substr(r, index(r, "**") + 2)
+        return r ~ /^[ \t]*(:|$)/
+      }
+      function emit(st, t) {
+        t = trim(t)
+        if (t == "" || tolower(t) ~ /^(none|n\/a)\.?$/) return
+        print st "\t" file "\t" t
+      }
+      { sub(/\r$/, "") }
+      fence_len {
+        t = $0; sub(/^[ \t]*/, "", t)
+        n = run(t, fence_ch)
+        if (n >= fence_len && substr(t, n + 1) ~ /^[ \t]*$/) fence_len = 0
+        next
+      }
+      /^[ \t]*(```|~~~)/ { t = $0; sub(/^[ \t]*/, "", t); fence_ch = substr(t, 1, 1); fence_len = run(t, fence_ch); next }
+      /^#+[ \t]/ {
+        lvl = run($0, "#")
+        if (in_sec && kind == "heading" && lvl > level) next   # a sub-heading: a note inside the section
+        in_sec = (tolower($0) ~ /^#+[ \t]+leader actions/)
+        if (in_sec) { kind = "heading"; level = lvl; base = -1 }
+        next
+      }
+      /^(- )?\*\*[^*]+\*\*/ {
+        t = bold_title($0)
+        if (in_sec && kind == "heading") {
+          if ($0 !~ /^- /) next   # a bold-only line: a note
+          # a bold-starting bullet: an item, read below
+        } else {
+          if (t ~ /^leader actions/) { in_sec = 1; kind = "bold"; base = -1; next }
+          if (in_sec && other_section($0, t)) { in_sec = 0; next }
+          if (!in_sec) next
+          if ($0 !~ /^- /) next   # a bold sub-heading or note inside the section
+        }
+      }
+      !in_sec { next }
+      /^[ \t]*$/ { next }
+      /^[ \t]*([-*+]|[0-9]+[.)])([ \t]|$)/ {
+        n = indent($0)
+        if (base >= 0 && n > base) next   # a sub-bullet: part of the item above
+        base = n
+        t = $0; sub(/^[ \t]*([-*+]|[0-9]+[.)])[ \t]*/, "", t)
+        if (t ~ /^\[[xX]\]/) { sub(/^\[[xX]\][ \t]*/, "", t); emit("done", t) }
+        else if (t ~ /^\[ \]/) { sub(/^\[ \][ \t]*/, "", t); emit("open", t) }
+        else emit("open", t)   # no box, or another one ([-], [~]): open
+        next
+      }
+      {
+        n = indent($0); t = trim($0)
+        if (base >= 0 && n > base) next   # an indented line: part of the item above
+        if (t ~ /^([-*+]|[0-9]+[.)])?[ \t]*\[[^]]?\]/ || index(t, bullet) == 1)
+          emit("open", "(not read as an item: fix its format) " t)
+      }' "$f"
+  done
 }
 
 # lean_dirty_hash <path> — what lean_dirty_manifest records for a repository-root path (run from
@@ -367,17 +484,141 @@ lean_acceptance_command() {
   fi
 }
 
-# lean_check_trusted <project> <name> — fails, naming the files, when a trusted file changed
-# since lean_pin (no pin: passes).
+# lean_check_trusted <project> <name> — fails, naming the files and showing what changed in the
+# copies kept at the pin (lean_config_diff), when a trusted file changed since lean_pin or the
+# last lean/run.sh accept-config (no pin: passes).
 lean_check_trusted() {
-  local file now
+  local file now cdiff
   file="$(lean_state_dir "$1")/lean/$2/trusted.sha" || return 1
   [ -f "$file" ] || return 0
   now=$(lean_trusted_manifest "$1")
   [ "$now" = "$(cat "$file")" ] && return 0
   echo "harness-owned files changed since feature $2 was pinned ($file):" >&2
-  diff <(cat "$file") <(printf '%s\n' "$now") | sed -n 's/^[<>] [0-9a-f]*  /  /p' | LC_ALL=C sort -u >&2
-  echo "Sessions can't write them. If you changed them yourself (a reinstall, a config edit), delete $file to pin them again." >&2
+  lean_trusted_diff "$file" "$now" >&2
+  cdiff=$(lean_config_diff "$1" "$2")
+  [ -z "$cdiff" ] || printf '  what changed (secret-looking values masked):\n%s\n' "$cdiff" >&2
+  echo "Sessions can't write them. If you or the user changed them on purpose (a .harness.json edit a Leader action asked for), accept them, outside any session, with lean/run.sh accept-config $2." >&2
+  return 1
+}
+
+# Harness-owned text files whose content lean_pin_copies keeps beside trusted.sha, so a change to
+# them can be shown, not only named (lean_config_diff): the config the gate runs
+# (verify_command, lean.acceptance_command ...), init.sh and the instructions every agent reads.
+LEAN_PIN_COPIES=".harness.json init.sh AGENTS.md CLAUDE.md"
+
+# lean_pin_copies <project> <name> [<file>...] — copies LEAN_PIN_COPIES (or only the files named)
+# as they are now into <state>/lean/<name>/pinned/ (a file that isn't there: its copy goes).
+# Called wherever trusted.sha is written. Files over 256 KB are not kept.
+lean_pin_copies() {
+  local project="$1" dir f
+  dir="$(lean_state_dir "$project")/lean/$2/pinned" || return 1
+  shift 2
+  [ $# -gt 0 ] || set -- $LEAN_PIN_COPIES
+  mkdir -p "$dir" || return 1
+  for f in "$@"; do
+    case " $LEAN_PIN_COPIES " in *" $f "*) ;; *) continue ;; esac
+    rm -f "$dir/$f"
+    [ -f "$project/$f" ] || continue
+    [ "$(wc -c < "$project/$f" | tr -d ' ')" -le 262144 ] || continue
+    cp -L "$project/$f" "$dir/$f" 2>/dev/null || true
+  done
+}
+
+# lean_mask <file> — the file with the values of keys that look secret (token, secret, password,
+# key; any case) replaced by "<masked>": JSON through jq (any depth), anything else line by line
+# (`<name>: value`, `<name>=value`). In any string value (and any line) it also masks the password of
+# a URL (`postgres://u:<masked>@host`, also with an empty user: `redis://:<masked>@host`),
+# `NAME=value` where NAME looks secret (`DB_PASSWORD=<masked>`; a quoted value is masked whole,
+# spaces included) and a `Bearer <masked>` token (any case): a verify_command may carry test-only
+# credentials. .harness.json holds no secrets by design; this keeps a mistake out of the terminal
+# and the logs anyway, best effort (a secret under any other shape is shown). No file: nothing.
+lean_mask() {
+  [ -f "$1" ] || return 0
+  jq empty "$1" >/dev/null 2>&1 && jq --indent 2 'walk(
+      if type == "object" then with_entries(if (.key | test("token|secret|password|key"; "i")) then .value = "<masked>" else . end)
+      elif type == "string" then
+        gsub("(?<a>://[^:/@\\s]*:)[^@\\s]+@"; "\(.a)<masked>@")
+        | gsub("(?<a>[A-Za-z0-9_]*(token|secret|password|pass|key)[A-Za-z0-9_]*=)(\"[^\"]*\"|\u0027[^\u0027]*\u0027|[^\\s]+)"; "\(.a)<masked>"; "i")
+        | gsub("(?<a>bearer\\s+)[^\\s\"\u0027]+"; "\(.a)<masked>"; "i")
+      else . end)' "$1" 2>/dev/null && return 0
+  perl -pe 's/([\w.-]*(?:token|secret|password|key)[\w.-]*["\x27]?\s*[:=]\s*)\S.*/$1<masked>/i;
+    s{(://[^:/@\s]*:)[^@\s]+@}{$1<masked>@}g;
+    s/(\w*(?:token|secret|password|pass|key)\w*=)(?:"[^"]*"|\x27[^\x27]*\x27|\S+)/$1<masked>/gi;
+    s/(bearer\s+)[^\s"\x27]+/$1<masked>/gi' "$1"
+}
+
+# lean_manifest_line <manifest> <path> — the "<sha256>  <path>" line of <path> in a manifest
+# (lean_trusted_manifest's format), empty when it has none.
+lean_manifest_line() {
+  [ -f "$1" ] || return 0
+  awk -v p="$2" 'substr($0, index($0, "  ") + 2) == p { print; exit }' "$1"
+}
+
+# lean_config_diff <project> <name> — for each file of LEAN_PIN_COPIES whose hash differs from its
+# line in the pin (trusted.sha): a unified diff (secret-looking values masked, lean_mask) from the
+# copy kept at the pin to the file now, indented four spaces. The copy is used only when its own
+# hash is the pinned one (or neither has the file: it was added); otherwise (pinned by an older
+# version, before copies were kept, or a copy that no longer matches) one line saying the content
+# can't be shown.
+lean_config_diff() {
+  local state dir f old new d pinned nowl copyl
+  state="$(lean_state_dir "$1")" || return 0
+  dir="$state/lean/$2/pinned"
+  for f in $LEAN_PIN_COPIES; do
+    old="$dir/$f"; new="$1/$f"
+    pinned=$(lean_manifest_line "$state/lean/$2/trusted.sha" "$f")
+    nowl=""; [ ! -f "$new" ] || nowl=$(cd "$1" && shasum -a 256 "$f")
+    [ "$nowl" != "$pinned" ] || continue
+    copyl=""; [ ! -f "$old" ] || copyl="$(shasum -a 256 < "$old" | cut -d' ' -f1)  $f"
+    if [ "$copyl" != "$pinned" ]; then
+      printf '    %s: no copy of its pinned content kept (pinned by an older version, or the copy no longer matches the pin): content not shown\n' "$f"
+      continue
+    fi
+    d=$(diff -u --label "pinned/$f" --label "now/$f" <(lean_mask "$old") <(lean_mask "$new") || true)
+    if [ -z "$d" ]; then
+      printf '    %s: only formatting or secret-looking values changed (masked)\n' "$f"
+    else
+      printf '%s\n' "$d" | sed 's/^/    /'
+    fi
+  done
+}
+
+# lean_plan_approved <project> <name> — true when the feature's plan was approved: its pinned lists
+# say so (approve-plan / run.sh freeze, lean_plan_mark_approved) or a risk-mode manifest is frozen.
+lean_plan_approved() {
+  local state
+  state=$(lean_state_dir "$1") || return 1
+  grep -q '^# approved' "$state/lean/$2/plan.lists" 2>/dev/null || [ -f "$state/frozen/$2.sha" ]
+}
+
+# lean_note <name> <entry> — a best-effort line in the harness record (from the project directory):
+# the log of the feature's open session (scripts/harness.sh session-base finds one), else a note on
+# the feature (append-log --feature: no session needed); a [WARN] on stderr when it could not be
+# written. No scripts/harness.sh: nothing.
+lean_note() {
+  [ -f scripts/harness.sh ] || return 0
+  if [ -n "$(bash scripts/harness.sh session-base "$1" 2>/dev/null)" ]; then
+    bash scripts/harness.sh append-log "$2" >/dev/null 2>&1 && return 0
+  fi
+  bash scripts/harness.sh append-log "$2" --feature "$1" >/dev/null 2>&1 && return 0
+  echo "[WARN] could not record in the harness log: $2" >&2
+}
+
+# lean_trusted_diff <pinned file> <manifest> — "  <path>" for each trusted file added, removed
+# or changed between the two, sorted.
+lean_trusted_diff() {
+  { diff <(cat "$1") <(printf '%s\n' "$2") || true; } | sed -n 's/^[<>] [0-9a-f]*  /  /p' | LC_ALL=C sort -u
+}
+
+# lean_trusted_path <path> — true when the project-relative path is one lean_trusted_manifest
+# hashes: under LEAN_TRUSTED_PATHS, not a settings.local.json / .DS_Store / *.pyc (left out of
+# the hashes, so never excused by them).
+lean_trusted_path() {
+  local p
+  case "$1" in */settings.local.json|settings.local.json|*/.DS_Store|.DS_Store|*.pyc) return 1 ;; esac
+  for p in $LEAN_TRUSTED_PATHS; do
+    case "$1" in "$p"|"$p"/*) return 0 ;; esac
+  done
   return 1
 }
 

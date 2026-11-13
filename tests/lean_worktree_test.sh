@@ -602,7 +602,13 @@ if [ "$have_sbx" = 1 ]; then
 fi
 
 echo "8. the gate runs the suite in the sandbox"
-setv() { jq --arg v "$1" '.verify_command = $v' "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"; }
+# setv <command> — the leader sets verify_command and accepts its own harness-config edit (the
+# gate fails on harness-owned files that do not match the feature pin: lean/run.sh accept-config; its plan
+# is approved, so --by).
+setv() {
+  jq --arg v "$1" '.verify_command = $v' "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"
+  (cd "$R3" && bash "$TOOLKIT_DIR/lean/run.sh" accept-config f --by tester) >/dev/null 2>&1 || die "accept-config"
+}
 gate3() { bash "$TOOLKIT_DIR/lean/gate.sh" "$R3" f "$@" 2>&1; }
 printf '# f\n\n**Files**\n- `.harness.json`: the verify_command each case sets\n' > "$R3/docs/features/f.md"; g -C "$R3" add -A && g -C "$R3" commit -qm doc || die "doc"
 # The leader rewrote the plan after sessions ran: it accepts the new lists (lean/lib.sh lean_plan_pin).
@@ -681,7 +687,11 @@ cleanup9; SERVERS=(); rm -r "$R3/run"
 # lean.deny_ports on every address, after the localhost allow, also with allowed_domains; an
 # invalid lean.deny_ports entry fails the build. Behaviour on listeners of the test's own, on
 # loopback only (the real mirror ports are never connected to).
-setj() { jq "$1" "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"; }
+# setj <jq filter> — the leader's own .harness.json edit, accepted as setv does.
+setj() {
+  jq "$1" "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"
+  (cd "$R3" && bash "$TOOLKIT_DIR/lean/run.sh" accept-config f --by tester) >/dev/null 2>&1 || die "accept-config"
+}
 deny_ip() { printf '(deny network-outbound (remote ip "*:%s"))' "$1"; }
 PN=$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$R3" --seatbelt 2>/dev/null) || die "sandbox.sh --seatbelt"
 local_at=$(grep -nxF '(allow network-outbound (remote ip "localhost:*"))' <<<"$PN" | cut -d: -f1)
@@ -747,7 +757,7 @@ fi
 setj 'del(.lean.allowed_domains, .lean.deny_ports)'
 # The gate's environment: no SSH_AUTH_SOCK, no secret-looking variable unless passed through,
 # no global git config; in both sandboxed and unsandboxed runs.
-jq '.lean.env_passthrough = ["KEEP_TOKEN"]' "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"
+setj '.lean.env_passthrough = ["KEEP_TOKEN"]'
 setv '[ -z "${SSH_AUTH_SOCK:-}" ] && [ -z "${FAKE_TOKEN:-}${DB_PASSWORD:-}${DATABASE_URL:-}" ] && [ "$KEEP_TOKEN" = k ] && [ "$GIT_CONFIG_GLOBAL" = /dev/null ] && [ "$PLAIN" = p ]'
 for un in 0 1; do
   out=$(SSH_AUTH_SOCK=/x FAKE_TOKEN=t DB_PASSWORD=p DATABASE_URL=u KEEP_TOKEN=k PLAIN=p LEAN_GATE_UNSANDBOXED=$un gate3) \
@@ -824,13 +834,13 @@ else
   echo "  skip TIOCSTI: it doesn't inject even unsandboxed here"
 fi
 if [ "$have_sbx" = 1 ]; then
-  jq '.lean.allowed_domains = ["registry.npmjs.org"]' "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"
+  setj '.lean.allowed_domains = ["registry.npmjs.org"]'
   out=$(gate3) || die "gate with allowed_domains: $out"
   grep -q '^\[WARN\] lean/sandbox.sh --seatbelt: lean.allowed_domains is set' <<<"$out" || die "gate.sh must show sandbox.sh's [WARN]: $out"
   rm -f "$ST3/lean/f/trusted.sha"   # the .harness.json edits above are the human's: pin again
   out=$( (cd "$R3" && bash "$TOOLKIT_DIR/lean/run.sh" gate f) 2>&1) || die "run.sh gate with allowed_domains: $out"
   grep -q '^\[WARN\] lean/sandbox.sh --seatbelt: lean.allowed_domains is set' <<<"$out" || die "run.sh gate must show sandbox.sh's [WARN]: $out"
-  jq 'del(.lean.allowed_domains)' "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"
+  setj 'del(.lean.allowed_domains)'
   rm -f "$ST3/lean/f/trusted.sha"
   pass "sandbox.sh's [WARN] about allowed_domains reaches the gate's report and run.sh gate"
 fi
@@ -967,12 +977,12 @@ file-ioctl=$d 1"
   fi
   # lean.allowed_mach adds a service; the ones that launch or drive processes stay out.
   grep -qF '"com.apple.cfprefsd.agent"' <<<"$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$R3" --seatbelt 2>/dev/null)" && die "cfprefsd's agent must not be on the mach allowlist"
-  jq '.lean.allowed_mach = ["com.example.toolchain", "com.apple.coreservices.launchservicesd", "com.apple.pasteboard.1", "com.apple.cfprefsd.agent", "com.apple.coreservices.appleevents"]' "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"
+  setj '.lean.allowed_mach = ["com.example.toolchain", "com.apple.coreservices.launchservicesd", "com.apple.pasteboard.1", "com.apple.cfprefsd.agent", "com.apple.coreservices.appleevents"]'
   P10=$(bash "$TOOLKIT_DIR/lean/sandbox.sh" "$R3" --seatbelt 2>"$WORK/m.err")
   grep -qF '(global-name "com.example.toolchain")' <<<"$P10" || die "lean.allowed_mach should be allowed"
   grep -qE 'launchservicesd"|pasteboard\.1"|cfprefsd\.agent"|appleevents"' <<<"$P10" && die "LEAN_MACH_NEVER names must stay denied: $(grep mach-lookup <<<"$P10")"
   grep -q 'mach service com.apple.pasteboard.1 stays denied' "$WORK/m.err" || die "a refused mach service should be named: $(cat "$WORK/m.err")"
-  jq 'del(.lean.allowed_mach)' "$R3/.harness.json" > "$WORK/h.json" && mv "$WORK/h.json" "$R3/.harness.json"
+  setj 'del(.lean.allowed_mach)'
   pass "sandboxed (--seatbelt): mach lookups denied but for LEAN_MACH_ALLOW and Chromium's rendezvous prefix (LaunchServices, lsd, Apple Events, the pasteboard refused), launchctl (help, a link, a copy), signals to outside processes, cfprefsd's agent and terminal writes and ioctls fail; git, python, node and cargo run, writing only in the run's TMPDIR"
 fi
 # The env scrub takes the names from the environment itself (names that aren't shell

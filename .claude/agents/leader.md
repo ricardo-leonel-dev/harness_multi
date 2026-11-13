@@ -246,6 +246,18 @@ gate closes it.
    `log-out --lean --changes … --verification "<gate result>" --closure "<summary>"` — after a chain PASS,
    its `next:` line is that command with only `--closure` to fill in. No `./init.sh` first: the gate it runs
    is the suite run on the code being closed.
+   **Leader actions** first: when the chain (or a step) printed a `leader actions` block — what a session
+   needed and only you or the user can do (a `.harness.json` change, a dependency, a file outside **Files**)
+   — do each item, or relay it to the user and decide with them, and mark it `- [x]` with a short note in
+   the plan (or the review report, for an item marked `(in <file>)`); `log-out --lean` refuses while one is
+   open, and its gate then runs with your change. After editing `.harness.json` (or any harness-owned file)
+   for an item, run `lean/run.sh accept-config <name>`: it shows the change (a diff of `.harness.json`)
+   and pins it (without it every step and `log-out --lean` stop at `harness-owned files changed`); the
+   gate's **Files** check leaves those files out, so no `replan`. An approved plan needs `--by "<name>"`
+   after the user approves the change, as `replan`. Never undo your own accepted change. A chain that
+   fails with `a session changed harness-owned files during this chain` is not your change: restore the
+   file (its diff is printed), never accept it. Re-check an item a session checked off itself.
+   Never report the feature done while one is open.
    This is the one log-out you run: the gate is a script, not your judgment. A refusal means another `fix`
    round, never a workaround; to send the feature down the reviewer path instead, the user decides and
    `set-mode <name> none` must run before any verdict is recorded.

@@ -102,8 +102,8 @@ Not sandboxed: a `claude-mini` or `codex-m3` started by hand, and a suite you st
   by something a session can't edit (the sessions' profile denies reading and writing
   `~/.cache/harness`). `dirty.sha` is written once per feature, at its first pin, when nothing
   was pinned or run for it yet, so before any of its sessions. Nothing rewrites it: not a later
-  `claim` (`--again`), not a re-pin after `trusted.sha` was deleted (after editing
-  `.harness.json`), so no session's work can be recorded as "already there". Unlike
+  `claim` (`--again`), not `lean/run.sh accept-config` (after editing `.harness.json`; it rewrites `trusted.sha`
+  alone), so no session's work can be recorded as "already there". Unlike
   `nested.sha`, which only trusts instruction files, it exempts any file from the **Files**
   check, hence the stricter rule. It never holds the feature's own plan, review report or
   acceptance tests, and it is removed when the feature closes (`log-out --lean`), is superseded
@@ -190,6 +190,32 @@ Not sandboxed: a `claude-mini` or `codex-m3` started by hand, and a suite you st
   sessions too; there is no setting to open one (rename it, or don't run that feature in lean
   mode). Codex sessions can't create files with the glob names (a test writing `server.key` into
   the project fails there, not in the gate); Claude sessions likely can, but can't read them back.
+- **Accepted harness-config changes.** `lean/run.sh accept-config <name>` pins the harness-owned
+  files' hashes afresh after the leader's own edit (refused inside a session, logged); the gate
+  then leaves those files out of its **Files** check. It first prints a diff of the copies kept at
+  the pin (`.harness.json`, `init.sh`, `AGENTS.md`, `CLAUDE.md`, under the feature's lean state;
+  values of keys matching token / secret / password / key masked), so `verify_command` turned
+  `true` is visible, not just the file name. On an approved plan (approve-plan, a frozen risk
+  manifest) it needs `--by <name>`, the user's approval, as `replan`: the config decides what the
+  gate runs, including the frozen acceptance tests. A session can't write them (write-denied)
+  nor run it (the lean state is denied to sessions); one that changed them anyway still fails
+  every step and the gate, and `chain` names it as a session's change made during the chain, with
+  the diff, and says to restore it rather than accept it. Run accept-config only for a change you
+  made or know. `install.sh` re-pins only the files it changed itself and only where the pin still
+  held their pre-install hash, and refreshes the kept copies of those files only; anything else
+  stays flagged, its copy still the pinned content. A copy whose hash isn't the pinned one is
+  never used ("content not shown"). Masking is best effort: besides secret-named keys it masks
+  URL passwords (`postgres://u:<masked>@host`) and `NAME=value` with a secret-looking NAME inside
+  any value, but a `verify_command` may carry a test-only credential in another shape, and the
+  diff then shows it on the terminal (and so in the model's transcript and the gate logs). The
+  harness record (`log-out --lean`'s refusal entry, synced to the mirror) keeps only the paths,
+  never the content diff.
+- **Leader actions are the sessions' word.** The plan's **Leader actions** is plain text sessions
+  write: `log-out --lean` refuses while an item is open, but a session that checks its own item off
+  (`- [x]`) or deletes it isn't stopped by that. `chain` compares the section with its state at
+  chain start and prints any item checked off or open item removed during the chain; steps run by
+  hand only log the items still open. Against mistakes, not a session that hides a request on
+  purpose (it could also never write one).
 - `~/.cargo/config.toml` stays readable (cargo needs it): keep registry tokens in
   `~/.cargo/credentials.toml`, which is denied.
 

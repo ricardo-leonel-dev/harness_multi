@@ -15,12 +15,19 @@
 # changed files. Fix runs at most once. Never logs out: the caller runs
 # `scripts/harness.sh log-out --lean` itself (its own gate run is the suite run it needs).
 #
+# When a step fails and the harness-owned files no longer match their pin (they matched at chain
+# start), a session changed them during the chain: the FAIL reason says so and a block names
+# them, shows the diff of the copies kept at the pin (lean_chain_trusted_block) and says to
+# restore them; accept-config is not the fix (it is for the leader's own change).
+#
 # Output: one line per step (result, duration, turns and cost from the result JSON; no cost for
 # a claude-mini session, whose figure is Claude Code's estimate at Anthropic prices, as in its
 # usage row, nor for codex, which reports none; total: sums the costs shown), the final
 # gate's headings only, where the full logs are, `git status --short`, the feature's usage
 # table (the sessions this chain opened, a sum over them, and how many earlier ones
-# `run.sh usage <name>` shows: lean/lib.sh lean_usage_table), on PASS with
+# `run.sh usage <name>` shows: lean/lib.sh lean_usage_table), a `leader actions` block when
+# the plan's **Leader actions** has open items or a session checked one off or removed an open
+# one during the chain (lean_chain_leader_actions; PASS or FAIL), on PASS with
 # scripts/harness.sh present a `next:` line holding the log-out --lean command to run (its
 # --changes: the files the gate checked, lean/lib.sh lean_feature_changes (files changed
 # before the feature and left as they were are not among them), relative to the
@@ -90,6 +97,45 @@ lean_chain_close_line() {
     "${files:+ --changes$files}" "$1"
 }
 
+# lean_chain_leader_actions <before> — the `leader actions:` block: the open items of the
+# feature's **Leader actions** (lean/lib.sh lean_leader_actions, in the plan and the risk
+# review report), plus what a session did to the section during the chain, compared with
+# <before> (its items at chain start): an item checked off, or an open one removed. Sessions
+# are told to leave items open; this catches one that didn't (a mistake, not an attack: the
+# lean threat model). Nothing when there is nothing to show.
+lean_chain_leader_actions() {
+  local before="$1" now
+  now=$(lean_leader_actions "docs/features/$name.md" "docs/features/$name.review.md" 2>/dev/null || true)
+  printf '%s\n' "$now" | awk -F'\t' -v before="$before" -v doc="docs/features/$name.md" '
+    # where(file) — the source file, named when it is not the plan (a risk review report).
+    function where(f) { return f == doc ? "" : "  (in " f ")" }
+    BEGIN { while ((getline l < before) > 0) { split(l, a, "\t"); k = a[2] "\t" a[3]; was[k] = a[1]; wf[k] = a[2]; wt[k] = a[3] } }
+    NF < 3 { next }
+    { k = $2 "\t" $3; seen[k] = 1 }
+    $1 == "open" { out[++n] = "  - [ ] " $3 where($2) }
+    $1 == "done" && was[k] != "done" { out[++n] = "  - [x] " $3 where($2) "  (checked during this chain by a session: check it yourself)" }
+    END {
+      for (k in was) if (was[k] == "open" && !seen[k]) out[++n] = "  - removed during this chain by a session: " wt[k] where(wf[k])
+      if (!n) exit
+      print "leader actions (" doc "): do each or relay it to the user, then mark it - [x] with a short note; log-out --lean refuses while one is open:"
+      for (i = 1; i <= n; i++) print out[i]
+    }'
+}
+
+# lean_chain_trusted_block <step> — the block printed when the harness-owned files stopped matching
+# their pin during the chain (found when <step> failed): a session wrote them (the sandbox denies
+# it; a gap or a mistake, the lean threat model), so they are restored, not accepted. Names the
+# files and shows the content diff of the copies the pin kept (lean/lib.sh lean_config_diff,
+# secret-looking values masked).
+lean_chain_trusted_block() {
+  local pin="$state/lean/$name/trusted.sha" cdiff
+  echo "harness-owned files changed during this chain (found at $1): a session wrote them, not you (unless you edited them while the chain ran):"
+  lean_trusted_diff "$pin" "$(lean_trusted_manifest "$project")"
+  cdiff=$(lean_config_diff "$project" "$name")
+  [ -z "$cdiff" ] || { echo "  what changed (secret-looking values masked):"; printf '%s\n' "$cdiff"; }
+  echo "  Restore them to their pinned content (git; for a file whose diff is shown above, its copy in $state/lean/$name/pinned/ is that content), then run the chain again. Don't accept a session's change: lean/run.sh accept-config $name is only for a change you made yourself, on purpose, outside a chain."
+}
+
 # lean_chain_mode — "risk", "normal", or a refusal on stderr (exit 1). Risk mode is the frozen
 # manifest, as for every step; with the harness its status also tells a risk feature whose
 # plan is not approved (no manifest yet) and a normal one waiting for approval.
@@ -108,7 +154,7 @@ lean_chain_mode() {
 
 lean_chain() {
   local mode="" secs mins logs cap gate_log="" fixed=0 n=0 total=0 cost_total="" verdict="" last_rc=0
-  local fail_step="" fail_reason="" ran="" usage_before
+  local fail_step="" fail_reason="" ran="" usage_before trusted_changed=""
   usage_before=$(lean_usage_count "$project" "$name" 2>/dev/null || echo 0)
   local -a lines=()
   mins="${step_minutes:-$(jq -r '.lean.step_minutes // 30' .harness.json 2>/dev/null || echo 30)}"
@@ -116,6 +162,8 @@ lean_chain() {
   secs=$(awk -v m="$mins" 'BEGIN { s = int(m * 60); print (s < 1 ? 1 : s) }')
   mkdir -p "$state/lean" && logs=$(mktemp -d "$state/lean/$name.chain.$(date +%Y%m%d%H%M%S).XXXX") \
     || { echo "can't create a log folder in $state/lean" >&2; return 2; }
+  # The **Leader actions** items at chain start (lean_chain_leader_actions compares with them).
+  lean_leader_actions "docs/features/$name.md" "docs/features/$name.review.md" > "$logs/leader-actions.before" 2>/dev/null || true
   local -a pass_args=(--headless)
   [ -z "$base" ] || pass_args+=(--base "$base")
 
@@ -168,6 +216,14 @@ lean_chain() {
               [ -z "$extra" ] || extra=" (before implementing: $extra)" ;;
       gate) gate_log="$log" ;;
     esac
+    # The harness-owned files matched their pin when the chain started (run.sh checked before
+    # sourcing this file; a first pin happens in the first step): a mismatch now is a change made
+    # during the chain, by a session (the leader ran nothing in between). Not a matter for
+    # accept-config: lean_chain_trusted_block says so and shows the change.
+    if [ -n "$fail_reason" ] && [ -z "$trusted_changed" ] && ! lean_check_trusted "$project" "$name" >/dev/null 2>&1; then
+      trusted_changed=$st
+      fail_reason="a session changed harness-owned files during this chain: restore them (see above)"
+    fi
     if [ "$st" = review ] && [ "$mode" = risk ] && [ -z "$fail_reason" ]; then
       verdict=$(jq -r '.verdict // "none"' "$state/lean/$name.review.json" 2>/dev/null || echo none)
       extra=" verdict=$verdict"
@@ -222,6 +278,8 @@ lean_chain() {
   echo "git status:"
   { git status --short 2>/dev/null || true; } | awk 'NR <= 30 { print "  " $0 } END { if (NR > 30) printf "  ... (%d more)\n", NR - 30 }'
   [ "$n" = 0 ] || lean_usage_table "$project" "$name" "$usage_before" 2>/dev/null || true
+  lean_chain_leader_actions "$logs/leader-actions.before"
+  [ -z "$trusted_changed" ] || lean_chain_trusted_block "$trusted_changed"
   if [ -z "$fail_step" ]; then
     note "PASS"
     [ ! -f scripts/harness.sh ] || lean_chain_close_line "$ran"
