@@ -10,7 +10,10 @@
 #   2. no assertion line was removed from a test file that existed at <rev>, unless the
 #      file is listed under **Changed tests** in docs/features/<name>.md;
 #   3. every changed file is listed under **Files** (the plan files, frozen acceptance files
-#      — this feature's and other features' — and the harness's progress/ and state/ excepted);
+#      — this feature's and other features' — and the harness's progress/ and state/ excepted;
+#      so are the harness-owned files, lean/lib.sh LEAN_TRUSTED_PATHS, once their hashes are pinned
+#      for the feature: they must match that pin instead, which lean/run.sh accept-config renews
+#      after the leader's own edit, else the gate fails naming them);
 #      Checks 2 and 3 read **Files** / **Changed tests** as pinned in <lean state>/lean/<name>/plan.lists
 #      (lean/lib.sh lean_plan_pin) once a session of the feature ran, and fail naming any path
 #      the document's lists gained or lost since (sessions can't widen the plan; the leader
@@ -267,6 +270,26 @@ else
   frozen_files=$(printf '%s\n' "${frozen_paths:-}" "$other_frozen")
   changed=$(printf '%s\n' "$changed_rel" \
     | grep -vE "^docs/features/|^progress/|^state/" | { grep -vxF -f <(printf '%s\n' "$frozen_files" | sed '/^$/d') || true; } | sort -u)
+  # Harness-owned files (lean/lib.sh LEAN_TRUSTED_PATHS: .harness.json, lean/, scripts/ ...) are
+  # not the feature's: sessions can't write them and their hashes are pinned (trusted.sha). With
+  # that pin they are left out of this check: a change matching it (pinned at claim, or accepted
+  # by the leader with lean/run.sh accept-config) passes, any other fails just below, never with
+  # "undo the change". Without a pin they count like any other file.
+  if [ -f "$(lean_state_dir "$project")/lean/$name/trusted.sha" ]; then
+    trusted_changed=""
+    while IFS= read -r c; do
+      [ -n "$c" ] && lean_trusted_path "$c" && trusted_changed="$trusted_changed$c"$'\n'
+    done <<<"$changed"
+    if [ -n "$trusted_changed" ]; then
+      changed=$(comm -23 <(printf '%s\n' "$changed" | sed '/^$/d') <(printf '%s' "$trusted_changed" | sort -u))
+    fi
+    if ! trusted_msg=$(lean_check_trusted "$project" "$name" 2>&1); then
+      fail=1
+      echo "HARNESS-OWNED FILES CHANGED SINCE PINNED (sessions can't write them):"
+      printf '%s\n' "$trusted_msg" | sed -n 's/^  /  /p'
+      echo "If you or the user changed them on purpose (a Leader action), accept them, outside any session, with lean/run.sh accept-config $name."
+    fi
+  fi
   outside=$(comm -23 <(printf '%s\n' "$changed" | sed '/^$/d') <(printf '%s\n' "$listed" | sed '/^$/d'))
   if [ -n "$outside" ]; then
     fail=1

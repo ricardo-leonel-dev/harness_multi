@@ -201,10 +201,14 @@
 #                                              file under **Files** (both lists as pinned outside the project once a
 #                                              session ran: lean/run.sh replan accepts a change); risk mode: the
 #                                              acceptance tests match the manifest frozen at approve-plan (refused when the ~/.cache copy was rewritten),
-#                                              and the harness-owned files match the hashes pinned at claim;
+#                                              and the harness-owned files match the hashes pinned at claim (the leader's
+#                                              own edit, such as .harness.json: lean/run.sh accept-config re-pins them;
+#                                              on a mismatch the gate, one of them, isn't run);
 #                                              the suite runs under the sessions' sandbox rules (lean/gate.sh);
 #                                              docs/features/<name>.review.md has a VERDICT line and the reviewer
-#                                              changed no files. A refusal is logged (LEAN: refused) and means "fix";
+#                                              changed no files; refused first (no gate run) while the plan's (or the
+#                                              review report's) **Leader actions** has an open item (- [ ]): do it or
+#                                              decide with the user, mark it - [x] with a note. A refusal is logged (LEAN: refused) and means "fix";
 #                                              a pass records review_status 'lean'; the gate's suite run stands in
 #                                              for ./init.sh (only a failed ./init.sh in the session still refuses)
 #   hold <reason...>                          stop the active session (rejected escalation): it keeps the slot,
@@ -2393,9 +2397,11 @@ quick_gate() {
 # the session base, with the manifest frozen at approve-plan in risk mode, plus
 # the risk-mode review file and the reviewer-changed-files record lean/run.sh
 # writes. Fills LEAN_REASONS (empty = pass) and LEAN_REPORT (the gate's output).
+# LEAN_TRUSTED_IDX / LEAN_TRUSTED_DB: the index in LEAN_REASONS of the harness-owned-files reason
+# and its text for the harness record, without the content diff (lean_check_trusted): only paths.
 lean_gate() {
   local sid="$1" name="$2" mode="$3" gate state frozen_tmp="" base scope
-  LEAN_REASONS=(); LEAN_REPORT=""
+  LEAN_REASONS=(); LEAN_TRUSTED_IDX=-1; LEAN_TRUSTED_DB=""; LEAN_REPORT=""
   gate="$(cd "$SCRIPT_DIR/.." && pwd)/lean/gate.sh"
   if [ ! -f "$gate" ]; then
     LEAN_REASONS+=("the lean gate is missing: $gate (install lean/ next to scripts/)"); return
@@ -2416,9 +2422,16 @@ lean_gate() {
   state="$(lean_state_dir "$(pwd)")"
   # The gate, the harness and their config are what decide this close: they must be the
   # ones pinned at claim (sessions can't write them; this catches a change made anyway).
-  local changed
+  # The gate is one of them: on a mismatch it isn't run (its own check would only repeat this one).
+  local changed trusted_ok=1
   if declare -F lean_check_trusted >/dev/null && ! changed=$(lean_check_trusted "$(pwd)" "$name" 2>&1); then
-    LEAN_REASONS+=("$(printf '%s' "$changed" | tr '\n' ' ' | sed 's/  */ /g')")
+    trusted_ok=0
+    LEAN_TRUSTED_IDX=${#LEAN_REASONS[@]}
+    LEAN_REASONS+=("$changed
+(lean/gate.sh not run: it is one of these files)")
+    # The record keeps the paths (lean_check_trusted prints them before its "what changed" block).
+    LEAN_TRUSTED_DB="$(printf '%s\n' "$changed" | sed -n '1p; /^  what changed/q; /^  [^ ]/p')
+(content not recorded here; lean/gate.sh not run: it is one of these files)"
   fi
   local args=(--base "$base")
   if [ "$mode" = risk ]; then
@@ -2445,7 +2458,9 @@ lean_gate() {
     fi
   fi
   local status=0
-  LEAN_REPORT=$(bash "$gate" "$(pwd)" "$name" "${args[@]}" 2>&1) || status=$?
+  if [ "$trusted_ok" = 1 ]; then
+    LEAN_REPORT=$(bash "$gate" "$(pwd)" "$name" "${args[@]}" 2>&1) || status=$?
+  fi
   [ -z "$frozen_tmp" ] || rm -f "$frozen_tmp"
   [ "$status" = 0 ] || LEAN_REASONS+=("lean/gate.sh failed (exit $status)${scope:+ — note$scope}")
 }
@@ -2506,6 +2521,23 @@ cmd_log_out() {
     fail "log-out --lean refused: a reviewer already requested changes on session $sid — it needs their approval"
     exit 1
   fi
+  # Lean flow: what the sessions left for the leader (the plan's **Leader actions**, and the
+  # risk review report's; lean/lib.sh lean_leader_actions) must be done or decided before the
+  # close, never lost behind a passing gate. Checked first: no gate run is spent on a refusal.
+  if [ "$lean" = 1 ] && declare -F lean_leader_actions >/dev/null; then
+    local open_actions
+    # "<text>" for an item of the plan, "<text>  (in <file>)" for one of the review report.
+    open_actions=$(lean_leader_actions "docs/features/$lname.md" "docs/features/$lname.review.md" \
+      | awk -F'\t' -v doc="docs/features/$lname.md" '$1 == "open" { print $3 ($2 == doc ? "" : "  (in " $2 ")") }')
+    if [ -n "$open_actions" ]; then
+      db_exec "UPDATE session_log SET review_status=NULL, reviewed_by=NULL, reviewed_at=NULL WHERE id=$sid AND review_status='lean';
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] LEAN: refused — leader actions open: $(printf '%s' "$open_actions" | paste -sd ';' - | sed 's/;/; /g')")', '$(now_iso)');"
+      fail "log-out --lean refused — open **Leader actions** in docs/features/$lname.md (an item marked '(in <file>)' is in that file instead), things a session needed and only you or the user can do:"
+      printf '%s\n' "$open_actions" | sed 's/^/  - [ ] /' >&2
+      echo "  Do each one (or relay it to the user and decide with them, or decide it is not needed), then mark it '- [x]' with a short note of what was done, and log out again." >&2
+      exit 1
+    fi
+  fi
   if [ "$lean" = 0 ] && [ "$review_status" = "lean" ]; then
     fail "cannot log out session $sid: its 'lean' pass doesn't apply to feature $lname, which has no lean mode — use the reviewer path"
     exit 1
@@ -2516,7 +2548,12 @@ cmd_log_out() {
   if [ "$lean" = 1 ]; then
     lean_gate "$sid" "$lname" "$lmode"
     if [ "${#LEAN_REASONS[@]}" -gt 0 ]; then
-      local joined; joined=$(printf '%s; ' "${LEAN_REASONS[@]}"); joined="${joined%; }"
+      # The record: the harness-owned-files reason without its content diff (LEAN_TRUSTED_DB).
+      local joined="" i
+      for i in "${!LEAN_REASONS[@]}"; do
+        if [ "$i" = "$LEAN_TRUSTED_IDX" ]; then joined="$joined$LEAN_TRUSTED_DB; "; else joined="$joined${LEAN_REASONS[$i]}; "; fi
+      done
+      joined="${joined%; }"
       # A pass from an earlier --lean run no longer describes this tree.
       db_exec "UPDATE session_log SET review_status=NULL, reviewed_by=NULL, reviewed_at=NULL WHERE id=$sid AND review_status='lean';
 INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] LEAN: refused — $joined${LEAN_REPORT:+

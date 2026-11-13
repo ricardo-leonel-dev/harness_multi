@@ -30,6 +30,22 @@ project runs them when the feature closes.
   what they pin, one path per line with the reason; "none" otherwise.
 - **Steps**: the order of the work.
 - **Risks**: one answer per risk question (the prompt names the question file).
+- **Leader actions** (a `## Leader actions` section, often absent until a session adds it):
+  what only the leader or the user can do, one `- [ ] ...` item per line.
+
+## Leader actions
+
+Anything the feature needs that you can't or must not do yourself goes in the document's
+`## Leader actions` section (add it at the end when it is missing), one `- [ ] <what and why>`
+item per line: a change to harness config (`.harness.json`, such as `verify_command` or
+`lean.acceptance_command` so the new tests run), a dependency to install, environment setup, a
+file outside **Files** you needed, existing data a migration or test stumbled on. Never only in
+prose elsewhere (**Decisions while implementing**, your final message): the leader reads that
+section before closing, and the feature can't close while an item is open. Never check an item
+off (`- [x]`) or remove one, yours or another session's: only the leader does, once it is done.
+Keep the heading exactly `## Leader actions` (no other words in it: a heading or bullet naming
+**Files** reads as that list) and each item one top-level `- [ ]` line, details indented below it;
+code in a fenced block.
 
 ## Implementing
 
@@ -43,11 +59,11 @@ project runs them when the feature closes.
   for what the feature changes.
 - Change only the files listed under **Files** (a file you delete or rename, both paths, counts). If
   another file is truly needed (or an assertion in a test file not under **Changed tests** must
-  change), do not change it: say so in your final message, with the file and why, and finish the
+  change), do not change it: add it to **Leader actions**, with the file and why, and finish the
   rest. The leader decides whether the plan grows.
 - Never delete, rewrite or migrate existing rows in a database by hand (`psql`, scripts, ad hoc
   SQL), even local ones: only the migrations and tests the feature adds may change data. When
-  existing data stops a migration or a test, stop and say so in your final message, with the query
+  existing data stops a migration or a test, stop and add it to **Leader actions**, with the query
   that finds the rows; the user decides.
 - Finish with the feature's own tests passing (the gate runs the full suite). Do not commit or push.
 
@@ -57,8 +73,10 @@ Review only the change: the diff against the base the prompt gives (`git diff <b
 untracked files `git status --short` lists), the files under **Files** and the document itself. Check
 every decision implemented, every answer under **Risks** true in the code, nothing out of scope
 touched, tests covering the change. Fix what is wrong or missing, once, in the files under **Files**,
-then stop. Leave the document as it is: **Files** and **Changed tests** are fixed, so a fix that
-needs another file is not made; say so in your final message, with the file and why.
+then stop. Leave the document as it is, except **Leader actions** (risk mode: in the review
+report instead, never in the document): **Files** and **Changed tests**
+are fixed, so a fix that needs another file is not made; add it to **Leader actions**, with the
+file and why, as anything else only the leader or the user can do.
 
 Keep the review to one pass: read the code yourself (no subagents), and run the feature's own tests
 at most once at the end, not in loops, in the background or as the full suite (the prompt holds the

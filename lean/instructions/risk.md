@@ -15,7 +15,9 @@ a script outside the project holds their hashes and checks them when the feature
 
 ## Reviewing (risk mode)
 
-Report only: change no file except `docs/features/<name>.review.md`. Check the uncommitted changes
+Report only: change no file except `docs/features/<name>.review.md` (what only the leader or the
+user can do goes in its own `## Leader actions` section there, as `- [ ] ...` items, never in the
+feature document). Check the uncommitted changes
 against the document, within the working agreement's review scope plus the risk-question file the
 prompt names. Read the code yourself, in one pass. Write
 each finding as `file:line`, what is wrong, and the document line it contradicts. End the file with
@@ -25,5 +27,5 @@ exactly one line: `VERDICT: approve` or `VERDICT: changes`.
 
 Fix the findings in `docs/features/<name>.review.md` and the failed checks the prompt gives you. The
 acceptance tests stay frozen, and so do **Files** and **Changed tests** (a finding that needs another
-file is answered in your final message, not by widening the plan). Finish with the tests the report names passing (not the full suite:
+file goes under **Leader actions**, not into the plan's lists). Finish with the tests the report names passing (not the full suite:
 the gate runs it). Do not commit or push.

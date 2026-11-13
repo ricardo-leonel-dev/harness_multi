@@ -58,8 +58,8 @@ think of.
    doesn't list them. Changed since (even put back to `HEAD`, or a `chmod`), they count and must
    be under **Files**. The feature's own plan, review report and acceptance tests are never
    recorded: they stay in `next:`'s `--changes`. `dirty.sha` is written once, before the
-   feature's first session, and never again (a later `claim`, or deleting `trusted.sha` to
-   re-pin, leaves it as it is); it goes when the feature closes (`log-out --lean`), is
+   feature's first session, and never again (a later `claim`, or `lean/run.sh accept-config` after
+   a harness-config edit, leaves it as it is); it goes when the feature closes (`log-out --lean`), is
    superseded or deleted, or `set-mode <name> none`. A feature pinned before `dirty.sha` existed
    counts every change, as before.
    **The plan's lists are pinned.** Sessions write the document (they append **Decisions while
@@ -75,6 +75,35 @@ think of.
    `plan.lists` goes with `dirty.sha`. Once a session ran no pin writes it, so a feature whose
    sessions ran without one (an older feature, a `set-mode none` round trip, a reused name)
    fails the gate with `NO PINNED PLAN LISTS` until the leader checks the lists and runs `replan`.
+   **Leader actions.** What a session needs and can't do itself (a `.harness.json` change such as
+   `verify_command` or `lean.acceptance_command` so the new tests run, a dependency, environment
+   setup, a file outside **Files**, existing data a migration stumbled on) goes in the plan's
+   `## Leader actions` section as `- [ ] ...` items (a risk-mode reviewer, which only writes its
+   report, puts its own in a `## Leader actions` section of `docs/features/<name>.review.md`). A
+   bullet without a box counts as open; `none` / `n/a` bullets are skipped. Each session step logs
+   the open ones; `chain` prints them (step 7); `log-out --lean` refuses while one is open, before
+   running the gate, listing them. The leader does each (or settles it with the user) and marks it
+   `- [x]` with a short note; the heading names no other section, so that edit never trips the
+   pinned lists. Only top-level items count (`- [ ]`, `* [ ]`, `1. [ ]`; a sub-bullet or an
+   indented line belongs to the item above it), fenced code is skipped, and a line that looks like
+   an item but can't be read as one (`-[ ] x`, `[ ] x`) counts as open, named as such: an item is
+   never dropped. A `.harness.json` item (or any harness-owned file, below): edit it, then run
+   `lean/run.sh accept-config <name>` (outside any session; refused inside one), which prints the
+   harness-owned files changed since the feature was pinned, a diff of the ones the pin kept a copy
+   of (`.harness.json`, `init.sh`, `AGENTS.md`, `CLAUDE.md`; secret-looking values masked, best effort:
+   a test-only credential in `verify_command` can show, see SECURITY.md), and pins
+   their hashes afresh (logged in the feature's session, else as a note on the feature). An approved
+   plan needs `--by "<name>"` (the user who approved the change; not `user`), as `replan`. Without it
+   every step and `log-out --lean` stop at the changed hashes (log-out says so once, without running
+   the gate, itself one of those files). A chain that finds them changed says a session did it and
+   shows the diff: restore the file; accept-config is only for your own change outside a chain.
+   A reinstall (`install.sh`) re-pins, for each feature, the files it refreshed itself (an [OK] line
+   per in-flight feature); a change from before it stays flagged, with one [WARN] line naming the
+   accept-config command. That includes a `.harness.json` it rewrote for a flag such as
+   `--verify-command`, re-pinned without `--by` even on an approved plan (the human running the
+   install is the authority): reinstall without those flags when no change is meant. Pinned harness-owned
+   files are left out of the gate's **Files** check (their hashes guard them), so the edit needs no
+   `replan`. A feature without the section closes as before.
 
 7. **Chain** (instead of 2–6, when the steps should run unattended): `lean/run.sh chain <name>
    [--base <rev>] [--step-minutes N]` runs them headless in one call, each as its own `run.sh
@@ -86,7 +115,9 @@ think of.
    risk feature has no frozen manifest. Output: one line per step (duration, turns, cost; no cost
    for `claude-mini` or Codex, as in step 8, and `total:` sums only the costs shown), the
    final gate's headings (the full report and every step's log stay under `<lean state>/lean/`),
-   `git status --short`, the usage table of the sessions this chain opened (step 8), then
+   `git status --short`, the usage table of the sessions this chain opened (step 8), a `leader
+   actions` block (the open **Leader actions**, plus any item a session checked off, or open one it
+   removed, during this chain: compared with the section at chain start), then
    `CHAIN: PASS` or `CHAIN: FAIL at <step> (<reason>)`; exit 0 only on PASS. On PASS with the harness, a `next:` line before it holds the `log-out --lean` command to
    run: `--changes` lists the files the gate checked (quoted), only `--closure` is left to fill
    in. Each step is capped at `--step-minutes` (default `lean.step_minutes`, else 30): its
@@ -141,8 +172,9 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
   session runs, which then sees no `.env`.
 - **Writes.** Only in the project and the temp dir; the harness-owned files, the git state and
   `CLAUDE.md` / `.claude/` anywhere are write-denied, and the harness-owned files' hashes are pinned
-  per feature (a changed one stops the next step: delete `<lean state>/lean/<name>/trusted.sha` to
-  accept a change you made yourself). Claude Code's own temp folder is denied, so each session gets
+  per feature, with a copy of `.harness.json` and the top instruction files (a changed one stops
+  the next step: `lean/run.sh accept-config <name>` shows and accepts a change you made yourself,
+  outside any session; `install.sh` re-pins what it refreshed). Claude Code's own temp folder is denied, so each session gets
   a fresh `TMPDIR` in the user temp dir (a SessionStart hook; removed after a headless session).
 - **Network.** Localhost and `lean.allowed_domains`; unix sockets only in the project and the local
   database sockets. The gate's profile denies the harness Postgres mirror's TCP ports (54329,
