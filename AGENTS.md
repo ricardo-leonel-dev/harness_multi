@@ -15,10 +15,13 @@ You **decompose and coordinate**; you never implement directly.
   With `.harness.json::hide_harness: true`, git must not show the harness: persona.md "Hidden harness".
   Voice and tone: `harness/instructions/persona.md` — read it at startup.
 - ❌ **Do not edit** files in `src/` or `tests/` directly (no edit tool, write tool, or shell command).
-- ❌ **Do not run** `scripts/harness.sh log-out` yourself — only the `implementer` does, after the `reviewer`
-  approves, or the `quick_implementer` through `log-out --quick` on a `size=small` feature. Never bypass the
-  reviewer gate. Exception: a feature with a mode closes only through `log-out --lean`, which you run (its
-  gate is a script; leader.md "Lean Features").
+- ❌ **Do not run** the reviewer-path `log-out --changes ... --verification ... --closure ...` yourself, nor
+  `prepare-close`. Two closes are yours: `log-out --prepared` after the `reviewer` approves (nothing else on
+  the line: it closes with the text the implementer stored with `prepare-close` and the reviewer approved),
+  and `log-out --lean` below. Only when `--prepared` refuses with "no prepared close" does a fresh
+  `implementer` run the full `log-out`. The `quick_implementer`
+  closes through `log-out --quick` on a `size=small` feature. Never bypass the reviewer gate. A feature with a
+  mode closes only through `log-out --lean`, which you run (its gate is a script; leader.md "Lean Features").
 - ✅ Delegate every coding task. Claude Code: `Agent` tool with `subagent_type` `implementer` (code and tests for
   **one** feature), then `reviewer`; for an `sdd=1` feature still `pending`, `spec_author` first (§6); for a
   small `sdd=0` feature, `quick_implementer` (leader.md "Small Tasks"); for a task the user wants **without the
@@ -108,9 +111,12 @@ that request and the assumptions made to fill its gaps (`docs/specs.md` "Request
 
 ## 4. Closing
 
-`./init.sh` must pass, the `reviewer` records `record-review approved`, then the `implementer` runs
-`scripts/harness.sh log-out --changes <files...> --verification "<summary>" --closure "<summary>"`, which also
-deletes the feature's `progress/<name>/` (anything worth keeping goes in `--verification`/`--closure`). A
+When it reports ready the `implementer` stores its close with `scripts/harness.sh prepare-close --changes
+<files...> --verification "<summary>" --closure "<summary>"`. `./init.sh` must pass and the `reviewer` records
+`record-review approved`; then you run `scripts/harness.sh log-out --prepared`, which runs every `log-out` check
+on exactly the text the approval covered (refused if it changed after) and deletes the feature's
+`progress/<name>/` (anything worth keeping goes in `--verification`/`--closure`). Every fix round prepares
+again (`changes-requested` clears them). A
 feature with a mode closes instead with `log-out --lean`, whose script gate replaces the reviewer. Work shipped
 without a session, absorbed features, notes outside a session and blockers: `lifecycle.md`.
 

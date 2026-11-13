@@ -418,6 +418,24 @@ Covered by `bash tests/feature_flow_test.sh` and `bash tests/worktree_link_refre
   close with a warning.
 Covered by `bash tests/scope_surfaces_test.sh`.
 
+### Closing without another agent
+
+- When it reports ready, the implementer (or a `quick_implementer` whose change goes to a
+  reviewer) stores its close: `prepare-close --changes ... --verification "..." --closure "..."`,
+  logged as `CLOSE PREPARED by <the session's agent>` with a `close=<hash>` (a different `--agent`
+  is logged next to it, never instead). `status` shows it; the reviewer checks it before approving,
+  and `record-review approved` records its hash. After the approval the leader runs
+  `log-out --prepared`, which takes no other argument, closes with that text byte for byte and makes
+  every `log-out` check (approval, no change after it, surfaces, `./init.sh` green), so no fresh
+  agent spends its whole context on one command.
+- It refuses with nothing prepared, and unless the prepared text is the one the approval covered
+  (approved before anything was prepared, or changed after): prepare again, then a new verdict.
+  Who ran `prepare-close` isn't authenticated; the guarantee is that the reviewer approved the text
+  that closes. `record-review changes-requested` clears it and every fix round prepares again.
+  Change items can't be empty or multi-line; zero items is allowed, as in `log-out`. The explicit
+  `log-out --changes ...` still works and is the fallback.
+Covered by `bash tests/prepared_close_test.sh`.
+
 ## Versioned PostgreSQL mock data
 
 Install with `--profile postgres --postgres-database DB --postgres-schemas '["schema"]'`.

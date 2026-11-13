@@ -63,9 +63,14 @@ A feature with a mode (listed under "lean mode" in `status`) is not yours: don't
 7. Close: `scripts/harness.sh log-out --quick --changes <files...> --verification "<summary>" --closure "<summary>"`.
    If it refuses, it lists why (surfaces, size, files, dependencies, undeclared files, Risk, init). Fix only a genuine
    mistake in your handoff (e.g. a file you forgot to declare); never trim real work or edit `harness.db` to pass
-   the gate. Otherwise reply with the review-needed line.
-8. If the leader calls you again after a reviewer verdict: on approval run the plain `log-out` (without
-   `--quick`); on changes requested address `progress/<name>/review.md`, re-run step 5 and reply review-needed again.
+   the gate. Otherwise store the same arguments for the close after the review, then reply with the
+   review-needed line:
+   `scripts/harness.sh prepare-close --changes <files...> --verification "<summary>" --closure "<summary>"`.
+   After an approval the leader closes it itself with `log-out --prepared`; no agent runs again.
+8. If the leader calls you again after a reviewer verdict: on approval (the prepared close was missing or
+   refused) run the plain `log-out` (without `--quick`); on changes requested or any other fix round address
+   `progress/<name>/review.md`, re-run step 5, always run `prepare-close` again (the next approval covers the
+   text stored then) and reply review-needed again.
 
 ## Untracked mode
 
