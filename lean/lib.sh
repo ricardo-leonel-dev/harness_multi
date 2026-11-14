@@ -740,6 +740,464 @@ lean_env_args() {
   LEAN_ENV_ARGS+=(${set[@]+"${set[@]}"} RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER= GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_GLOBAL=/dev/null)
 }
 
+# Toolchain caches. The sandboxes keep $HOME read-only, so a tool that must write its cache
+# there (Go's build cache, uv, Gradle's user home, Maven's resolver files) fails in a session and
+# in the gate. Each project gets one cache folder of its own outside $HOME, in the per-user cache
+# dir (lean_cache_dir, mode 700), holding two folders: `session/` for the sessions (Claude:
+# allowRead/allowWrite; Codex: a `write` entry) and `gate/` for the gate (lean_sandboxed), so the
+# gate never reads what a session wrote (a cached `go test` result, a cargo build). The cache root
+# (every project's folder) is read- and write-denied in all three sandboxes (lean/sandbox.sh);
+# each re-opens its own folder only. The tools are pointed there through environment variables
+# (lean_toolchain_env). Dependency stores the tools can read without writing (~/.cargo/registry,
+# ~/go/pkg/mod, ~/.gradle/caches, ~/.m2/repository) stay where they are, read-only. Nothing under
+# $HOME becomes writable and no credentials file opens. What the harness writes there itself,
+# outside any sandbox (the folders, the seeds), never goes through a link (lean_cache_prepare,
+# lean_seed) and is never read from a place a session chose (lean_cargo_seed_source).
+
+# lean_cache_base — the per-user cache dir (DARWIN_USER_CACHE_DIR: ours, mode 700, writable by
+# neither session sandbox, read-denied by lean/sandbox.sh; elsewhere $TMPDIR, else /tmp),
+# resolved; LEAN_CACHE_BASE replaces it (tests: a folder of their own, created when missing).
+lean_cache_base() {
+  local b="${LEAN_CACHE_BASE:-}"
+  if [ -n "$b" ]; then [ -d "$b" ] || (umask 077 && mkdir -p "$b") 2>/dev/null || return 1
+  else b=$(getconf DARWIN_USER_CACHE_DIR 2>/dev/null || true); [ -n "$b" ] || b="${TMPDIR:-/tmp}"; fi
+  (cd "$b" 2>/dev/null && pwd -P)
+}
+
+# lean_cache_root — <lean_cache_base>/lean-cache, which holds every project's cache folder.
+lean_cache_root() { local b; b=$(lean_cache_base) || return 1; printf '%s/lean-cache\n' "$b"; }
+
+# lean_cache_dir <project> — <lean_cache_root>/<folder>-<12 hex of the sha256 of its resolved
+# path> (the key of lean_state_dir): the project's cache folder, holding session/ and gate/.
+# <folder> is the checkout's folder name with every character but A-Z a-z 0-9 . _ - made `_`
+# (the hash keeps it unique): the path goes into variables tools split on whitespace
+# (PYTEST_ADDOPTS, MAVEN_ARGS) and into a seatbelt profile, so it holds no space, quote or
+# backslash whatever the project's folder is called.
+lean_cache_dir() {
+  local real root
+  real=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+  root=$(lean_cache_root) || return 1
+  printf '%s/%s-%s\n' "$root" "$(printf '%s' "$(basename "$real")" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')" "$(printf '%s' "$real" | shasum -a 256 | cut -c1-12)"
+}
+
+# lean_word_safe <string> — <string> holds no whitespace, quote or backslash: it can go into a
+# variable a tool splits into words (PYTEST_ADDOPTS, MAVEN_ARGS, JAVA_TOOL_OPTIONS).
+lean_word_safe() { case "$1" in *[[:space:]\"\'\\]*) return 1 ;; esac; }
+
+# lean_cache_mode <project> — .harness.json::lean.cache: "project" (default: lean_cache_dir,
+# kept between runs) or "run" (a folder in the run's own TMPDIR: cold every run, nothing kept).
+# Anything else fails, naming it.
+lean_cache_mode() {
+  local m
+  m=$(jq -r 'if (.lean | type) == "object" and (.lean | has("cache")) then .lean.cache | if type == "string" then . else "\u0001" end else "project" end' "$1/.harness.json" 2>/dev/null || echo project)
+  case "$m" in project|run) printf '%s\n' "$m" ;; *) echo "lean: invalid .harness.json::lean.cache: use \"project\" or \"run\"" >&2; return 1 ;; esac
+}
+
+# lean_owner <path> — the uid owning <path> (the path itself, not a link's target).
+lean_owner() { stat -f %u "$1" 2>/dev/null || stat -c %u "$1" 2>/dev/null; }
+# lean_mode <path> — its permission bits in octal (700).
+lean_mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1" 2>/dev/null; }
+# lean_dev <path> — the device (file system) <path> lies on.
+lean_dev() { stat -f %d "$1" 2>/dev/null || stat -c %d "$1" 2>/dev/null; }
+# lean_apfs <path> — <path> lies on an APFS volume (where cp -c clones instead of copying).
+lean_apfs() {
+  local mp
+  mp=$(df -P "$1" 2>/dev/null | sed -n '2s/^.*%[[:space:]]*//p')
+  [ -n "$mp" ] && mount 2>/dev/null | grep -qF " on $mp (apfs"
+}
+
+# lean_cache_check <dir> [any] — <dir> is a folder (not a link) owned by this uid with mode 700
+# (any mode with `any`: a level inside the gate's or sessions' folder, which their tools create
+# with their own umask); else stderr and return 1. Run on each level of the cache before
+# anything is written in it. The refusal names the command that starts it afresh:
+# `cache-clear --all` when <dir> is the cache root itself (plain cache-clear removes only this
+# checkout's folder, below it).
+lean_cache_check() {
+  local at="$1" fix="lean/run.sh cache-clear"; case "$1" in /*) ;; *) at="$PWD/$1" ;; esac
+  [ "$at" != "$(lean_cache_root 2>/dev/null)" ] || fix="lean/run.sh cache-clear --all"
+  if [ -L "$1" ]; then echo "lean: refusing the cache folder: $at is a link ($fix starts it afresh)" >&2; return 1; fi
+  [ -d "$1" ] || { echo "lean: refusing the cache folder: $at is not a folder ($fix starts it afresh)" >&2; return 1; }
+  [ "$(lean_owner "$1")" = "$(id -u)" ] || { echo "lean: refusing the cache folder: $at is not owned by uid $(id -u)" >&2; return 1; }
+  [ "${2:-}" = any ] || [ "$(lean_mode "$1")" = 700 ] \
+    || { echo "lean: refusing the cache folder: $at is not mode 700 ($fix starts it afresh)" >&2; return 1; }
+}
+# lean_cache_mkdir <dir> [any] — creates <dir> (one level, umask 077, never through a link) when
+# missing, then lean_cache_check.
+lean_cache_mkdir() {
+  [ -e "$1" ] || [ -L "$1" ] || (umask 077 && mkdir "$1") 2>/dev/null || [ -d "$1" ] \
+    || { echo "lean: can't create the cache folder $1" >&2; return 1; }
+  lean_cache_check "$1" ${2:+"$2"}
+}
+
+# lean_cache_prepare <project> <anchor> <dir> [run|repair] — creates <dir> and every level
+# between the folder <anchor> (existing, resolved) and it, one level at a time (lean_cache_mkdir:
+# never through a link, ours, mode 700), outside any sandbox. Refused (stderr, return 1) when a
+# level is a link, isn't ours or isn't mode 700, when the path holds whitespace, a quote or a
+# backslash (it goes into a seatbelt profile, TOML and variables tools split into words), or
+# when <dir> lies under $HOME (as written or resolved; checked before anything is created), in
+# the project, holds the project or, unless `run` (a folder in the run's or session's own
+# TMPDIR, which may itself lie there), lies in Claude Code's temp folder. With `repair` (the
+# sessions' leaf folder, which a session can chmod: it may write the folder's own entry), a
+# leaf that is a real folder of ours with another mode is set back to 700 (from inside it, so
+# never through a link) instead of refused; a link or a foreign owner is still refused.
+lean_cache_prepare() {
+  local project="" anchor="${2%/}" dir="${3%/}" run="${4:-}" home_real ct bad="" rel d p parts=()
+  project=$(cd "$1" && pwd) || return 1
+  case "$dir" in /*) ;; *) echo "lean: the cache folder must be an absolute path: $dir" >&2; return 1 ;; esac
+  lean_word_safe "$dir" || { echo "lean: the cache folder's path holds whitespace, a quote or a backslash: refusing it ($dir)" >&2; return 1; }
+  case "$dir" in "$anchor"/*) ;; *) echo "lean: the cache folder $dir must lie in $anchor" >&2; return 1 ;; esac
+  [ -d "$anchor" ] && [ ! -L "$anchor" ] && [ "$(cd "$anchor" && pwd -P)" = "$anchor" ] \
+    || { echo "lean: refusing the cache folder: $anchor is not a resolved folder" >&2; return 1; }
+  home_real=$(cd "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")
+  ct=""; [ "$run" = run ] || ct=$(cd "${LEAN_CLAUDE_TMP:-/tmp/claude-$(id -u)}" 2>/dev/null && pwd -P || true)
+  # lean_cache_where <path> — why <path> (absolute) can't hold the cache, or nothing.
+  lean_cache_where() {
+    local p
+    case "$1/" in "${HOME%/}"/*|"$home_real"/*) echo "it lies under \$HOME"; return ;; esac
+    [ -z "$ct" ] || case "$1/" in "$ct"/*) echo "it lies in Claude Code's temp folder"; return ;; esac
+    for p in "$project" "$(cd "$project" && pwd -P)"; do
+      case "$1/" in "$p"/*) echo "it lies in the project"; return ;; esac
+      case "$p/" in "$1"/*) echo "it holds the project"; return ;; esac
+    done
+  }
+  bad=$(lean_cache_where "$dir")
+  [ -z "$bad" ] || { echo "lean: refusing the cache folder $dir: $bad" >&2; return 1; }
+  rel="${dir#"$anchor"/}" d="$anchor"
+  IFS=/ read -r -a parts <<<"$rel"
+  for p in ${parts[@]+"${parts[@]}"}; do
+    case "$p" in ''|.|..) echo "lean: the cache folder's path holds an empty, . or .. level: $dir" >&2; return 1 ;; esac
+    d="$d/$p"
+    if [ "$run" = repair ] && [ "$d" = "$dir" ] && [ -d "$d" ] && [ ! -L "$d" ] \
+       && [ "$(lean_owner "$d")" = "$(id -u)" ] && [ "$(lean_mode "$d")" != 700 ]; then
+      # -h (BSD/macOS) sets the entry itself, never a link's target, so it works on a mode
+      # without owner x (600, 000); elsewhere (no -h), from inside the folder, never via a link.
+      chmod -h 700 "$d" 2>/dev/null || (cd "$d" && [ "$(pwd -P)" = "$d" ] && chmod 700 .) 2>/dev/null || true
+    fi
+    lean_cache_mkdir "$d" || return 1
+  done
+  [ "$(cd "$dir" && pwd -P)" = "$dir" ] || { echo "lean: refusing the cache folder $dir: it doesn't resolve to itself" >&2; return 1; }
+}
+
+# lean_cargo_target <project> — "<kind> <folder>": the folder cargo builds the project in, without
+# running cargo (its config can name programs: never run outside the sandbox on files a session
+# writes). <kind>: `env` ($CARGO_TARGET_DIR / $CARGO_BUILD_TARGET_DIR); `config` (the first
+# `target-dir` in .cargo/config(.toml) from the project up to /, $HOME excepted: that one is
+# $CARGO_HOME's); `home` (a target-dir in $CARGO_HOME/config*: the folder is "?"); `workspace`
+# (<root>/target for the nearest folder above holding a Cargo.toml with [workspace], when the
+# project's own has none; the walk stops below $HOME and /); `default` (<project>/target). The
+# folder is "?" when a target-dir can't be read. Only lean_cargo_seed_source decides what may be
+# read from it.
+lean_cargo_target() {
+  local real d f v home_real
+  real=$(cd "$1" && pwd -P) || return 1
+  home_real=$(cd "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")
+  for v in "${CARGO_TARGET_DIR:-}" "${CARGO_BUILD_TARGET_DIR:-}"; do
+    [ -n "$v" ] || continue
+    case "$v" in /*) printf 'env %s\n' "$v" ;; *) printf 'env %s/%s\n' "$real" "$v" ;; esac
+    return 0
+  done
+  d="$real"
+  while :; do
+    if [ "$d" != "${HOME%/}" ] && [ "$d" != "$home_real" ]; then
+      for f in "$d/.cargo/config.toml" "$d/.cargo/config"; do
+        [ -f "$f" ] && grep -qE '^[[:space:]]*target-dir[[:space:]]*=' "$f" || continue
+        v=$(sed -n "s/^[[:space:]]*target-dir[[:space:]]*=[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$f" | head -1)
+        [ -n "$v" ] || { echo 'config ?'; return 0; }
+        case "$v" in /*) printf 'config %s\n' "$v" ;; *) printf 'config %s/%s\n' "${d%/}" "$v" ;; esac
+        return 0
+      done
+    fi
+    [ "$d" != / ] || break
+    d=$(dirname "$d")
+  done
+  for f in "${CARGO_HOME:-$HOME/.cargo}/config.toml" "${CARGO_HOME:-$HOME/.cargo}/config"; do
+    [ -f "$f" ] && grep -qE '^[[:space:]]*target-dir[[:space:]]*=' "$f" && { echo 'home ?'; return 0; }
+  done
+  if ! grep -qE '^[[:space:]]*\[workspace\]' "$real/Cargo.toml" 2>/dev/null; then
+    d=$(dirname "$real")
+    while [ "$d" != / ] && [ "$d" != "${HOME%/}" ] && [ "$d" != "$home_real" ]; do
+      if grep -qE '^[[:space:]]*\[workspace\]' "$d/Cargo.toml" 2>/dev/null; then printf 'workspace %s/target\n' "$d"; return 0; fi
+      d=$(dirname "$d")
+    done
+  fi
+  printf 'default %s/target\n' "$real"
+}
+
+# lean_cargo_seed_source <project> <kind> <folder> [gate] — the folder a cargo target in the
+# cache may be seeded from, or nothing (a cold build). Only one the harness computed itself: the
+# project's own target/ (kind default, or a target-dir naming exactly it) or, for the gate only,
+# the workspace root's (kind workspace: a folder above the project, not $HOME or /, sessions
+# can't write; not for a session, which can't read it and would get every member's artefacts,
+# build scripts' OUT_DIRs included); never a
+# folder named by $CARGO_TARGET_DIR or a target-dir elsewhere (a session can write the project's
+# .cargo/config.toml; a user-wide one holds other projects' artefacts). The folder must be a
+# real folder (no link at its last level) that resolves to itself.
+lean_cargo_seed_source() {
+  local real root t="$3"
+  real=$(cd "$1" && pwd -P) || return 0
+  case "$2" in
+    default|config) root="$real" ;;
+    workspace) [ "${4:-}" = gate ] || return 0; root="${t%/target}" ;;
+    *) return 0 ;;
+  esac
+  [ "$t" = "$root/target" ] || return 0
+  [ -d "$t" ] && [ ! -L "$t" ] && [ "$(cd "$t" 2>/dev/null && pwd -P)" = "$t" ] || return 0
+  printf '%s\n' "$t"
+}
+
+# lean_seed <from> <cache> <relative destination> — <cache>/<destination>, the first time, as an
+# APFS clone of the folder <from> (cp -c -p -R, times kept: about a second for a 1 GB cargo
+# target, no data copied). Nothing (the tool starts cold) unless <from> is a real folder on the
+# same APFS volume as the cache (cp -c falls back to a full copy otherwise) holding no link that
+# leaves it (absolute, or with a `..`). Outside any sandbox, so never through a link: from the
+# resolved <cache>, each level of the destination is created or checked (lean_cache_mkdir) and
+# entered; the clone goes to a fresh mktemp folder there and is renamed into place by rename(2)
+# (perl), which fails rather than follow a link or merge into a folder another setup put there
+# meanwhile. Return 1 (stderr) when a level is a link or not ours.
+lean_seed() {
+  local from="$1" cache="$2" rel="$3" l
+  [ "$(uname -s)" = Darwin ] || return 0
+  [ -d "$from" ] && [ ! -L "$from" ] || return 0
+  [ "$(lean_dev "$from")" = "$(lean_dev "$cache")" ] && lean_apfs "$cache" || return 0
+  while IFS= read -r -d '' l; do
+    case "$(readlink "$l")" in /*|..|../*|*/..|*/../*) echo "lean: not seeding the cache's $rel from $from: it holds a link that leaves it ($l)" >&2; return 0 ;; esac
+  done < <(find "$from" -type l -print0 2>/dev/null)
+  # (No `set -e` here: it has no effect in a function called from an || list.)
+  (
+    cd "$cache" && [ "$(pwd -P)" = "$cache" ] || exit 1
+    leaf=$(basename "$rel") parent=$(dirname "$rel") parts=()
+    if [ "$parent" != . ]; then IFS=/ read -r -a parts <<<"$parent"; fi
+    for p in ${parts[@]+"${parts[@]}"}; do
+      lean_cache_mkdir "$p" any && cd "$p" && [ "$(pwd -P)" = "$PWD" ] || exit 1
+    done
+    if [ -e "$leaf" ] || [ -L "$leaf" ]; then lean_cache_check "$leaf" any; exit; fi
+    t=$(mktemp -d ./.seed.XXXXXX) || exit 1
+    if cp -c -p -R "$from" "$t/x" 2>/dev/null && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$t/x" "$leaf"; then :; fi
+    chmod -R u+w "$t" 2>/dev/null; rm -rf "$t"
+    [ ! -L "$leaf" ] || { echo "lean: refusing the cache folder: $PWD/$leaf is a link" >&2; exit 1; }
+  )
+}
+
+# lean_pytest_cacheprovider_off <project> — the project's pytest config (pytest.ini,
+# pyproject.toml, setup.cfg, tox.ini at its root) or the caller's PYTEST_ADDOPTS turns pytest's
+# cache plugin off (`no:cacheprovider`): `-o cache_dir=` would then be an unknown ini key, a
+# warning that --strict-config or `filterwarnings = error` makes fatal.
+lean_pytest_cacheprovider_off() {
+  local f
+  case "${PYTEST_ADDOPTS:-}" in *no:cacheprovider*) return 0 ;; esac
+  for f in pytest.ini pyproject.toml setup.cfg tox.ini; do
+    [ ! -f "$1/$f" ] || ! grep -q 'no:cacheprovider' "$1/$f" 2>/dev/null || return 0
+  done
+  return 1
+}
+
+# The gate's Gradle init script (lean_gradle_rerun_tests): every test task (AbstractTestTask:
+# JVM `Test` and Kotlin Multiplatform's JS / native test tasks alike; `outputs` is every task's
+# TaskOutputs, so upToDateWhen and cacheIf apply to all of them) runs, never
+# UP-TO-DATE and never from the build cache, whatever a session left in the project's
+# .gradle/ and build/.
+LEAN_GRADLE_RERUN_TESTS='// Written by the lean harness (lean/lib.sh lean_gradle_rerun_tests), in the gate only:
+// a test task never trusts a result a session left in .gradle/ or build/.
+allprojects {
+    tasks.withType(org.gradle.api.tasks.testing.AbstractTestTask).configureEach {
+        outputs.upToDateWhen { false }
+        outputs.cacheIf { false }
+    }
+}'
+
+# lean_gradle_rerun_tests <gate cache> — writes <cache>/gradle/init.d/lean-rerun-tests.gradle
+# (Gradle applies $GRADLE_USER_HOME/init.d/*.gradle on its own), outside the sandbox and never
+# through a link: each level is created or checked (lean_cache_mkdir) and entered, the file is
+# written to a fresh mktemp file there and renamed into place (rename(2) replaces a link at
+# the destination instead of following it). Return 1 (stderr) when a level is a link or not ours.
+lean_gradle_rerun_tests() {
+  (
+    cd "$1" && [ "$(pwd -P)" = "${1%/}" ] || exit 1
+    for p in gradle init.d; do
+      lean_cache_mkdir "$p" any && cd "$p" && [ "$(pwd -P)" = "$PWD" ] || exit 1
+    done
+    t=$(mktemp ./.lean-rerun-tests.XXXXXX) || exit 1
+    if printf '%s\n' "$LEAN_GRADLE_RERUN_TESTS" > "$t" && chmod 600 "$t" \
+       && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$t" lean-rerun-tests.gradle; then exit 0; fi
+    rm -f "$t"; echo "lean: can't write the gate's Gradle init script in $PWD" >&2; exit 1
+  )
+}
+
+# lean_tc_add <name> <value> [keep] — appends NAME=value to LEAN_TOOLCHAIN_ENV; with keep, not
+# when the caller's own value lies in the project (lean_toolchain_env's $project / $real).
+lean_tc_add() {
+  local cur
+  if [ "${3:-}" = keep ] && cur=$(printenv -- "$1"); then
+    case "$cur/" in "$project"/*|"$real"/*) return 0 ;; esac
+  fi
+  LEAN_TOOLCHAIN_ENV+=("$1=$2")
+}
+
+# Names .harness.json::lean.toolchain_env may set (any case): a cache or temp folder of a tool
+# (*_CACHE, *_CACHE_DIR, *_CACHE_DIRECTORY, *_CACHE_FOLDER, *_CACHE_PATH, *_CACHE_ROOT,
+# *_CACHEDIR, *_TMPDIR, *_TMP_DIR, *_TEMP_DIR, plus PYTHONPYCACHEPREFIX and DENO_DIR). Nothing
+# else: no proxy, compiler or wrapper (RUSTC*, CC), tool home (CARGO_HOME), git or option
+# variable (JAVA_TOOL_OPTIONS, NODE_OPTIONS, GOFLAGS). Minus LEAN_TOOLCHAIN_RESERVED: what the
+# harness sets itself (lean_toolchain_env) and LEAN_*.
+LEAN_TOOLCHAIN_NAMES='^([a-z][a-z0-9_]*_(cache|cache_dir|cache_directory|cache_folder|cache_path|cache_root|cachedir|tmpdir|tmp_dir|temp_dir)|pythonpycacheprefix|deno_dir)$'
+LEAN_TOOLCHAIN_RESERVED='^(LEAN_.*|GOCACHE|GOFLAGS|UV_CACHE_DIR|XDG_CACHE_HOME|BUNDLE_USER_HOME|PIP_CACHE_DIR|PYTEST_ADDOPTS|TMPPREFIX|NG_CLI_ANALYTICS|JAVA_TOOL_OPTIONS|GRADLE_USER_HOME|GRADLE_RO_DEP_CACHE|MAVEN_ARGS|CARGO_TARGET_DIR)$'
+
+# lean_toolchain_env <project> <cache> <tmpdir> <gate|session|codex> — sets LEAN_TOOLCHAIN_ENV to
+# NAME=value words that point the toolchains' caches at <cache> (the gate's or the sessions'
+# folder, lean_toolchain_setup) and their temp files at <tmpdir> (the run's or session's own
+# TMPDIR). The same list for the gate (lean_sandboxed), the Claude sessions (claude.sh's
+# SessionStart hook) and the Codex sessions (shell_environment_policy.set), but for the marked
+# lines. Run outside the sandbox: it reads marker files and may seed the cache (lean_seed); it
+# never runs a project tool.
+#   - always (inert when the tool isn't used): LEAN_CACHE=<cache>, GOCACHE, UV_CACHE_DIR,
+#     XDG_CACHE_HOME, BUNDLE_USER_HOME, PIP_CACHE_DIR under <cache>; NG_CLI_ANALYTICS=false;
+#     TMPPREFIX=<tmpdir>/zsh (zsh writes here-documents there, not in $TMPDIR). A value the
+#     caller already set inside the project is kept (not set again);
+#   - gate only: GOFLAGS with -count=1 appended (Go never reuses a cached test result there: it
+#     doesn't key them on a database or other outside state) and PYTEST_ADDOPTS with
+#     `-o cache_dir=<cache>/pytest` (--lf / --sw history of the gate's own, not the project's
+#     .pytest_cache a session wrote; not when the project turns the cache plugin off:
+#     lean_pytest_cacheprovider_off);
+#   - a JVM build file at the project root (pom.xml, build.gradle(.kts), settings.gradle(.kts),
+#     gradlew, *.sbt): JAVA_TOOL_OPTIONS with -Djava.io.tmpdir=<tmpdir> appended (the JVM takes
+#     the user temp dir from the OS, not $TMPDIR; set only then: the JVM echoes it on stderr);
+#   - Gradle: GRADLE_USER_HOME=<cache>/gradle, GRADLE_RO_DEP_CACHE=~/.gradle/caches (read-only,
+#     when present); wrapper/dists seeded from ~/.gradle/wrapper/dists the first time (lean_seed);
+#     in the gate also init.d/lean-rerun-tests.gradle (lean_gradle_rerun_tests: Test tasks always
+#     run, whatever a session left in the project's .gradle/ and build/);
+#   - pom.xml: MAVEN_ARGS with -Dmaven.repo.local=<cache>/m2 and -Dmaven.repo.local.tail=
+#     ~/.m2/repository (read-only, when present; Maven >= 3.9);
+#   (A path that would go into a value tools split into words, PYTEST_ADDOPTS, MAVEN_ARGS,
+#   JAVA_TOOL_OPTIONS, never holds whitespace, a quote or a backslash: the cache path can't
+#   (lean_cache_dir, lean_cache_prepare); the TMPDIR or ~/.m2/repository option is left out.)
+#   - Cargo.toml: CARGO_TARGET_DIR=<cache>/cargo-target when the target folder lies outside the
+#     project (lean_cargo_target: a workspace member, a target-dir) or, with `codex`, always
+#     (Codex's sandbox can't remove or rename folders in the project, which rustc does in
+#     target/). Seeded the first time (lean_seed) only from lean_cargo_seed_source (the
+#     workspace root's target/ for the gate only);
+#   - last, .harness.json::lean.toolchain_env ({NAME: value}, strings): `$LEAN_CACHE` /
+#     `${LEAN_CACHE}` and `$TMPDIR` / `${TMPDIR}` replaced by <cache> / <tmpdir>, nothing else
+#     expanded. Refused (stderr, return 1): not an object of strings, a name that isn't a cache
+#     or temp folder's (LEAN_TOOLCHAIN_NAMES), looks secret (LEAN_SECRET_ENV) or is reserved
+#     (LEAN_TOOLCHAIN_RESERVED); a value holding a newline, another `$` (`$LEAN_CACHEX`
+#     included: write `${LEAN_CACHE}X`), a backtick, `~` or a `..` path segment, or a path
+#     outside <cache>, <tmpdir> and the project: a word starting with /, or the part of a word
+#     from its first / when the word doesn't start like a relative path (`-I/x`, `@/x`).
+lean_toolchain_env() {
+  local project cache="${2%/}" tmp="${3%/}" who="${4:-session}" real f jvm="" gradle="" t kind src ct knob n v w p ok
+  LEAN_TOOLCHAIN_ENV=()
+  project=$(cd "$1" && pwd) && real=$(cd "$1" && pwd -P) || return 1
+  lean_tc_add LEAN_CACHE "$cache"
+  lean_tc_add GOCACHE "$cache/go-build" keep
+  lean_tc_add UV_CACHE_DIR "$cache/uv" keep
+  lean_tc_add XDG_CACHE_HOME "$cache/xdg" keep
+  lean_tc_add BUNDLE_USER_HOME "$cache/bundle" keep
+  lean_tc_add PIP_CACHE_DIR "$cache/pip" keep
+  lean_tc_add NG_CLI_ANALYTICS false
+  lean_tc_add TMPPREFIX "$tmp/zsh"
+  if [ "$who" = gate ]; then
+    lean_tc_add GOFLAGS "${GOFLAGS:+$GOFLAGS }-count=1"
+    lean_pytest_cacheprovider_off "$project" \
+      || lean_tc_add PYTEST_ADDOPTS "${PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }-o cache_dir=$cache/pytest"
+  fi
+  for f in pom.xml build.gradle build.gradle.kts settings.gradle settings.gradle.kts gradlew; do
+    [ -f "$project/$f" ] || continue
+    jvm=1; case "$f" in pom.xml) ;; *) gradle=1 ;; esac
+  done
+  for f in "$project"/*.sbt; do [ ! -f "$f" ] || jvm=1; done
+  if [ -n "$jvm" ] && lean_word_safe "$tmp"; then
+    v="${JAVA_TOOL_OPTIONS:-}"; lean_tc_add JAVA_TOOL_OPTIONS "${v:+$v }-Djava.io.tmpdir=$tmp"
+  fi
+  if [ -n "$gradle" ]; then
+    lean_tc_add GRADLE_USER_HOME "$cache/gradle"
+    [ ! -d "$HOME/.gradle/caches" ] || lean_tc_add GRADLE_RO_DEP_CACHE "$HOME/.gradle/caches"
+    [ ! -d "$HOME/.gradle/wrapper/dists" ] || lean_seed "$HOME/.gradle/wrapper/dists" "$cache" gradle/wrapper/dists || return 1
+    [ "$who" != gate ] || lean_gradle_rerun_tests "$cache" || return 1
+  fi
+  if [ -f "$project/pom.xml" ]; then
+    v="${MAVEN_ARGS:+$MAVEN_ARGS }-Dmaven.repo.local=$cache/m2"
+    [ ! -d "$HOME/.m2/repository" ] || ! lean_word_safe "$HOME" || v="$v -Dmaven.repo.local.tail=$HOME/.m2/repository"
+    lean_tc_add MAVEN_ARGS "$v"
+  fi
+  if [ -f "$project/Cargo.toml" ]; then
+    t=$(lean_cargo_target "$project") || t='config ?'
+    kind="${t%% *}" t="${t#* }" ct=""
+    case "$t/" in "$project"/*|"$real"/*) [ "$who" != codex ] || ct=1 ;; *) ct=1 ;; esac
+    if [ -n "$ct" ]; then
+      src=$(lean_cargo_seed_source "$project" "$kind" "$t" "$who")
+      [ -z "$src" ] || lean_seed "$src" "$cache" cargo-target || return 1
+      lean_tc_add CARGO_TARGET_DIR "$cache/cargo-target"
+    fi
+  fi
+  knob=$(jq -c '.lean.toolchain_env // {}' "$project/.harness.json" 2>/dev/null || echo '{}')
+  if ! jq -e 'type == "object" and all(.[]; type == "string")' <<<"$knob" >/dev/null 2>&1; then
+    echo "lean: invalid .harness.json::lean.toolchain_env: use an object of strings ({\"NAME\": \"value\"})" >&2; return 1
+  fi
+  while IFS= read -r -d '' n && IFS= read -r -d '' v; do
+    if ! printf '%s\n' "$n" | grep -qiE "$LEAN_TOOLCHAIN_NAMES" || printf '%s\n' "$n" | grep -qiE "$LEAN_SECRET_ENV" \
+       || printf '%s\n' "$n" | grep -qE "$LEAN_TOOLCHAIN_RESERVED"; then
+      echo "lean: .harness.json::lean.toolchain_env: $n can't be set there (only a tool's cache or temp folder: *_CACHE, *_CACHE_DIR, *_TMPDIR, ...; not one the harness sets)" >&2; return 1
+    fi
+    case "$v" in *'$LEAN_CACHE'[A-Za-z0-9_]*|*'$TMPDIR'[A-Za-z0-9_]*)
+      echo "lean: .harness.json::lean.toolchain_env.$n: a name character follows \$LEAN_CACHE or \$TMPDIR: write \${LEAN_CACHE} / \${TMPDIR}" >&2; return 1 ;;
+    esac
+    v="${v//\$\{LEAN_CACHE\}/$cache}"; v="${v//\$LEAN_CACHE/$cache}"
+    v="${v//\$\{TMPDIR\}/$tmp}"; v="${v//\$TMPDIR/$tmp}"
+    case "$v" in *'$'*|*'`'*|*'~'*|*$'\n'*)
+      echo "lean: .harness.json::lean.toolchain_env.$n: only \$LEAN_CACHE and \$TMPDIR are expanded; no other \$, backtick, ~ or newline" >&2; return 1 ;;
+    esac
+    while IFS= read -r w; do
+      [ -n "$w" ] || continue
+      case "/$w/" in */../*) echo "lean: .harness.json::lean.toolchain_env.$n: no .. in a path ($w)" >&2; return 1 ;; esac
+      case "$w" in
+        /*) p="$w" ;;
+        [A-Za-z0-9_.]*) continue ;;
+        */*) p="/${w#*/}" ;;
+        *) continue ;;
+      esac
+      ok=""
+      for f in "$cache" "$tmp" "$project" "$real"; do case "$p/" in "$f"/*) ok=1 ;; esac; done
+      [ -n "$ok" ] || { echo "lean: .harness.json::lean.toolchain_env.$n: $p lies outside the cache, \$TMPDIR and the project" >&2; return 1; }
+    done < <(printf '%s\n' "$v" | tr ' \t=:,;"'\''' '\n\n\n\n\n\n\n\n')
+    LEAN_TOOLCHAIN_ENV+=("$n=$v")
+  done < <(jq -j 'to_entries[] | .key, "\u0000", .value, "\u0000"' <<<"$knob")
+}
+
+# lean_toolchain_setup <project> <tmpdir> <gate|session|codex> — the cache folder for a run or
+# session, in LEAN_CACHE_PATH (resolved), and LEAN_TOOLCHAIN_ENV for it (lean_toolchain_env).
+# lean.cache "project" (lean_cache_mode): <lean_cache_dir>/gate for the gate, /session for the
+# sessions (codex: a Codex session); "run": <tmpdir>/lean-cache (the run's or session's own,
+# fresh TMPDIR). Created and checked by lean_cache_prepare. Return 1 (stderr says why) on an
+# invalid lean.cache / lean.toolchain_env or a refused folder: callers fail closed.
+lean_toolchain_setup() {
+  local mode project who="${3:-session}" tmp base dir fix
+  LEAN_CACHE_PATH="" LEAN_TOOLCHAIN_ENV=()
+  case "$who" in gate|session|codex) ;; *) echo "lean: lean_toolchain_setup: the third argument must be gate, session or codex" >&2; return 1 ;; esac
+  project=$(cd "$1" && pwd) || return 1
+  mode=$(lean_cache_mode "$project") || return 1
+  if [ "$mode" = run ]; then
+    tmp=$(cd "$2" 2>/dev/null && pwd -P) || { echo "lean: no TMPDIR for the cache: $2" >&2; return 1; }
+    lean_cache_prepare "$project" "$tmp" "$tmp/lean-cache" run || return 1
+    LEAN_CACHE_PATH="$tmp/lean-cache"
+  else
+    base=$(lean_cache_base) && dir=$(lean_cache_dir "$project") || { echo "lean: can't name the cache folder for $project" >&2; return 1; }
+    # The sessions' leaf folder is repaired when a session changed its mode (lean_cache_prepare).
+    if [ "$who" = gate ]; then dir="$dir/gate" fix=""; else dir="$dir/session" fix=repair; fi
+    lean_cache_prepare "$project" "$base" "$dir" $fix || return 1
+    LEAN_CACHE_PATH="$dir"
+  fi
+  lean_toolchain_env "$project" "$LEAN_CACHE_PATH" "$2" "$who"
+}
+
+# lean_cache_rules <cache> — the seatbelt rules that open the gate's own cache folder after
+# lean/sandbox.sh denied the cache root: read and write in it, and the metadata of each folder
+# above it (realpath(3) and Java's canonical paths lstat every level).
+lean_cache_rules() {
+  local d="$1" lits=""
+  while [ "$d" != / ] && [ -n "$d" ]; do d=$(dirname "$d"); lits="$lits (literal \"$d\")"; done
+  printf '(allow file-read-metadata%s)\n(allow file-read* file-write* (subpath "%s"))\n' "$lits" "$1"
+}
+
 # lean_in_group <command...> — runs the command in a new session (setsid: its own process
 # group, and no controlling terminal, so it can't push input into the caller's terminal with
 # TIOCSTI or stop the caller's job), with stdin from /dev/null and no file descriptor above 2
@@ -863,13 +1321,26 @@ lean_sandboxed() {
       if ! run_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lean-run.XXXXXX") || ! run_tmp=$(cd "$run_tmp" && pwd -P); then
         lean_run_unlock "$1"; return 125
       fi
-      (cd "$1" && lean_in_group env "${LEAN_ENV_ARGS[@]}" TMPDIR="$run_tmp/" sandbox-exec -p "$LEAN_PROFILE
+      # The toolchain caches (lean_toolchain_setup): the gate's own cache folder, re-opened
+      # after sandbox.sh denied the cache root (lean_cache_rules).
+      if ! lean_toolchain_setup "$1" "$run_tmp" gate; then
+        chmod -R u+w "$run_tmp" 2>/dev/null; rm -rf "$run_tmp"; lean_run_unlock "$1"; return 125
+      fi
+      (cd "$1" && lean_in_group env "${LEAN_ENV_ARGS[@]}" TMPDIR="$run_tmp/" ${LEAN_TOOLCHAIN_ENV[@]+"${LEAN_TOOLCHAIN_ENV[@]}"} sandbox-exec -p "$LEAN_PROFILE
 (allow file-write* (subpath \"$run_tmp\"))
+$(lean_cache_rules "$LEAN_CACHE_PATH")
 (allow network-outbound (remote unix-socket (subpath \"$run_tmp\")))" bash -c "$2") || rc=$?
-      rm -rf "$run_tmp"
+      chmod -R u+w "$run_tmp" 2>/dev/null; rm -rf "$run_tmp"
       lean_run_unlock "$1"
       return "$rc" ;;
-    unsandboxed:*) (cd "$1" && lean_in_group env "${LEAN_ENV_ARGS[@]}" bash -c "$2") ;;
+    unsandboxed:*)
+      # A fresh folder of the run's own for the toolchain variables' temp files (TMPPREFIX, the
+      # JVM's) and lean.cache "run"'s cache, removed after; TMPDIR itself is left as it is.
+      run_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lean-run.XXXXXX") && run_tmp=$(cd "$run_tmp" && pwd -P) || return 125
+      if ! lean_toolchain_setup "$1" "$run_tmp" gate; then chmod -R u+w "$run_tmp" 2>/dev/null; rm -rf "$run_tmp"; return 125; fi
+      (cd "$1" && lean_in_group env "${LEAN_ENV_ARGS[@]}" ${LEAN_TOOLCHAIN_ENV[@]+"${LEAN_TOOLCHAIN_ENV[@]}"} bash -c "$2") || rc=$?
+      chmod -R u+w "$run_tmp" 2>/dev/null; rm -rf "$run_tmp"
+      return "$rc" ;;
     *) echo "lean: ${LEAN_SANDBOX:-lean_sandbox_prepare did not run}" >&2; return 125 ;;
   esac
 }

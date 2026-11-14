@@ -94,7 +94,7 @@ REAL_HOME="$HOME"
 PATH=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vF "$REAL_HOME/" | paste -sd: -)
 # Database sockets are looked for in a folder of the test's own (LEAN_DB_SOCK_DIR) instead of
 # the real /private/tmp, where nothing is bound.
-export HOME="$WORK/home" LEAN_CLAUDE_TMP="$WORK/no-claude-tmp" LEAN_DB_SOCK_DIR="$WORK/dbs"
+export HOME="$WORK/home" LEAN_CACHE_BASE="$WORK/cache-base" LEAN_CLAUDE_TMP="$WORK/no-claude-tmp" LEAN_DB_SOCK_DIR="$WORK/dbs"
 mkdir -p "$LEAN_DB_SOCK_DIR"
 DEV="$HOME/Documents/Dev"
 MAIN="$DEV/mono"; WT="$DEV/mono-wt"; P="$WT/backend"

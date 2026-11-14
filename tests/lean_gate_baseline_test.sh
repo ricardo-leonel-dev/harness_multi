@@ -38,7 +38,7 @@ die() { echo "  FAIL $1" >&2; exit 1; }
 g() { git -c user.email=t@t -c user.name=t -c commit.gpgsign=false "$@"; }
 
 mkdir -p "$WORK/home"
-export HOME="$WORK/home" LEAN_GATE_UNSANDBOXED=1 GIT_CONFIG_GLOBAL=/dev/null
+export HOME="$WORK/home" LEAN_CACHE_BASE="$WORK/cache-base" LEAN_GATE_UNSANDBOXED=1 GIT_CONFIG_GLOBAL=/dev/null
 export LEAN_CLAUDE_TMP="$WORK/no-claude-tmp"
 L="$WORK/lean"; cp -R "$TOOLKIT_DIR/lean" "$L"
 export CALLS="$WORK/calls" SCN="$WORK/scn"

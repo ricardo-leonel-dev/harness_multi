@@ -176,6 +176,54 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
   the next step: `lean/run.sh accept-config <name>` shows and accepts a change you made yourself,
   outside any session; `install.sh` re-pins what it refreshed). Claude Code's own temp folder is denied, so each session gets
   a fresh `TMPDIR` in the user temp dir (a SessionStart hook; removed after a headless session).
+- **Toolchain caches.** `$HOME` stays read-only, so each project gets one cache folder outside it
+  (`<user cache dir>/lean-cache/<folder>-<hash of the checkout's resolved path>`, mode 700; in
+  `<folder>` every character but letters, digits, `.`, `_` and `-` becomes `_`, so a project
+  folder named with spaces or quotes still gives values tools can split into words) holding
+  two folders: `session/`, which the sessions read and write, and `gate/`, which only the gate
+  does, so the gate never builds on or trusts what a session left there. Every sandbox denies the
+  rest of `lean-cache/` (other projects' folders, and the other half of this one's). The tools are
+  pointed there (`lean/lib.sh` `lean_toolchain_env`): always
+  `GOCACHE`, `UV_CACHE_DIR`, `XDG_CACHE_HOME`, `BUNDLE_USER_HOME`, `PIP_CACHE_DIR` (a value of yours
+  inside the project is kept), `NG_CLI_ANALYTICS=false`, `TMPPREFIX=$TMPDIR/zsh` (zsh's
+  here-documents) and `LEAN_CACHE` (the folder); in the gate also `GOFLAGS=... -count=1` (Go never
+  reuses a cached test result there) and `PYTEST_ADDOPTS=... -o cache_dir=<gate folder>/pytest`
+  (`--lf` / `--sw` never read a `.pytest_cache` a session wrote; left out when the project's
+  `pytest.ini`, `pyproject.toml`, `setup.cfg`, `tox.ini` or your `PYTEST_ADDOPTS` holds
+  `no:cacheprovider`, where `cache_dir` would be an unknown key); with a JVM build file at the
+  project root `JAVA_TOOL_OPTIONS=... -Djava.io.tmpdir=$TMPDIR` (the JVM ignores `$TMPDIR`); Gradle:
+  `GRADLE_USER_HOME` there, `GRADLE_RO_DEP_CACHE=~/.gradle/caches` (read-only), the wrapper
+  distributions cloned once, and in the gate an init script
+  (`<gate folder>/gradle/init.d/lean-rerun-tests.gradle`) that makes every test task (`AbstractTestTask`: JVM `Test`, Kotlin Multiplatform's JS and native
+  tests) run: never
+  `UP-TO-DATE` from a session's `.gradle/` / `build/`, never from the build cache; `pom.xml`: `MAVEN_ARGS` with `-Dmaven.repo.local=<cache>/m2
+  -Dmaven.repo.local.tail=~/.m2/repository` (Maven 3.9+); `Cargo.toml`: `CARGO_TARGET_DIR` in the
+  cache when the target folder lies outside the project (a workspace member, a `target-dir`), and
+  always in Codex sessions (they can't remove folders in the project). The gate builds in the
+  project's own `target/` otherwise. A redirected target is seeded once by an APFS clone (no
+  recompilation, no data copied) only from the project's own `target/` or, for the gate only, its
+  workspace root's (above the project, not `$HOME`; a session's folder is never seeded from it:
+  it holds every member's artefacts), and only when it is a real folder on the cache's volume
+  holding no link that leaves it: never from a `target-dir` or `$CARGO_TARGET_DIR`, which then
+  start cold. Go's global build caches are not readable (they hold other projects' test output).
+  Project-specific ones: `lean.toolchain_env` (below; `{"JEST_CACHE": "$LEAN_CACHE/jest"}`, with
+  `--cacheDirectory=$JEST_CACHE` in the test script). `lean/run.sh cache-clear` removes this
+  checkout's folder; each lean worktree or moved checkout gets a folder of its own, kept until
+  `lean/run.sh cache-clear --all` (every project's) or the OS clears its cache dir. A folder that
+  is a link, isn't yours or isn't mode 700 stops the run or session until `cache-clear`
+  (`cache-clear --all` when it is `lean-cache/` itself; the refusal names which). A session can
+  change its own `session/` folder: one still yours and a real folder gets mode 700 back at the
+  next start (any mode, `000` included); replaced by a link, it stops the next session until `cache-clear`.
+- **Databases.** Sessions can't start a Postgres server (no SysV shared memory or semaphores in
+  either session sandbox; Postgres needs both on macOS, even with `shared_memory_type=mmap`), so
+  tests needing one must reach a server started **outside** the sandbox: by you, on a dedicated
+  port that is not in `LEAN_DENY_PORTS` / `lean.deny_ports` (never the mirror's 54329), with a
+  trust-auth test role; the URL in `verify_command` or kept through
+  `lean.env_passthrough: ["DATABASE_URL"]` (`*_URL` is dropped otherwise); prefer
+  `host=localhost` (TCP) in sessions, since the sessions' socket list is built when they start
+  (a socket in `/private/tmp` created later is unreachable to them; the gate matches it by name).
+  A suite that runs `initdb` itself passes in the gate (it allows SysV IPC) and fails in sessions:
+  say so in the plan rather than letting a session retry it.
 - **Network.** Localhost and `lean.allowed_domains`; unix sockets only in the project and the local
   database sockets. The gate's profile denies the harness Postgres mirror's TCP ports (54329,
   3001: `LEAN_DENY_PORTS`) and `lean.deny_ports` on every address; sessions still reach them.
@@ -193,6 +241,30 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
   changed or untracked, non-ignored file outside the project directory fails the gate, named by its
   repository-root path.
 
+### Verify the sandbox on your machine
+
+The tests check the settings and the Codex table the harness hands each CLI, not the real CLIs'
+enforcement of the toolchain cache (Claude Code letting `allowRead` / `allowWrite` re-open the
+session folder inside the denied cache root; Codex letting a `write` entry re-open it inside a
+`deny` one). Run this once, in a throwaway project, after installing or upgrading a CLI:
+
+- **Claude session.** First run one gate for the project (`lean/run.sh gate <name>`), so the
+  gate's folder exists. Then ask the session to run each command below, with
+  `C=$(getconf DARWIN_USER_CACHE_DIR)`. Only the first should succeed; each other one must fail
+  with "Operation not permitted" (any other error, such as "No such file or directory", proves
+  nothing: check the path and run it again):
+  - `touch "$LEAN_CACHE/x" && cat "$LEAN_CACHE/x"`
+  - `ls "$C"`
+  - `ls "$(dirname "$(dirname "$LEAN_CACHE")")"` (the cache root)
+  - `ls "$(dirname "$LEAN_CACHE")/gate"` (the gate's folder)
+  - `cat` of a file in another project's `.../lean-cache/<folder>-<hash>/session/` (one that
+    exists: list it from your own shell first)
+- **Codex.** `LEAN_TEST_REAL_CODEX=1 bash tests/lean_toolchain_cache_test.sh` (item 7: the real
+  `codex sandbox`, no model). Then the same commands in a `codex-m3` session, after a gate run, expecting the same
+  "Operation not permitted" for all but the first. Every Codex
+  session start already runs a self-check that writes the session folder and fails closed when
+  the cache root or the project's cache folder can be listed.
+
 ## Configuration (`.harness.json::lean`, all optional)
 
 | Key | Default | Meaning |
@@ -209,6 +281,8 @@ mistakes and secret leaks by a cooperative model, not against a model trying to 
 | `step_minutes` | `30` | `run.sh chain`'s cap per step, in minutes (`--step-minutes` wins) |
 | `max_turns` | `{"implement": 120, "review": 40, "fix": 60}` | turn cap of a headless claude / claude-mini session per step (`claude -p --max-turns`), each key optional, an integer from 1 to 10000; anything else stops every step with exit 2 before a session opens. Reached: the step fails (`chain`: `max turns (<n>) reached`), its usage row is still recorded (note `max_turns`). Codex has no such flag (`codex exec`, 0.167.1): only `step_minutes` caps it. Interactive sessions: no cap |
 | `env_passthrough` | `[]` | secret-looking environment variables (`DATABASE_URL`, `NPM_TOKEN`, …) the sessions and the gate's commands keep |
+| `cache` | `"project"` | the toolchain cache folder: `"project"` (kept between runs, one per checkout in the user cache dir, the gate's and the sessions' apart) or `"run"` (a folder in each run's or session's own `TMPDIR`: cold every time, nothing shared between sessions and the gate, removed with that `TMPDIR`). Anything else: the gate's commands exit 125 and sessions don't start |
+| `toolchain_env` | `{}` | extra variables for the gate's commands and the sessions, `{"NAME": "value"}`, strings only, for a tool's cache or temp folder: the name must end in `_CACHE`, `_CACHE_DIR`, `_CACHE_DIRECTORY`, `_CACHE_FOLDER`, `_CACHE_PATH`, `_CACHE_ROOT`, `_CACHEDIR`, `_TMPDIR`, `_TMP_DIR` or `_TEMP_DIR` (any case; also `PYTHONPYCACHEPREFIX`, `DENO_DIR`), and not be one the harness sets (`GOCACHE`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `LEAN_*`, ...) or look secret: no proxy, compiler, wrapper, tool home or options variable. `$LEAN_CACHE` / `${LEAN_CACHE}` and `$TMPDIR` / `${TMPDIR}` are replaced (`${LEAN_CACHE}` when a name character follows), nothing else is expanded. Refused (the gate's commands exit 125, sessions don't start): another name, a value with another `$`, a backtick, `~`, `..` or an absolute path outside the cache folder, the `TMPDIR` and the project (also inside a word: `-I/x`, `@/x`; a best-effort check, the sandbox still denies the reads) |
 
 Frontends tested with Karma (or another headless-browser runner): Google Chrome can't start in the
 gate (it needs the window server and LaunchServices), so point the runner at Puppeteer's
