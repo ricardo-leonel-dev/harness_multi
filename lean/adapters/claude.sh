@@ -64,10 +64,21 @@ if [ -n "$chrome" ] && [ "$(basename "$chrome")" = chrome-headless-shell ] && [ 
   chmod +x "$session_tmp/bin/chrome-headless-shell"
   env_lines="$env_lines 'export CHROME_BIN=$session_tmp/bin/chrome-headless-shell'"
 fi
-settings=$(jq -c --arg c "printf '%s\\n' $env_lines >> \"\$CLAUDE_ENV_FILE\"" \
-  '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{hooks: [{type: "command", command: $c}]}])' <<<"$settings")
 # shellcheck source=../lib.sh
 . "$LEAN_DIR/lib.sh"
+# The toolchain caches (lean/lib.sh lean_toolchain_setup: GOCACHE, UV_CACHE_DIR, ... in the
+# project's session cache folder outside $HOME, TMPPREFIX and the JVM's temp dir in the session
+# TMPDIR): exported by the same hook, for the session's commands only (not Claude Code's own
+# process), and the folder re-opened in allowRead and allowWrite (sandbox.sh denies the cache
+# root: other projects' folders and the gate's stay closed).
+lean_toolchain_setup "$project" "$session_tmp" session || exit 1
+for kv in ${LEAN_TOOLCHAIN_ENV[@]+"${LEAN_TOOLCHAIN_ENV[@]}"}; do
+  line="export ${kv%%=*}=$(printf '%q' "${kv#*=}")"
+  env_lines="$env_lines '$(printf '%s' "$line" | sed "s/'/'\\\\''/g")'"
+done
+settings=$(jq -c --arg c "printf '%s\\n' $env_lines >> \"\$CLAUDE_ENV_FILE\"" --arg cache "$LEAN_CACHE_PATH" \
+  '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{hooks: [{type: "command", command: $c}]}])
+   | .sandbox.filesystem.allowRead += [$cache] | .sandbox.filesystem.allowWrite += [$cache]' <<<"$settings")
 lean_env_args "$project" '^(ANTHROPIC_|CLAUDE_)' || exit 1
 # LEAN_SESSION=1 marks the session (lean/lib.sh lean_in_session): ./init.sh, harness.sh test and
 # the gate refuse to run the suite inside it, and ignore LEAN_GATE_UNSANDBOXED there (lean_env_args

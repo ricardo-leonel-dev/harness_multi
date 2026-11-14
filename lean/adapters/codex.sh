@@ -27,8 +27,11 @@
 #
 # The sandbox is a Codex permission profile built from lean/sandbox.sh's lists (verified with
 # codex-cli 0.166.0 on macOS, progress/design_lean_flow.md §10):
-#   - base `:read-only`, then `write` on the project and a fresh session TMPDIR only (no
-#     /tmp, no user temp dir), `read` on sandbox.sh's write-denied paths (harness-owned
+#   - base `:read-only`, then `write` on the project, a fresh session TMPDIR and the project's
+#     session cache folder only (lean/lib.sh lean_toolchain_setup; no /tmp, no other part of
+#     the user temp dir, the rest of the cache root denied; the self-check writes there too and
+#     checks that the cache root and the project's cache folder above it stay unlistable),
+#     `read` on sandbox.sh's write-denied paths (harness-owned
 #     files, the git state), `deny` on its read-denied paths ($HOME entries but the carve-outs,
 #     credentials, the lean state with the frozen manifest, the secret files in the project and
 #     its repository and the LEAN_SECRET_GLOBS globs: lean/lib.sh), `read` on the codex
@@ -107,10 +110,16 @@ project_real=$(cd "$project" && pwd -P)
 # toml <jq expression over the settings JSON> — a TOML inline table; JSON strings are valid
 # TOML basic strings.
 toml() { jq -r "$1"' | to_entries | map("\(.key | tojson)=\(.value | tojson)") | "{" + join(",") + "}"' <<<"$settings"; }
-fs=$(jq -c --arg p "$project" --arg pr "$project_real" --arg t "$session_tmp" '
+# The toolchain caches (lean/lib.sh lean_toolchain_setup, `codex`: cargo also builds in the cache,
+# since this sandbox can't remove or rename folders in the project): the project's session cache
+# folder is a `write` entry (no glob under it) inside the cache root sandbox.sh denies (other
+# projects' folders and the gate's stay closed: the more specific entry wins), the variables go
+# to the commands through shell_environment_policy.set (not to Codex's own process).
+lean_toolchain_setup "$project" "$session_tmp" codex || exit 3
+fs=$(jq -c --arg p "$project" --arg pr "$project_real" --arg t "$session_tmp" --arg c "$LEAN_CACHE_PATH" '
   ([.sandbox.filesystem.denyRead[] | {key: ., value: "deny"}]
    + [.sandbox.filesystem.denyWrite[] | {key: ., value: "read"}]
-   + [$p, $pr, $t | {key: ., value: "write"}]
+   + [$p, $pr, $t, $c | {key: ., value: "write"}]
    + [$p, $pr | ., "\(.)/**/CLAUDE.md", "\(.)/**/CLAUDE.local.md", "\(.)/**/AGENTS.md",
        "\(.)/**/AGENTS.override.md", "\(.)/**/.claude/**", "\(.)/**/.codex/**"
        | select(contains("/**/")) | {key: ., value: "deny"}]) | from_entries' <<<"$settings")
@@ -172,6 +181,9 @@ common=(--enable network_proxy
   -c 'shell_environment_policy.set.CARGO_BUILD_RUSTC_WRAPPER=""'
   -c 'shell_environment_policy.set.SSH_AUTH_SOCK=""'
   -c 'shell_environment_policy.set.LEAN_SESSION="1"')
+for kv in ${LEAN_TOOLCHAIN_ENV[@]+"${LEAN_TOOLCHAIN_ENV[@]}"}; do
+  common+=(-c "shell_environment_policy.set.${kv%%=*}=$(jq -Rn --arg v "${kv#*=}" '$v')")
+done
 
 lean_env_args "$project" '^(OPENAI_|CODEX_)' || exit 1
 # No proxy variable of the caller reaches Codex (lean_env_args keeps them, credentials
@@ -196,6 +208,10 @@ if (echo x > "$1/written") 2>/dev/null; then echo "a write outside the project w
 if cat "$1/canary" >/dev/null 2>&1; then echo "the lean state is readable"; exit 1; fi
 if [ -n "$3" ] && cat "$3" >/dev/null 2>&1; then echo "a secret file in the project is readable: $3"; exit 1; fi
 ( : > "$2/lean-check" ) 2>/dev/null || { echo "the session TMPDIR is not writable"; exit 1; }
+( : > "$6/.lean-check" && rm -f "$6/.lean-check" ) 2>/dev/null || { echo "the toolchain cache folder is not writable: $6"; exit 1; }
+for d in "$7" "$8"; do
+  if [ -n "$d" ] && ls "$d" >/dev/null 2>&1; then echo "the rest of the toolchain cache root is readable: $d"; exit 1; fi
+done
 mkdir -p "$2/codex-home" && CODEX_HOME="$2/codex-home" "$4" --version >/dev/null 2>&1 \
   || { echo "the codex binary can not run inside the profile: $4 (add its folder to .harness.json::lean.allowed_read)"; exit 1; }
 rm -rf "$2/codex-home"
@@ -205,10 +221,15 @@ for v in "${HTTPS_PROXY:-}" "${HTTP_PROXY:-}"; do
   case "$v" in http://127.0.0.1:*) ;; *) echo "no network proxy (outbound network would be open)"; exit 1 ;; esac
 done
 echo LEAN-CODEX-SANDBOX-OK'
+# The cache root and (lean.cache "project") this project's cache folder, which holds the gate's
+# folder: both must stay unlistable around the session folder's `write` entry (a `write` nested
+# in a `deny` is the one place this table relies on the more specific entry re-opening a path).
+cache_root=$(lean_cache_root 2>/dev/null || true) cache_project=""
+case "$LEAN_CACHE_PATH" in "$cache_root"/*) cache_project=$(dirname "$LEAN_CACHE_PATH") ;; esac
 # A secret file the profile must deny (lean/lib.sh lean_secret_files; a regular file).
 secret=""
 while IFS= read -r -d '' f; do [ -L "$f" ] || [ ! -f "$f" ] || { secret="$f"; break; }; done < <(lean_secret_files "$project")
-out=$(cd "$project" && "${cmd[@]}" sandbox ${profile_args[@]+"${profile_args[@]}"} "${common[@]}" -- /bin/sh -c "$check" sh "$canary" "$session_tmp" "$secret" "$codex_bin" "$codex_home_denied" 2>&1 < /dev/null) || true
+out=$(cd "$project" && "${cmd[@]}" sandbox ${profile_args[@]+"${profile_args[@]}"} "${common[@]}" -- /bin/sh -c "$check" sh "$canary" "$session_tmp" "$secret" "$codex_bin" "$codex_home_denied" "$LEAN_CACHE_PATH" "$cache_root" "$cache_project" 2>&1 < /dev/null) || true
 if [ "$(printf '%s\n' "$out" | tail -1)" != LEAN-CODEX-SANDBOX-OK ]; then
   echo "lean: the Codex sandbox could not be confirmed, refusing to start: $(printf '%s\n' "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)" >&2
   exit 3

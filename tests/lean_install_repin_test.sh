@@ -30,7 +30,7 @@ pass() { PASS=$((PASS + 1)); echo "  ok   $1"; }
 die() { echo "  FAIL $1" >&2; exit 1; }
 
 mkdir -p "$WORK/home"
-export HOME="$WORK/home" GIT_CONFIG_GLOBAL=/dev/null
+export HOME="$WORK/home" LEAN_CACHE_BASE="$WORK/cache-base" GIT_CONFIG_GLOBAL=/dev/null
 
 TK="$WORK/toolkit"
 mkdir -p "$TK"

@@ -38,7 +38,7 @@ die() { echo "  FAIL $1" >&2; exit 1; }
 g() { git -c user.email=t@t -c user.name=t -c commit.gpgsign=false "$@"; }
 
 mkdir -p "$WORK/home"
-export HOME="$WORK/home" LEAN_GATE_UNSANDBOXED=1 GIT_CONFIG_GLOBAL=/dev/null
+export HOME="$WORK/home" LEAN_CACHE_BASE="$WORK/cache-base" LEAN_GATE_UNSANDBOXED=1 GIT_CONFIG_GLOBAL=/dev/null
 export LEAN_CLAUDE_TMP="$WORK/no-claude-tmp"
 # The toolkit's lean/ with a stub adapter: it records the step (from the result file's name),
 # runs $SCN/<step> in the project when present (it may set IS_ERROR / NO_RESULT), and writes

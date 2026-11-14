@@ -16,6 +16,8 @@
 #   lean/run.sh accept-config <name>  the leader accepts their own change to the harness-owned files
 #                                  (.harness.json): shows it, pins their hashes afresh (--by <name>
 #                                  when the plan was approved)
+#   lean/run.sh cache-clear [--all]  removes this checkout's toolchain cache folder (lean/lib.sh
+#                                  lean_cache_dir); --all: every project's and worktree's
 #
 # Options: --headless (claude -p / codex exec instead of an interactive session; the result JSON is
 # kept under the project's lean state, lean/lib.sh), --base <rev> (gate base; default the
@@ -39,7 +41,27 @@
 set -euo pipefail
 
 LEAN_DIR="$(cd "$(dirname "$0")" && pwd)"
-usage() { sed -n '3,23p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+# cache-clear — removes the project's toolchain cache folder, the gate's and the sessions'
+# (GOCACHE, uv, Gradle's user home, Maven's local repository, a redirected cargo target...:
+# lean/lib.sh lean_toolchain_env); the next run starts cold. The folder is keyed on the
+# checkout's resolved path, so each lean worktree or moved checkout has its own: --all removes
+# the whole cache root (every project's and worktree's). Refused inside a session.
+if [ "${1:-}" = cache-clear ]; then
+  [ -f .harness.json ] || { echo "run lean/run.sh from a project with a .harness.json" >&2; exit 2; }
+  case "${2:-}" in ''|--all) ;; *) usage ;; esac
+  # shellcheck source=lib.sh
+  . "$LEAN_DIR/lib.sh"
+  if lean_in_session "$(pwd)"; then echo "inside a lean session: cache-clear is the leader's, outside any session" >&2; exit 2; fi
+  if [ "${2:-}" = --all ]; then dir=$(lean_cache_root) || { echo "can't name the cache root" >&2; exit 2; }
+  else dir=$(lean_cache_dir "$(pwd)") || { echo "can't name the cache folder" >&2; exit 2; }; fi
+  [ -e "$dir" ] || [ -L "$dir" ] || { echo "[lean] no cache folder for this project ($dir)"; exit 0; }
+  [ ! -L "$dir" ] || { rm -f "$dir"; echo "[lean] removed $dir (a link)"; exit 0; }
+  chmod -R u+w "$dir" 2>/dev/null || true
+  rm -rf "$dir" || { echo "could not remove $dir" >&2; exit 1; }
+  echo "[lean] removed $dir"
+  exit 0
+fi
 step="${1:-}"; name="${2:-}"
 [ -n "$step" ] && [ -n "$name" ] || usage
 shift 2

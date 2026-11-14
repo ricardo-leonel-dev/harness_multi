@@ -19,6 +19,10 @@ project runs them when the feature closes.
   runs them after your session, outside it, and they refuse to run inside it
   (`LEAN_GATE_UNSANDBOXED` has no effect here). Run the feature's own tests and targeted checks
   (the test files you add or change, a type check or lint of the changed files).
+- Your sandbox can't start a database server (no SysV shared memory: `initdb` / `pg_ctl` fail on
+  `shmget`) and `$HOME` is read-only (tool caches already point at `$LEAN_CACHE`). Don't work
+  around either: tests needing a database use one already running (localhost); if none is
+  reachable, say so in your report and leave those tests to the gate.
 
 ## The feature document
 

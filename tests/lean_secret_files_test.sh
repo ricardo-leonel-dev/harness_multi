@@ -36,7 +36,7 @@ g() { git -c user.email=t@t -c user.name=t -c commit.gpgsign=false "$@"; }
 
 REAL_CODEX=$(command -v codex 2>/dev/null || true)
 mkdir -p "$WORK/home" "$WORK/socks" "$WORK/bin"
-export HOME="$WORK/home" GIT_CONFIG_GLOBAL=/dev/null
+export HOME="$WORK/home" LEAN_CACHE_BASE="$WORK/cache-base" GIT_CONFIG_GLOBAL=/dev/null
 export LEAN_CLAUDE_TMP="$WORK/no-claude-tmp" LEAN_DB_SOCK_DIR="$WORK/socks"
 unset LEAN_GATE_UNSANDBOXED
 
@@ -173,8 +173,10 @@ printf '%s\0' "$@" > "$CALLS/$n.${1:-x}.argv"
 while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done; shift
 canary="$5" secret="${7:-}"
 chmod 000 "$canary"; [ -z "$secret" ] || [ "${STUB_PROBE:-}" = open ] || chmod 000 "$secret"
+for d in "${11:-}" "${12:-}"; do [ ! -d "$d" ] || chmod 300 "$d"; done   # the cache root, project folder: `deny`
 rc=0; env CODEX_SANDBOX=seatbelt HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 CODEX_NETWORK_PROXY_ACTIVE=1 "$@" || rc=$?
 chmod 700 "$canary"; [ -z "$secret" ] || chmod 644 "$secret"
+for d in "${11:-}" "${12:-}"; do [ ! -d "$d" ] || chmod 700 "$d"; done
 exit "$rc"
 SH
 chmod +x "$WORK/bin/codex"
@@ -182,7 +184,7 @@ A="$TOOLKIT_DIR/lean/adapters/codex.sh"
 out=$(cd "$P" && PATH="$WORK/bin:$PATH" bash "$A" "$P" check - /dev/null - 2>&1) || die "codex check: $out"
 f=$(ls "$CALLS"/*.sandbox.argv | tail -1)
 fs=$(tr '\0' '\n' < "$f" | sed -n 's/^permissions\.lean\.filesystem=//p')
-probed=$(tr '\0' '\n' < "$f" | tail -3 | head -1)   # args: ... <secret> <codex binary> <Codex home>
+probed=$(tr '\0' '\n' < "$f" | tail -6 | head -1)   # args: ... <secret> <codex binary> <Codex home> <cache> <cache root> <project cache>
 case "$probed" in "$P"/*) ;; *) die "the self-check should probe a secret file of the project: $probed" ;; esac
 for k in "$P/.env" "$P/.env.local" "$P/config/app.key" "$P/x.pem" "$P/config/db_secret.yml" "$P/config/secrets" "$R/.env" \
          "$P/**/.env" "$P/**/.env.local" "$P/**/*.key" "$R/**/.env"; do

@@ -14,7 +14,7 @@
 #      a failed turn or a non-zero exit is is_error; a junk line is skipped.
 #   3. fail closed: the self-check failing (sandbox can't apply, no seatbelt, no network
 #      proxy, a caller's own loopback proxy standing in for Codex's, a write or read of the
-#      lean state that goes through) refuses before any session (exit 3); the caller's proxy
+#      lean state that goes through, the toolchain cache root listable) refuses before any session (exit 3); the caller's proxy
 #      variables never reach codex. The prompt probe failing (AGENTS.md denied to Codex's
 #      loader without project_doc_max_bytes=0, as codex-cli 0.167) or carrying AGENTS.md
 #      instructions refuses too.
@@ -49,7 +49,7 @@ g() { git -c user.email=t@t -c user.name=t -c commit.gpgsign=false "$@"; }
 
 mkdir -p "$WORK/home/Documents" "$WORK/bin"
 echo private > "$WORK/home/Documents/p.txt"
-export HOME="$WORK/home" LEAN_GATE_UNSANDBOXED=1 GIT_CONFIG_GLOBAL=/dev/null
+export HOME="$WORK/home" LEAN_CACHE_BASE="$WORK/cache-base" LEAN_GATE_UNSANDBOXED=1 GIT_CONFIG_GLOBAL=/dev/null
 export LEAN_CLAUDE_TMP="$WORK/no-claude-tmp"
 export CALLS="$WORK/calls"
 A="$TOOLKIT_DIR/lean/adapters/codex.sh"
@@ -61,7 +61,8 @@ A="$TOOLKIT_DIR/lean/adapters/codex.sh"
 # environment passes through unchanged, as the real codex does), unless STUB_SANDBOX says
 # otherwise: fail (exit 71 like sandbox-exec), noseatbelt, noproxy (the proxy feature not
 # taking effect), open (canary left writable), readable (canary readable, not writable), noexec
-# (the codex binary can't run inside the profile). Like the real profile, it applies the
+# (the codex binary can't run inside the profile), rootopen (the toolchain cache root and the
+# project's cache folder left listable around the session folder's `write` entry). Like the real profile, it applies the
 # filesystem table to the codex binary and the Codex home the check names: when the most
 # specific non-glob entry covering them is `deny`, the binary can't run and the home can't be
 # listed (a stand-in folder: the real home must stay traversable for the binary). --version: records CODEX_HOME in $CALLS/version.codex_home, nothing else. exec:
@@ -89,6 +90,7 @@ case "$kind" in
       shift
     done; shift
     # "$@" = /bin/sh -c <script> sh <canary> <session tmp> <secret> <codex binary> <Codex home>
+    #       <cache folder> <cache root> <project's cache folder>
     canary="$5" home="${9:-}"
     denied() {
       [ "$(jq -r --arg p "$1" '[to_entries[] | .key as $k | select(($k | contains("*") | not)
@@ -98,12 +100,21 @@ case "$kind" in
     noexec=""
     if [ "${STUB_SANDBOX:-}" = noexec ] || denied "$8"; then noexec="$8"; chmod a-x "$noexec"; fi
     if [ -n "$home" ] && denied "$home"; then args[8]="$CALLS/denied-home"; mkdir -p "${args[8]}"; chmod 000 "${args[8]}"; fi
+    # A `deny` cache root (or project folder) around the session's `write` folder: unlistable,
+    # still traversable (mode 300), as the real profile leaves it.
+    locked=()
+    for i in 10 11; do
+      d="${args[$i]:-}"
+      [ -n "$d" ] && [ -d "$d" ] && [ "${STUB_SANDBOX:-}" != rootopen ] && denied "$d" || continue
+      chmod 300 "$d"; locked+=("$d")
+    done
     case "${STUB_SANDBOX:-}" in open) ;; readable) chmod 555 "$canary" ;; *) chmod 000 "$canary" ;; esac
     seat=seatbelt
     [ "${STUB_SANDBOX:-}" != noseatbelt ] || seat=""
     rc=0; env CODEX_SANDBOX="$seat" ${proxy[@]+"${proxy[@]}"} "${args[@]}" || rc=$?
     [ -z "$noexec" ] || chmod u+x "$noexec"
     chmod 700 "$canary"; [ ! -d "$CALLS/denied-home" ] || chmod 700 "$CALLS/denied-home"
+    for d in ${locked[@]+"${locked[@]}"}; do chmod 700 "$d"; done
     exit "$rc" ;;
   debug)
     # `debug prompt-input` as codex-cli 0.167 does it: the project's AGENTS.md is read through
@@ -269,7 +280,7 @@ jq -e '.is_error == true and .num_turns == 0' "$WORK/r4.json" >/dev/null || die 
 pass "headless: turn.failed, a non-zero exit or no completed turn is is_error"
 
 echo "3. fail closed"
-for mode in fail noseatbelt noproxy open readable noexec; do
+for mode in fail noseatbelt noproxy open readable noexec rootopen; do
   for m in interactive headless; do
     reset; export STUB_SANDBOX=$mode
     rc=0; "$A" "$P" "$m" - "$WORK/system.md" "x" "$WORK/f.json" > "$WORK/out" 2>&1 || rc=$?
@@ -280,6 +291,8 @@ for mode in fail noseatbelt noproxy open readable noexec; do
 done
 reset; export STUB_SANDBOX=noexec
 "$A" "$P" headless - "$WORK/system.md" x "$WORK/f.json" 2>&1 | grep -q 'the codex binary can not run inside the profile' || die "noexec: the reason is named"
+reset; export STUB_SANDBOX=rootopen
+"$A" "$P" headless - "$WORK/system.md" x "$WORK/f.json" 2>&1 | grep -q 'the rest of the toolchain cache root is readable' || die "rootopen: the reason is named"
 reset; export STUB_SANDBOX=noproxy
 "$A" "$P" headless - "$WORK/system.md" x "$WORK/f.json" 2>&1 | grep -q 'no network proxy' || die "the reason is named"
 # The caller's own loopback proxy (Proxyman, mitmproxy, ...) must not stand in for Codex's:
@@ -325,7 +338,7 @@ reset
 "$A" "$P" check - "$WORK/system.md" - > "$WORK/out" 2>&1 || die "check mode: $(cat "$WORK/out")"
 grep -q 'Codex sandbox confirmed' "$WORK/out" && [ "$(n_calls interactive)" = 0 ] && [ "$(n_calls exec)" = 0 ] || die "check runs no session"
 pass "fail closed: a session Codex can't open with the profile, or AGENTS.md in the probed prompt -> exit 3, no session"
-pass "fail closed: sandbox can't apply, no seatbelt, codex binary not runnable, no proxy (also with the caller's own loopback proxy), an outside write or read going through -> exit 3, no session"
+pass "fail closed: sandbox can't apply, no seatbelt, codex binary not runnable, no proxy (also with the caller's own loopback proxy), an outside write or read going through, the cache root listable -> exit 3, no session"
 
 echo "3b. codex behind a symlink chain under ~/.codex"
 REL="$HOME/.codex/packages/standalone/releases/9.9.9-test"
