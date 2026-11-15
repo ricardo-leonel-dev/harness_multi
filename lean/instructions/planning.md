@@ -34,11 +34,18 @@ At most about 60 lines. Start with the user's request verbatim, then these secti
 - **Changed tests**: existing test files whose assertions must change because the feature changes
   what they pin (a format, a status, a rule), one path per line with the reason, relative to the
   project directory too; "none" otherwise.
-  The gate fails on removed assertions in any other existing test file.
+  The gate fails on removed assertions in any other existing test file. Both lists are pinned
+  outside the project before the first session (sessions can't widen them): a change after that
+  is accepted with `lean/run.sh replan <name>` (`--by <name>` once the plan was approved).
 - **Steps**: the order of the work.
 - **Risks**: answer each question in the project's risk question file (`lean/risk-questions/<list>.md`
   or the project's own), one line each, "n/a: <why>" when it does not apply. Think about who may
   read as well as who may change, and about what already exists (rows, clients, files).
+- **Leader actions** (optional; leave it out when there is nothing): a `## Leader actions`
+  section of `- [ ] ...` items for what the implementer can't do itself (a `.harness.json` change,
+  a dependency). Sessions add their own needs there; before `log-out --lean` (which refuses while
+  one is open) you do each item, or relay it to the user, and mark it `- [x]` with a short note.
+  Keep the heading exactly that: it is not part of **Files**.
 
 ## Risk mode only: acceptance tests
 

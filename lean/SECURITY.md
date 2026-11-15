@@ -79,8 +79,74 @@ Not sandboxed: a `claude-mini` or `codex-m3` started by hand, and a suite you st
   3001 PostgREST: `LEAN_DENY_PORTS`) and `lean.deny_ports` on every address, after the localhost
   allow and also with `lean.allowed_domains`: a suite can't read the cross-project mirror.
 - **Writes.** Only in the project and the temp dir (the gate's commands: the project, `/private/tmp`,
-  `/dev` and a fresh `TMPDIR` of their own). A session's `TMPDIR` is a fresh folder in the user temp
-  dir (a SessionStart hook; Claude Code's own temp folder is denied), removed after a headless session. Inside the project, the harness-owned paths are
+  `/dev`, a fresh `TMPDIR` of their own and the gate's toolchain cache folder). A session's `TMPDIR` is a fresh folder in the user temp
+  dir (a SessionStart hook; Claude Code's own temp folder is denied), removed after a headless session.
+  Never under `$HOME`: tools that must write a cache there (Go's build cache, uv, Gradle's user
+  home, Maven's resolver files, a cargo target outside the project) are pointed by environment
+  variables at one cache folder per checkout in the per-user cache dir
+  (`<DARWIN_USER_CACHE_DIR>/lean-cache/<folder>-<hash of the resolved path>`, mode 700, `<folder>`
+  with every character but letters, digits, `.`, `_` and `-` made `_`, `lean/lib.sh`
+  `lean_toolchain_env`), split in two: `session/`, which the Claude and Codex sessions may use,
+  and `gate/`, which only the gate's profile may. Each sandbox denies the whole `lean-cache/`
+  root, reads and writes, and re-opens only its own folder: a project's session or gate can't
+  read or write another project's cache, and the gate never reads what a session wrote. Codex
+  re-opens `session/` with a `write` entry. Claude re-opens it with `allowRead` and `allowWrite`
+  (resolved and as `/var/...`), and no `Read`/`Edit` deny rule holds it: Claude Code makes `Edit`
+  deny rules `denyWrite` entries, which win over `allowWrite`. The per-user cache dir and the
+  cache root stay whole in `denyRead` and get a rule for each of their other entries instead
+  (the cache root's in both spellings), plus rules that don't depend on what exists: this
+  project's `gate/` (also created by the adapter before the session) and every project's
+  (`<root>/*/gate`, a glob). When the session still can't write the folder, its cache variables
+  fall back to its own `TMPDIR`, `LEAN_CACHE_FALLBACK=1` (`lean/README.md` "Verify the sandbox on
+  your machine"). Residual: any other entry created in the per-user cache dir or the cache root
+  after the session started (a future project's folder, a new app cache) has no rule for Claude
+  Code's own Read/Edit/Write tools. Bash still can't read or write it, but in `headless`
+  (`--permission-mode bypassPermissions`) those tools can read or write such an entry, including
+  another project's cache folder lean created after this session started (mode 700 and genuine:
+  its `session/` could be read or planted, nothing fails closed; the gates' folders stay covered
+  by the `<root>/*/gate` glob). A level the Write tool creates itself is refused by
+  `lean_cache_prepare` (not mode 700) unless the umask makes it 700, and that project's gate or
+  session then fails closed until `lean/run.sh cache-clear`. Folder names carry a hash, so this
+  takes intent rather than a mistake. Folder metadata above
+  the cache: the gate's profile allows it for each folder above (`realpath`, Java's canonical
+  paths); Claude Code's own profile allows every folder's metadata whenever reads are denied, so
+  `realpath` and `mkdir -p` of `$LEAN_CACHE` work there without listing those folders; lean gives
+  Codex no metadata-only entry (not verified that its permission profile has one), so a tool
+  that canonicalizes the cache path may fail with "Operation not permitted" in a Codex session. The root lies in the per-user cache dir, which no session
+  can write, so a session can't plant a folder there for another project or for the gate. The
+  folders are created outside the sandbox one level at a time (`mkdir` under umask 077, never
+  through a link) and the run or session doesn't start when a level (the root, the project's
+  folder, `gate/` or `session/`) is a link, isn't owned by the user or isn't mode 700, or the
+  folder lies under `$HOME`, in the project or (but `lean.cache: "run"`, which lies in the run's
+  own `TMPDIR`) in Claude Code's temp folder. One exception: `session/` itself, whose own entry
+  the sessions may write (a `chmod`), is set back to mode 700 when it is still a real folder
+  owned by the user, whatever its mode (`chmod -h`, which never follows a link; without `-h`,
+  from inside the folder), and no session can swap that entry (its parent isn't writable to
+  them); a link or another owner there still refuses. The cache path never holds whitespace, a quote or a backslash (refused
+  otherwise), and a value tools split into words gets no option naming such a path (the
+  `TMPDIR` in `JAVA_TOOL_OPTIONS`, `~/.m2/repository` in `MAVEN_ARGS`: left out instead). The user's own dependency stores stay read-only
+  (`~/.cargo/registry`, `~/go/pkg/mod`, `~/.gradle/caches` through `GRADLE_RO_DEP_CACHE`,
+  `~/.m2/repository` through `maven.repo.local.tail`): a session's mistake or artifact never
+  reaches the user's own builds, and the redirected homes start without the user's
+  `gradle.properties` / `settings.xml` (credentials). Seeding is one-way into the cache, outside
+  the sandbox, by an APFS clone, from two sources only: Gradle's wrapper distributions
+  (`~/.gradle/wrapper/dists`) and a cargo target the harness located itself, the project's own
+  `target/` or, for the gate only, its workspace root's (a folder above the project, not `$HOME`
+  or `/`, which sessions can't write; never a session's folder: sessions can't read that target,
+  and it holds every member's artefacts, build scripts' `OUT_DIR`s included); never a folder named by `$CARGO_TARGET_DIR` or a `target-dir` in
+  `.cargo/config.toml` (the project's is session-writable; a user-wide one holds other projects'
+  artefacts): those targets start cold. A source is cloned only when it is a real folder (not a
+  link) that resolves to itself, lies on the cache's APFS volume (elsewhere `cp -c` would copy it
+  whole) and holds no link that leaves it (absolute or with `..`). The clone goes to a fresh
+  `mktemp` folder and is renamed into place with `rename(2)` from inside the checked folder, so
+  it never lands through a link a session planted in its `session/` folder (that is refused and
+  named) or inside a seed another run made meanwhile. `.harness.json::lean.toolchain_env` adds
+  variables (pinned with `.harness.json`); its names must be a tool's cache or temp folder
+  (`*_CACHE`, `*_CACHE_DIR`, `*_TMPDIR`, ...: an allowlist, so no proxy, compiler, wrapper, tool
+  home or options variable) the harness doesn't set itself and that doesn't look secret, and its
+  values can't name a path outside the cache folder, the `TMPDIR` and the project (also inside a
+  word, best effort), nor expand anything but `$LEAN_CACHE`
+  and `$TMPDIR`. Inside the project, the harness-owned paths are
   write-denied by name (`lean/`, `scripts/`, `.harness.json`, the database and its journals,
   `init.sh`, `harness/`, `.claude/`, `.codex/`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`,
   `.mcp.json`) and their hashes are pinned per feature: a changed one stops the next `run.sh` step
@@ -102,8 +168,8 @@ Not sandboxed: a `claude-mini` or `codex-m3` started by hand, and a suite you st
   by something a session can't edit (the sessions' profile denies reading and writing
   `~/.cache/harness`). `dirty.sha` is written once per feature, at its first pin, when nothing
   was pinned or run for it yet, so before any of its sessions. Nothing rewrites it: not a later
-  `claim` (`--again`), not a re-pin after `trusted.sha` was deleted (after editing
-  `.harness.json`), so no session's work can be recorded as "already there". Unlike
+  `claim` (`--again`), not `lean/run.sh accept-config` (after editing `.harness.json`; it rewrites `trusted.sha`
+  alone), so no session's work can be recorded as "already there". Unlike
   `nested.sha`, which only trusts instruction files, it exempts any file from the **Files**
   check, hence the stricter rule. It never holds the feature's own plan, review report or
   acceptance tests, and it is removed when the feature closes (`log-out --lean`), is superseded
@@ -111,6 +177,21 @@ Not sandboxed: a `claude-mini` or `codex-m3` started by hand, and a suite you st
   session changed (content or mode), even back to `HEAD`, counts as the feature's change.
   Deleting the feature's lean state by hand (its `lean/<name>/` folder and its sessions'
   results next to it) loses that record: a pin afterwards is a first pin again.
+- **The plan's scope** (`plan.lists`, next to `dirty.sha`): the paths under **Files** and
+  **Changed tests**, which decide what the gate lets a feature change. Sessions can write the
+  document (it is in the project), so without this a session could list the file it wanted to
+  change and pass (seen in a real run: a fix session added a 238-line out-of-scope test helper and
+  listed it). The lists are copied before the first session opens (each pin rewrites them only
+  while no session of the feature has run, `<name>.system.md` being written before each one; an
+  approved copy, from `approve-plan` or `run.sh freeze`, is never rewritten by a pin) and, once a
+  session ran, the gate reads them instead of the document and fails on any path added or removed
+  there. Only `lean/run.sh replan <name>` rewrites them, and it refuses inside a session
+  (`lean_in_session`); for an approved plan it needs `--by <name>`, the human who approved the
+  change. Removed when the feature's lean lifecycle ends, like `dirty.sha`. A feature whose
+  sessions ran but has no copy (an older feature, a lifecycle restarted with `set-mode`, a reused
+  name, a lost file) fails the gate until the leader runs `replan`: the document is never trusted
+  after a session. An approved plan stays approved across a lost state folder: `claim` marks the
+  lists approved again from the database (only re-reading the document before any session).
 - **Processes outside the sandbox** (gate profile only): mach services are denied but for an
   allowlist (`LEAN_MACH_ALLOW` in `sandbox.sh`, plus `lean.allowed_mach`), which never includes
   LaunchServices (`open`), Apple Events (`osascript`), the pasteboard or cfprefsd's agent (other
@@ -175,8 +256,64 @@ Not sandboxed: a `claude-mini` or `codex-m3` started by hand, and a suite you st
   sessions too; there is no setting to open one (rename it, or don't run that feature in lean
   mode). Codex sessions can't create files with the glob names (a test writing `server.key` into
   the project fails there, not in the gate); Claude sessions likely can, but can't read them back.
+- **Accepted harness-config changes.** `lean/run.sh accept-config <name>` pins the harness-owned
+  files' hashes afresh after the leader's own edit (refused inside a session, logged); the gate
+  then leaves those files out of its **Files** check. It first prints a diff of the copies kept at
+  the pin (`.harness.json`, `init.sh`, `AGENTS.md`, `CLAUDE.md`, under the feature's lean state;
+  values of keys matching token / secret / password / key masked), so `verify_command` turned
+  `true` is visible, not just the file name. On an approved plan (approve-plan, a frozen risk
+  manifest) it needs `--by <name>`, the user's approval, as `replan`: the config decides what the
+  gate runs, including the frozen acceptance tests. A session can't write them (write-denied)
+  nor run it (the lean state is denied to sessions); one that changed them anyway still fails
+  every step and the gate, and `chain` names it as a session's change made during the chain, with
+  the diff, and says to restore it rather than accept it. Run accept-config only for a change you
+  made or know. `install.sh` re-pins only the files it changed itself and only where the pin still
+  held their pre-install hash, and refreshes the kept copies of those files only; anything else
+  stays flagged, its copy still the pinned content. A copy whose hash isn't the pinned one is
+  never used ("content not shown"). Masking is best effort: besides secret-named keys it masks
+  URL passwords (`postgres://u:<masked>@host`) and `NAME=value` with a secret-looking NAME inside
+  any value, but a `verify_command` may carry a test-only credential in another shape, and the
+  diff then shows it on the terminal (and so in the model's transcript and the gate logs). The
+  harness record (`log-out --lean`'s refusal entry, synced to the mirror) keeps only the paths,
+  never the content diff.
+- **Leader actions are the sessions' word.** The plan's **Leader actions** is plain text sessions
+  write: `log-out --lean` refuses while an item is open, but a session that checks its own item off
+  (`- [x]`) or deletes it isn't stopped by that. `chain` compares the section with its state at
+  chain start and prints any item checked off or open item removed during the chain; steps run by
+  hand only log the items still open. Against mistakes, not a session that hides a request on
+  purpose (it could also never write one).
 - `~/.cargo/config.toml` stays readable (cargo needs it): keep registry tokens in
   `~/.cargo/credentials.toml`, which is denied.
+- **What the gate reuses from the sessions.** The toolchain caches are not shared: the gate has
+  its own folder (Go's build and test cache, a redirected cargo target, pytest's `cache_dir`
+  (not set when the project turns pytest's cache plugin off: there is no history to steer; the
+  check is a plain search for `no:cacheprovider`, so the word in a comment of a config a session
+  wrote also drops it, and pytest then reads the project's `.pytest_cache` as before), the
+  dependency caches), and in the gate `go test` never reuses a cached result (`GOFLAGS=-count=1`:
+  Go keys results on the test binary, the files it opens and the variables it reads, not on a
+  database or other outside state), nor does Gradle: the gate's own Gradle user home holds an
+  init script (`init.d/lean-rerun-tests.gradle`, written outside the sandbox, never through a
+  link; sessions get none) that makes every test task (`AbstractTestTask`: JVM `Test` and
+  Kotlin Multiplatform's JS and native tests) run, never `UP-TO-DATE` from the
+  `.gradle/` and `build/` a session left, never from the build cache. What stays shared is what
+  lives in the project, which sessions write: a cargo `target/` (the gate builds there when it
+  isn't redirected; cargo always re-runs the tests), tsc's `.tsbuildinfo`, Gradle's compiled
+  classes in `build/` (the tests still run), Jest's transform cache, and other tools' caches the
+  project keeps there, Turborepo's `.turbo/` and Nx's `.nx/cache` among them (both can replay a
+  cached test task's logs instead of running it). Their invalidation is the tools' own (sources'
+  hashes or times, options): sound against mistakes, not against a session set on forging an
+  entry; `git clean -fdX` before the gate, or a `verify_command` that forces a rerun
+  (`turbo run test --force`, `nx run-many -t test --skip-nx-cache`), removes it. Go's global build
+  caches (`~/Library/Caches/go-build`, `~/.cache/go-build`: every project's objects and test
+  output) are not readable at all.
+- **SysV IPC in the gate.** The gate's profile is `(allow default)` minus its denies, so its suite
+  can create and attach the user's SysV shared memory and semaphores (machine-wide keys; seatbelt
+  has no key filter). Accepted: a Postgres server needs them on macOS (`shmget` for a 56-byte
+  interlock segment even with `shared_memory_type=mmap`, SysV semaphores). The session sandboxes
+  allow no SysV IPC (neither Claude Code nor Codex has a setting for it), so **a session can't
+  start its own Postgres** (`initdb`, `pg_ctl`, embedded Postgres packages): tests that need one
+  must reach a server started outside the sandbox (README "Sandbox" > "Databases"). A suite that
+  `initdb`s its own cluster passes in the gate and fails in sessions.
 
 ## Codex sessions
 
@@ -195,8 +332,14 @@ network_proxy` and pinned approval settings, and never with `--dangerously-bypas
   makes only that binary's release folder `read` when it lies under `<Codex home>/packages/`
   (`auth.json`, `config.toml`, sessions, logs and the rest of `~/.codex` stay denied; a binary
   outside `$HOME` needs nothing).
-- **Writes**: only the project and a fresh session `TMPDIR` (not `/tmp`, not the user temp dir:
-  stricter than the Claude sessions). sandbox.sh's `denyWrite` list (harness-owned files, the git
+- **Writes**: only the project, a fresh session `TMPDIR` and the project's session cache folder
+  (not `/tmp`, not the rest of the user temp dir: stricter than the Claude sessions; the rest of
+  the cache root is a `deny` entry, the session folder a more specific `write` one; the
+  self-check writes the cache folder too and fails closed when the cache root or the project's
+  cache folder, which holds the gate's, can be listed). The toolchain variables reach the commands through
+  `shell_environment_policy.set`, `TMPPREFIX` among them (Codex runs commands with `zsh -lc`, and
+  zsh writes here-documents to `$TMPPREFIX`, `/tmp/zsh` by default, which is unwritable here).
+  sandbox.sh's `denyWrite` list (harness-owned files, the git
   state) is `read`. `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`, `.claude/`
   and `.codex/` anywhere in the project are `deny` globs: Codex accepts only `deny` on a glob, so
   commands can't read them either.
@@ -271,6 +414,13 @@ Gaps compared with the Claude sessions:
   (the gate still fails on it).
 - **macOS only**: the check expects `CODEX_SANDBOX=seatbelt`; elsewhere the adapter refuses.
 - No `LEAN_DENY_PORTS`: as for the Claude sessions, localhost ports can't be denied one by one.
+- **No folder can be removed or renamed in the project** (`rmdir`, rustc finishing its
+  incremental session, cargo creating `target/`, Vite renaming `deps_temp_*`): verified with the
+  real `codex sandbox` (codex-cli 0.169.0, `tests/lean_toolchain_cache_test.sh` with
+  `LEAN_TEST_REAL_CODEX=1`), with and without the `**` deny globs, so dropping the globs would not
+  help; folders in the cache folder and the `TMPDIR` can be removed. Cargo projects therefore build
+  in the cache folder in Codex sessions (`CARGO_TARGET_DIR`, seeded by a clone of `target/`); other
+  tools that rename folders in the project still fail there and pass in the gate.
 
 ## Hardening further
 

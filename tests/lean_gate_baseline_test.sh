@@ -21,6 +21,9 @@
 #   7. a rename is recorded under both paths (its old path put back counts); a chmod counts (1).
 #   8. risk mode: the feature's plan, review report, acceptance tests and frozen manifest files
 #      never get in dirty.sha; they stay in chain's next: --changes and out of the ignoring line.
+#   9. acceptance test files whose names hold a space: run.sh freeze hashes them (first and
+#      again once frozen) and runs them shell-quoted (verify_command fallback and {paths}); the
+#      risk gate checks and runs them.
 #
 # Usage: bash tests/lean_gate_baseline_test.sh   (exits non-zero on the first failure)
 
@@ -35,7 +38,7 @@ die() { echo "  FAIL $1" >&2; exit 1; }
 g() { git -c user.email=t@t -c user.name=t -c commit.gpgsign=false "$@"; }
 
 mkdir -p "$WORK/home"
-export HOME="$WORK/home" LEAN_GATE_UNSANDBOXED=1 GIT_CONFIG_GLOBAL=/dev/null
+export HOME="$WORK/home" LEAN_CACHE_BASE="$WORK/cache-base" LEAN_GATE_UNSANDBOXED=1 GIT_CONFIG_GLOBAL=/dev/null
 export LEAN_CLAUDE_TMP="$WORK/no-claude-tmp"
 L="$WORK/lean"; cp -R "$TOOLKIT_DIR/lean" "$L"
 export CALLS="$WORK/calls" SCN="$WORK/scn"
@@ -84,7 +87,12 @@ lib() { (cd "$P" && bash -c '. "$1/lib.sh"; shift; "$@"' _ "$L" "$@"); }
 state() { lib lean_state_dir "$P"; }
 gate() { (cd "$P" && bash "$L/gate.sh" "$P" f "$@") > "$WORK/out" 2>&1; }
 out() { cat "$WORK/out"; }
-conf() { jq "$2" "$1/.harness.json" > "$WORK/h" && mv "$WORK/h" "$1/.harness.json"; }
+# conf <project> <jq filter> — the user's own .harness.json edit, accepted when the feature's
+# harness-owned files are pinned (the gate fails on ones that don't match: lean/run.sh accept-config).
+conf() {
+  jq "$2" "$1/.harness.json" > "$WORK/h" && mv "$WORK/h" "$1/.harness.json" || return 1
+  [ ! -f "$(lib lean_state_dir "$1")/lean/f/trusted.sha" ] || (cd "$1" && bash "$L/run.sh" accept-config f) >/dev/null 2>&1
+}
 
 echo "1. files changed before the feature"
 P="$WORK/p1"; new_project "$P"; dirty "$P"
@@ -263,5 +271,42 @@ next=$(grep '^next:' "$WORK/out") || die "no next: line: $(out)"
 grep -qx '  gate: ignoring 1 file(s) changed before the feature, unchanged since: notes.txt' "$WORK/out" \
   || die "the ignoring line names only the user's file: $(out)"
 pass "risk: plan, review report, acceptance tests and frozen files stay out of dirty.sha and in next:'s --changes"
+
+echo "9. acceptance file names with a space"
+P="$WORK/p9"; new_project "$P"
+# Uncommitted, as in the lean flow: one with a space in its name, one in a folder with a space.
+printf 'grep -q done src/app.txt || { echo "FAIL: two words"; exit 1; }\n' > "$P/acceptance/f.two words.test.sh"
+mkdir -p "$P/acceptance/sub dir"
+printf 'grep -q done src/app.txt || { echo "FAIL: sub dir"; exit 1; }\n' > "$P/acceptance/sub dir/f.more.test.sh"
+want=$(printf '%s\n' "acceptance/f.test.sh" "acceptance/f.two words.test.sh" "acceptance/sub dir/f.more.test.sh")
+# has_args — the runner got every acceptance path, each as one argument (.args: "a|b|").
+has_args() {
+  local p
+  while IFS= read -r p; do sed 's/^/|/' "$P/.args" | grep -qF -- "|$p|" || return 1; done <<<"$want"
+}
+: > "$P/.args"; (cd "$P" && bash "$L/run.sh" freeze f) > "$WORK/out" 2>&1 || die "freeze with spaced names: $(out)"
+[ "$(lib lean_manifest_paths "$(state)/frozen/f.sha" | sort)" = "$(sort <<<"$want")" ] || die "manifest paths: $(cat "$(state)/frozen/f.sha")"
+(cd "$P" && shasum -a 256 -c "$(state)/frozen/f.sha") >/dev/null 2>&1 || die "the manifest checks: $(cat "$(state)/frozen/f.sha")"
+has_args || die "freeze runs verify_command with each path quoted: $(cat "$P/.args")"
+# The hand-run freeze pins first (no manifest yet): an acceptance file in a subfolder is the
+# feature's own, like find's recursive match in run.sh, never the user's earlier change.
+! grep -qF 'acceptance/sub dir/f.more.test.sh' "$(state)/lean/f/dirty.sha" 2>/dev/null \
+  || die "a subfolder acceptance file must stay out of dirty.sha: $(cat "$(state)/lean/f/dirty.sha")"
+[ "$(sed -n 's/^\[lean\] before implementing: //p' "$WORK/out" | grep -o 'fail' | wc -l | tr -d ' ')" = 3 ] || die "red before green over the 3 files: $(out)"
+: > "$P/.args"; (cd "$P" && bash "$L/run.sh" freeze f) > "$WORK/out" 2>&1 || die "freeze again (already frozen): $(out)"
+grep -q 'already frozen' "$WORK/out" && has_args || die "freeze again reads the manifest's spaced paths: $(cat "$P/.args") / $(out)"
+pass "freeze: spaced acceptance file names hashed, frozen and run as one argument each"
+
+printf 'done\n' > "$P/src/app.txt"
+: > "$P/.args"; (cd "$P" && bash "$L/run.sh" gate f) > "$WORK/out" 2>&1 || die "risk gate with spaced names: $(out)"
+grep -q '^ALL CHECKS PASS' "$WORK/out" && has_args || die "gate ran the spaced acceptance files: $(cat "$P/.args") / $(out)"
+conf "$P" '.lean.acceptance_command = "bash run_tests.sh --acc {paths} --end"'
+rm -f "$(state)/lean/f/trusted.sha"   # the user's config edit
+: > "$P/.args"; (cd "$P" && bash "$L/run.sh" gate f) > "$WORK/out" 2>&1 || die "risk gate, {paths}, spaced names: $(out)"
+grep -q -- '^--acc|.*|--end|$' "$P/.args" && has_args || die "{paths} holds each spaced path quoted: $(cat "$P/.args")"
+printf 'grep -q nope src/app.txt\n' > "$P/acceptance/f.two words.test.sh"
+(cd "$P" && bash "$L/run.sh" gate f) > "$WORK/out" 2>&1 && die "a changed spaced acceptance file must fail the gate: $(out)"
+grep -q 'acceptance/f.two words.test.sh' "$WORK/out" || die "the gate names the changed spaced file: $(out)"
+pass "gate: spaced acceptance files checked against the manifest and run (verify_command and {paths})"
 
 echo "PASS: $PASS checks"

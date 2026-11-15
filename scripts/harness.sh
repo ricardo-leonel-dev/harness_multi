@@ -161,6 +161,8 @@
 #                                              protocol) — log-out refuses to close a session whose latest
 #                                              verdict isn't 'approved'; a later call overwrites the verdict,
 #                                              so a re-review after CHANGES_REQUESTED just records over it.
+#                                              changes-requested also clears the arguments prepare-close stored;
+#                                              approved records their hash (close=<hash>, or close=none).
 #                                              --by policy (post feature-38 incident): for the canonical case
 #                                              (subagent reviewer), OMIT --by entirely and let the harness
 #                                              auto-format as "Claude (reviewer agent by <MODEL>)" or
@@ -185,6 +187,24 @@
 #                                              and syncs the Postgres mirror (every log-out path; best-effort,
 #                                              silent with no mirror configured, a failing one only warns), as record-review,
 #                                              approve-plan and approve-spec also do
+#   prepare-close --changes [<item...>] --verification <text> --closure <text> [--agent NAME]
+#                                              the implementer (or a quick_implementer sending its change to a
+#                                              reviewer) stores the close arguments on the open session when it
+#                                              reports ready, before the review, so no fresh agent has to run
+#                                              log-out after the approval. Logged as "CLOSE PREPARED by <the
+#                                              session's agent> ... close=<hash>" (a different --agent is logged
+#                                              next to it, never instead); running it again replaces them; status
+#                                              shows them. Change items: no empty item, no newline (zero items is
+#                                              allowed, as in log-out). record-review approved records their hash;
+#                                              changes-requested clears them. Not for features with a lean mode
+#   log-out --prepared                         the leader's close after the reviewer approved: log-out with the
+#                                              arguments prepare-close stored, byte for byte (it takes no others).
+#                                              Refused with nothing prepared, and unless the prepared text is the
+#                                              one stored when the reviewer approved (same close=<hash>; approved
+#                                              with nothing prepared, or changed after: re-prepare, then a new
+#                                              verdict). Every log-out check still applies (approval, no change
+#                                              after it, surfaces, ./init.sh green). Who ran prepare-close is not
+#                                              authenticated: the guarantee is that the reviewer approved this text
 #   log-out --quick --changes <item...> --verification <text> --closure <text>
 #                                              small features only: close without a reviewer when the quick gate
 #                                              passes — diff <= quick_max_diff_lines (80) and <= quick_max_files (4)
@@ -198,12 +218,17 @@
 #                                              --quick): refused when HEAD moved off the session base (a commit);
 #                                              runs lean/gate.sh against the session base — suite green, no
 #                                              assertion removed unless listed under **Changed tests**, every changed
-#                                              file under **Files**; risk mode: the acceptance tests match the manifest
-#                                              frozen at approve-plan (refused when the ~/.cache copy was rewritten),
-#                                              and the harness-owned files match the hashes pinned at claim;
+#                                              file under **Files** (both lists as pinned outside the project once a
+#                                              session ran: lean/run.sh replan accepts a change); risk mode: the
+#                                              acceptance tests match the manifest frozen at approve-plan (refused when the ~/.cache copy was rewritten),
+#                                              and the harness-owned files match the hashes pinned at claim (the leader's
+#                                              own edit, such as .harness.json: lean/run.sh accept-config re-pins them;
+#                                              on a mismatch the gate, one of them, isn't run);
 #                                              the suite runs under the sessions' sandbox rules (lean/gate.sh);
 #                                              docs/features/<name>.review.md has a VERDICT line and the reviewer
-#                                              changed no files. A refusal is logged (LEAN: refused) and means "fix";
+#                                              changed no files; refused first (no gate run) while the plan's (or the
+#                                              review report's) **Leader actions** has an open item (- [ ]): do it or
+#                                              decide with the user, mark it - [x] with a note. A refusal is logged (LEAN: refused) and means "fix";
 #                                              a pass records review_status 'lean'; the gate's suite run stands in
 #                                              for ./init.sh (only a failed ./init.sh in the session still refuses)
 #   hold <reason...>                          stop the active session (rejected escalation): it keeps the slot,
@@ -1034,7 +1059,7 @@ RETURNING requirements_count, tasks_count;")
   if [ -n "$prev_spec" ] && [ "$prev_spec" != "[]" ]; then
     local sid; sid="$(current_session_id)"
     local prev_counts; prev_counts=$(jq -r '.[0] | "R=\(.requirements_count), T=\(.tasks_count)"' <<<"$prev_spec")
-    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[$agent_attribution] SPEC REVISION: re-opened a spec_ready spec for revision (was $prev_counts)")', '$now');"
+    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[$(log_safe_attribution "$agent_attribution")] SPEC REVISION: re-opened a spec_ready spec for revision (was $prev_counts)")', '$now');"
     ok "re-opened spec for revision: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated") (was $prev_counts) — run 'mark-spec-ready' when done"
     return 0
   fi
@@ -1144,13 +1169,13 @@ fi
 
 # lean_claim_pin <feature_id> [keep] — for a feature with a lean mode, at claim: pins the
 # trusted files' hashes afresh (keep: only what isn't pinned yet, on
-# a resume), and in risk mode writes the manifest frozen at approve-plan to the lean state
-# again, so lean/run.sh finds risk mode even if the state folder was lost or the project
+# a resume), records an approved plan's lists as approved (lean_plan_mark_approved), and in
+# risk mode writes the manifest frozen at approve-plan to the lean state again, so lean/run.sh finds risk mode even if the state folder was lost or the project
 # moved. Best-effort: a failure is a [WARN] (lean/run.sh pins before its first session).
 lean_claim_pin() {
-  local fid="$1" keep="${2:-}" row name mode frozen state
-  row=$(db "SELECT name, COALESCE(mode, ''), COALESCE(plan_frozen, '') FROM features WHERE id=$fid;")
-  IFS='|' read -r name mode frozen <<<"$row"
+  local fid="$1" keep="${2:-}" row name mode frozen approved_by state
+  row=$(db "SELECT name, COALESCE(mode, ''), CASE WHEN plan_approved_at IS NULL THEN '' ELSE COALESCE(NULLIF(plan_approved_by, ''), 'approve-plan') END, COALESCE(plan_frozen, '') FROM features WHERE id=$fid;")
+  IFS='|' read -r name mode approved_by frozen <<<"$row"
   [ -n "$mode" ] || return 0
   if ! declare -F lean_pin >/dev/null; then warn "lean/lib.sh is missing: hashes not pinned at claim"; return 0; fi
   lean_adopt_legacy "$(pwd)"
@@ -1160,6 +1185,11 @@ lean_claim_pin() {
     mkdir -p "$state/frozen" && printf '%s\n' "$frozen" > "$state/frozen/$name.sha" \
       || warn "could not write $state/frozen/$name.sha"
   fi
+  # An approved plan's lists stay approved even if the state folder was lost (lean/lib.sh
+  # lean_plan_mark_approved; before lean_pin, whose plain pin would write them unapproved).
+  if [ -n "$approved_by" ] && declare -F lean_plan_mark_approved >/dev/null; then
+    lean_plan_mark_approved "$(pwd)" "$name" "$approved_by" 2>/dev/null || warn "could not record the plan approval of $name in $(lean_plan_file "$(pwd)" "$name")"
+  fi
   if [ -n "$keep" ]; then lean_pin "$(pwd)" "$name" || warn "could not pin feature $name's hashes in $state/lean/$name"
   else lean_pin "$(pwd)" "$name" --again || warn "could not pin feature $name's hashes in $state/lean/$name"; fi
 }
@@ -1167,12 +1197,13 @@ lean_claim_pin() {
 # lean_forget_baseline <name> — the feature's lean lifecycle ended (log-out closed it, it was
 # superseded or deleted, or set-mode none put it on the reviewer path): its dirty.sha (the files
 # already changed before its first pin, lean/lib.sh lean_pin) goes. It is recorded once per
-# feature and never again, so nothing later can take it for this feature's baseline.
+# feature and never again, so nothing later can take it for this feature's baseline. Its
+# plan.lists (the plan's pinned **Files** / **Changed tests**, lean_plan_pin) goes with it.
 lean_forget_baseline() {
   local state
   [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
   state=$(lean_state_dir "$(pwd)" 2>/dev/null) || return 0
-  rm -f "$state/lean/$1/dirty.sha"
+  rm -f "$state/lean/$1/dirty.sha" "$state/lean/$1/plan.lists"
 }
 
 # approve-plan <TARGET> [--by NAME] — record the human's approval of a lean
@@ -1240,6 +1271,12 @@ RETURNING feature_number || ' ' || name;")
   if [ -z "$updated" ]; then
     [ -z "$frozen_file" ] || rm -f "$frozen_file"
     fail "not approvable: feature $target changed meanwhile — run status and try again"; exit 1
+  fi
+  # The approved plan's **Files** / **Changed tests**, pinned outside the project (lean/lib.sh
+  # lean_plan_pin): a later change needs lean/run.sh replan --by, the user's approval again.
+  if declare -F lean_plan_pin >/dev/null; then
+    lean_adopt_legacy "$(pwd)"   # before the state folder exists: the legacy copy needs it absent
+    lean_plan_pin "$(pwd)" "$name" --approved "$by" 2>/dev/null || warn "could not pin the plan's lists of $name in $(lean_plan_file "$(pwd)" "$name")"
   fi
   ok "approved plan for feature $updated (mode $mode, by: $by$note)"
   sync_mirror
@@ -1622,7 +1659,7 @@ WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND $where;")
       exit 1
     fi
     local attribution
-    attribution="$(harness_agent_attribution "${explicit_agent:-leader}" "" "$agent_model")"
+    attribution="$(log_safe_attribution "$(harness_agent_attribution "${explicit_agent:-leader}" "" "$agent_model")")"
     db_exec "INSERT INTO feature_notes (feature_id, entry, created_at)
 VALUES ($(jq -r '.[0].id' <<<"$frow"), '$(sql_escape "[$attribution] $entry")', '$(now_iso)');"
     ok "appended note to feature $(jq -r '.[0] | "\(.feature_number) \(.name)"' <<<"$frow") (by: $attribution)"
@@ -1641,7 +1678,9 @@ VALUES ($(jq -r '.[0].id' <<<"$frow"), '$(sql_escape "[$attribution] $entry")', 
     role=$(db "SELECT agent FROM session_log WHERE id=$sid;")
   fi
   local attribution
-  attribution="$(harness_agent_attribution "$role" "" "$agent_model")"
+  # log_safe_attribution: an agent's entry never starts with "[harness] ",
+  # the prefix of the records the gates trust (REVIEW, INIT, BASE, ...).
+  attribution="$(log_safe_attribution "$(harness_agent_attribution "$role" "" "$agent_model")")"
   local prefixed_entry="[$attribution] $entry"
 
   db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$prefixed_entry")', '$(now_iso)');"
@@ -1732,10 +1771,20 @@ cmd_record_review() {
   db_exec "UPDATE session_log SET review_status='$(sql_escape "$verdict")', reviewed_by='$(sql_escape "$by")', reviewed_at='$now' WHERE id=$sid;"
   # The approval covers the code as it is now: log-out refuses it once that
   # code changes (review_verdict).
+  # An approval also covers the prepared close as it is now (close=<hash>, or
+  # close=none): log-out --prepared refuses any other text.
   local fp; fp="$(tree_fingerprint)" || fp=none
-  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] REVIEW: $verdict_raw fp=$fp', '$now');"
+  local close_tag=""
+  [ "$verdict" != approved ] || close_tag=" close=$(prepared_close_hash "$sid")"
+  db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] REVIEW: $verdict_raw fp=$fp$close_tag', '$now');"
   if [ -n "$notes" ]; then
     db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "REVIEW ($verdict_raw): $notes")', '$now');"
+  fi
+  # Close arguments prepared for the reviewed version describe a change that is
+  # about to be fixed: the fix round prepares them again (prepare-close).
+  if [ "$verdict" = changes_requested ] && [ -n "$(prepared_close_id "$sid")" ]; then
+    db_exec "UPDATE session_log SET changes=NULL, verification=NULL, closure=NULL WHERE id=$sid AND closed_at IS NULL;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[harness] CLOSE PREPARED: cleared (changes requested)', '$now');"
   fi
   ok "recorded review verdict '$verdict_raw' on session $sid (by: $by)"
   sync_mirror
@@ -2036,10 +2085,10 @@ is_test_path() {
 record_session_base() {
   local sid="$1" prev="${2:-}" sha dirty
   [ -n "$sid" ] || return 0
-  if [ -n "$prev" ] && [ -n "$(db "SELECT 1 FROM session_log_entries WHERE session_id=$prev AND entry LIKE '[harness] BASE: %' LIMIT 1;")" ]; then
+  if [ -n "$prev" ] && [ -n "$(db "SELECT 1 FROM session_log_entries WHERE session_id=$prev AND entry GLOB '[[]harness] BASE: *' LIMIT 1;")" ]; then
     db_exec "INSERT INTO session_log_entries (session_id, entry, created_at)
       SELECT $sid, entry, '$(now_iso)' FROM session_log_entries
-      WHERE session_id=$prev AND (entry LIKE '[harness] BASE: %' OR entry LIKE '[harness] DIRTY:%') ORDER BY id;"
+      WHERE session_id=$prev AND (entry GLOB '[[]harness] BASE: *' OR entry GLOB '[[]harness] DIRTY:*') ORDER BY id;"
     return 0
   fi
   sha=$(git rev-parse --verify --quiet HEAD 2>/dev/null) || return 0
@@ -2093,7 +2142,7 @@ session_file_lines() {
 # session_claim_listing <session_id> — the DIRTY listing logged at claim
 # (empty when the tree was clean then).
 session_claim_listing() {
-  db "SELECT substr(entry, 18) FROM session_log_entries WHERE session_id=$1 AND entry LIKE '[harness] DIRTY:%' ORDER BY id LIMIT 1;"
+  db "SELECT substr(entry, 18) FROM session_log_entries WHERE session_id=$1 AND entry GLOB '[[]harness] DIRTY:*' ORDER BY id LIMIT 1;"
 }
 
 # session_diff_base <session_id> — prints "<base>\t<scope note>": the
@@ -2103,7 +2152,7 @@ session_claim_listing() {
 # are measured.
 session_diff_base() {
   local base scope=""
-  base=$(db "SELECT substr(entry, 17) FROM session_log_entries WHERE session_id=$1 AND entry LIKE '[harness] BASE: %' ORDER BY id LIMIT 1;")
+  base=$(db "SELECT substr(entry, 17) FROM session_log_entries WHERE session_id=$1 AND entry GLOB '[[]harness] BASE: *' ORDER BY id LIMIT 1;")
   if ! git cat-file -e "${base:-none}^{commit}" 2>/dev/null; then
     base=HEAD
   elif ! git merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
@@ -2291,7 +2340,7 @@ cmd_record_init() {
 # git there is no fingerprint, so a pass can't go stale.
 init_verdict() {
   local last fp
-  last=$(db "SELECT entry FROM session_log_entries WHERE session_id=$1 AND entry LIKE '[harness] INIT: %' ORDER BY id DESC LIMIT 1;")
+  last=$(db "SELECT entry FROM session_log_entries WHERE session_id=$1 AND entry GLOB '[[]harness] INIT: *' ORDER BY id DESC LIMIT 1;")
   case "$last" in
     "") echo missing ;;
     "[harness] INIT: pass"*)
@@ -2307,8 +2356,9 @@ init_verdict() {
 # fingerprint). Outside git there is no fingerprint, so it can't go stale.
 review_verdict() {
   local last fp
-  last=$(db "SELECT entry FROM session_log_entries WHERE session_id=$1 AND entry LIKE '[harness] REVIEW: approved fp=%' ORDER BY id DESC LIMIT 1;")
+  last=$(db "SELECT entry FROM session_log_entries WHERE session_id=$1 AND entry GLOB '[[]harness] REVIEW: approved fp=*' ORDER BY id DESC LIMIT 1;")
   [ -n "$last" ] || { echo legacy; return; }
+  last="${last% close=*}"
   fp="$(tree_fingerprint)" || fp=none
   if [ "$fp" = none ] || [ "$last" = "[harness] REVIEW: approved fp=none" ] || [ "$last" = "[harness] REVIEW: approved fp=$fp" ]; then
     echo current
@@ -2380,9 +2430,11 @@ quick_gate() {
 # the session base, with the manifest frozen at approve-plan in risk mode, plus
 # the risk-mode review file and the reviewer-changed-files record lean/run.sh
 # writes. Fills LEAN_REASONS (empty = pass) and LEAN_REPORT (the gate's output).
+# LEAN_TRUSTED_IDX / LEAN_TRUSTED_DB: the index in LEAN_REASONS of the harness-owned-files reason
+# and its text for the harness record, without the content diff (lean_check_trusted): only paths.
 lean_gate() {
   local sid="$1" name="$2" mode="$3" gate state frozen_tmp="" base scope
-  LEAN_REASONS=(); LEAN_REPORT=""
+  LEAN_REASONS=(); LEAN_TRUSTED_IDX=-1; LEAN_TRUSTED_DB=""; LEAN_REPORT=""
   gate="$(cd "$SCRIPT_DIR/.." && pwd)/lean/gate.sh"
   if [ ! -f "$gate" ]; then
     LEAN_REASONS+=("the lean gate is missing: $gate (install lean/ next to scripts/)"); return
@@ -2394,7 +2446,7 @@ lean_gate() {
   # The gate measures uncommitted work from the session's BASE: a commit made since
   # (sessions never commit) would escape it, so HEAD must still be that commit.
   local recorded head
-  recorded=$(db "SELECT substr(entry, 17) FROM session_log_entries WHERE session_id=$sid AND entry LIKE '[harness] BASE: %' ORDER BY id LIMIT 1;")
+  recorded=$(db "SELECT substr(entry, 17) FROM session_log_entries WHERE session_id=$sid AND entry GLOB '[[]harness] BASE: *' ORDER BY id LIMIT 1;")
   head=$(git rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ -n "$recorded" ] && [ "$head" != "$recorded" ]; then
     LEAN_REASONS+=("HEAD moved: it is ${head:-unborn}, the feature's base commit is $recorded — sessions never commit; undo the commit(s) keeping the work uncommitted (git reset --soft $recorded) and log out again")
@@ -2403,9 +2455,16 @@ lean_gate() {
   state="$(lean_state_dir "$(pwd)")"
   # The gate, the harness and their config are what decide this close: they must be the
   # ones pinned at claim (sessions can't write them; this catches a change made anyway).
-  local changed
+  # The gate is one of them: on a mismatch it isn't run (its own check would only repeat this one).
+  local changed trusted_ok=1
   if declare -F lean_check_trusted >/dev/null && ! changed=$(lean_check_trusted "$(pwd)" "$name" 2>&1); then
-    LEAN_REASONS+=("$(printf '%s' "$changed" | tr '\n' ' ' | sed 's/  */ /g')")
+    trusted_ok=0
+    LEAN_TRUSTED_IDX=${#LEAN_REASONS[@]}
+    LEAN_REASONS+=("$changed
+(lean/gate.sh not run: it is one of these files)")
+    # The record keeps the paths (lean_check_trusted prints them before its "what changed" block).
+    LEAN_TRUSTED_DB="$(printf '%s\n' "$changed" | sed -n '1p; /^  what changed/q; /^  [^ ]/p')
+(content not recorded here; lean/gate.sh not run: it is one of these files)"
   fi
   local args=(--base "$base")
   if [ "$mode" = risk ]; then
@@ -2432,31 +2491,209 @@ lean_gate() {
     fi
   fi
   local status=0
-  LEAN_REPORT=$(bash "$gate" "$(pwd)" "$name" "${args[@]}" 2>&1) || status=$?
+  if [ "$trusted_ok" = 1 ]; then
+    LEAN_REPORT=$(bash "$gate" "$(pwd)" "$name" "${args[@]}" 2>&1) || status=$?
+  fi
   [ -z "$frozen_tmp" ] || rm -f "$frozen_tmp"
   [ "$status" = 0 ] || LEAN_REASONS+=("lean/gate.sh failed (exit $status)${scope:+ — note$scope}")
 }
 
+# prepared_close_id <session_id> — the log entry id of the session's stored
+# close arguments (prepare-close), or nothing when none are stored: never
+# prepared, or cleared by a changes-requested verdict.
+prepared_close_id() {
+  db "SELECT CASE WHEN entry GLOB '[[]harness] CLOSE PREPARED by *' THEN id ELSE '' END
+FROM session_log_entries WHERE session_id=$1 AND deleted_at IS NULL AND entry GLOB '[[]harness] CLOSE PREPARED*'
+ORDER BY id DESC LIMIT 1;"
+}
+
+# prepared_close_hash <session_id> — a short hash of the stored close arguments
+# (changes, verification, closure as the database holds them), or "none" when
+# nothing is prepared. record-review approved records it (close=<hash>) and
+# log-out --prepared requires it unchanged: the text that closes is the text
+# that was stored when the reviewer approved.
+prepared_close_hash() {
+  if [ -z "$(prepared_close_id "$1")" ]; then echo none; return; fi
+  # Hashed as the stored bytes (hex of each value, so no JSON formatting is
+  # involved): a newer sqlite3 or jq can't change it, every byte counts
+  # (trailing newlines included), and ":" can't occur inside a value, so text
+  # moved across a field boundary changes it.
+  db "SELECT coalesce(hex(changes), 'N') || ':' || coalesce(hex(verification), 'N') || ':' || coalesce(hex(closure), 'N')
+FROM session_log WHERE id=$1;" | shasum -a 256 | cut -c1-16
+}
+
+# session_log_text <session_id> <column> — a text column of session_log as its
+# exact stored bytes (read as hex and decoded with printf, so neither JSON nor
+# the terminal encoding touches it). Trailing newlines are the caller's to keep.
+session_log_text() {
+  local h; h=$(db "SELECT hex($2) FROM session_log WHERE id=$1;")
+  printf '%b' "$(printf '%s' "$h" | sed 's/../\\x&/g')"
+}
+
+# show_prepared_close <session_id> — the stored close arguments, for status
+# (the reviewer reads them before approving). Nothing when none are stored.
+show_prepared_close() {
+  local id; id="$(prepared_close_id "$1")"
+  [ -n "$id" ] || return 0
+  local row; row=$(sqlite3 -json "$DB_PATH" "SELECT changes, verification, closure FROM session_log WHERE id=$1;")
+  echo "--- prepared close (prepare-close; close=$(prepared_close_hash "$1")) ---"
+  db "SELECT entry FROM session_log_entries WHERE id=$id;" | sed 's/^\[harness\] //'
+  echo "changes:"
+  jq -r '.[0].changes // "[]" | fromjson | .[] | "  " + .' <<<"$row"
+  echo "verification:"
+  jq -r '.[0].verification // ""' <<<"$row" | sed 's/^/  /'
+  echo "closure:"
+  jq -r '.[0].closure // ""' <<<"$row" | sed 's/^/  /'
+}
+
+# prepare-close — the implementer stores its close arguments on the open
+# session when it reports ready, so the leader can close after the approval
+# with `log-out --prepared` instead of launching a fresh agent for one command.
+# The session's own changes/verification/closure columns hold them until
+# log-out (status shows them for the open session; the mirror syncs them too);
+# record-review approved records their hash, and log-out --prepared closes only
+# with that same text.
+cmd_prepare_close() {
+  local changes=() verification="" closure="" explicit_agent="" have_ch=0 have_v=0 have_c=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --changes)
+        have_ch=1; shift
+        while [ $# -gt 0 ] && [ "$1" != "--verification" ] && [ "$1" != "--closure" ] && [ "$1" != "--agent" ]; do
+          changes+=("$1"); shift
+        done
+        ;;
+      --verification) [ $# -ge 2 ] || { fail "--verification needs a value"; exit 1; }; verification="$2"; have_v=1; shift 2 ;;
+      --closure) [ $# -ge 2 ] || { fail "--closure needs a value"; exit 1; }; closure="$2"; have_c=1; shift 2 ;;
+      --agent) [ $# -ge 2 ] || { fail "--agent needs a value"; exit 1; }; explicit_agent="$2"; shift 2 ;;
+      *) fail "unknown argument: $1"; exit 1 ;;
+    esac
+  done
+  local usage="usage: prepare-close --changes [<item...>] --verification <text> --closure <text>"
+  if [ "$have_ch$have_v$have_c" != 111 ] || [ -z "$verification" ] || [ -z "$closure" ]; then
+    fail "$usage (--changes may list no file, as in log-out; --verification and --closure non-empty)"
+    exit 1
+  fi
+  # Each item must round-trip through log-out --prepared unchanged: one path
+  # per item, never empty, never split across lines.
+  local item nl='
+'
+  for item in "${changes[@]+"${changes[@]}"}"; do
+    if [ -z "$item" ]; then fail "prepare-close: --changes has an empty item"; exit 1; fi
+    case "$item" in *"$nl"*) fail "prepare-close: --changes item contains a newline: $(printf '%s' "$item" | head -n 1)..."; exit 1 ;; esac
+  done
+
+  local sid; sid="$(current_session_id)"
+  [ -n "$sid" ] || { fail "no open session — run 'claim' first"; exit 1; }
+  local fname fmode
+  IFS='|' read -r fname fmode < <(db "SELECT f.name, COALESCE(f.mode, '') FROM features f JOIN session_log sl ON sl.feature_id=f.id WHERE sl.id=$sid;")
+  if [ -n "$fmode" ]; then
+    fail "feature $fname has lean mode $fmode: it closes with 'log-out --lean', not prepared arguments"
+    exit 1
+  fi
+
+  # Attribution is the session's own agent, never the caller's word: a
+  # different --agent is kept, visibly, next to it.
+  local by; by="$(harness_agent_attribution "$(db "SELECT agent FROM session_log WHERE id=$sid;")" "" "")"
+  if [ -n "$explicit_agent" ]; then
+    local claimed; claimed="$(harness_agent_attribution "$explicit_agent" "" "")"
+    if [ "$claimed" != "$by" ]; then
+      by="$by (--agent given as $claimed, not the session agent)"
+      warn "prepare-close: --agent '$explicit_agent' is not this session's agent — logged as: $by"
+    fi
+  fi
+  local changes_json; changes_json=$(json_array "${changes[@]+"${changes[@]}"}")
+  local now; now="$(now_iso)"
+  # Escaped in place, not through $(sql_escape): command substitution would
+  # drop the text's trailing newlines.
+  local sq="'"
+  db_exec "UPDATE session_log SET changes='$(sql_escape "$changes_json")', verification='${verification//$sq/$sq$sq}',
+  closure='${closure//$sq/$sq$sq}' WHERE id=$sid AND closed_at IS NULL;
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] CLOSE PREPARED by $by: ${#changes[@]} file(s)")', '$now');"
+  local hash; hash="$(prepared_close_hash "$sid")"
+  db_exec "UPDATE session_log_entries SET entry = entry || ' close=$hash' WHERE id=$(prepared_close_id "$sid");"
+  ok "close prepared on session $sid (${#changes[@]} file(s), close=$hash); after the reviewer approves, the leader runs: scripts/harness.sh log-out --prepared"
+  if [ "$(db "SELECT review_status FROM session_log WHERE id=$sid;")" = approved ]; then
+    warn "session $sid is already approved: 'log-out --prepared' closes only with the text the reviewer approved — if this changed it, the reviewer must record its verdict again"
+  fi
+  sync_mirror
+}
+
 cmd_log_out() {
-  local changes=() verification="" closure="" quick=0 lean=0
+  local changes=() verification="" closure="" quick=0 lean=0 prepared=0 explicit=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --quick) quick=1; shift ;;
       --lean) lean=1; shift ;;
+      --prepared) prepared=1; shift ;;
       --changes)
-        shift
-        while [ $# -gt 0 ] && [ "$1" != "--verification" ] && [ "$1" != "--closure" ] && [ "$1" != "--quick" ] && [ "$1" != "--lean" ]; do
+        explicit=1; shift
+        while [ $# -gt 0 ] && [ "$1" != "--verification" ] && [ "$1" != "--closure" ] && [ "$1" != "--quick" ] && [ "$1" != "--lean" ] && [ "$1" != "--prepared" ]; do
           changes+=("$1"); shift
         done
         ;;
-      --verification) verification="$2"; shift 2 ;;
-      --closure) closure="$2"; shift 2 ;;
+      --verification) explicit=1; verification="$2"; shift 2 ;;
+      --closure) explicit=1; closure="$2"; shift 2 ;;
       *) fail "unknown argument: $1"; exit 1 ;;
     esac
   done
+  if [ "$prepared" = 1 ] && [ "$explicit$quick$lean" != 000 ]; then
+    fail "log-out --prepared takes no other argument: it closes with exactly what prepare-close stored"
+    exit 1
+  fi
 
   local sid; sid="$(current_session_id)"
   [ -n "$sid" ] || { fail "no open session to log out"; exit 1; }
+
+  # --prepared: the close arguments come from prepare-close, stored before the
+  # review. The approval recorded their hash (close=<hash>): only that exact
+  # text closes; any change after the approval needs a new verdict.
+  local prepared_by=""
+  if [ "$prepared" = 1 ]; then
+    local prepared_id; prepared_id="$(prepared_close_id "$sid")"
+    if [ -z "$prepared_id" ]; then
+      fail "log-out --prepared refused: session $sid has no prepared close (none stored, or cleared by a changes-requested review) — the implementer runs 'prepare-close' when it reports ready; without it, a fresh implementer runs the full log-out"
+      exit 1
+    fi
+    local p_status; p_status=$(db "SELECT COALESCE(review_status, '') FROM session_log WHERE id=$sid;")
+    if [ "$p_status" = quick ]; then
+      fail "log-out --prepared refused: session $sid passed the quick gate, it has no reviewer approval — close it with 'log-out --quick'"
+      exit 1
+    fi
+    if [ "$p_status" = approved ]; then
+      local approved_entry approved_close current_close
+      # The same entry review_verdict reads, parsed strictly: anything but
+      # the exact shape record-review writes binds no close.
+      approved_entry=$(db "SELECT entry FROM session_log_entries WHERE session_id=$sid AND deleted_at IS NULL AND entry GLOB '[[]harness] REVIEW: approved fp=*' ORDER BY id DESC LIMIT 1;")
+      approved_close=""
+      local approved_re='^\[harness\] REVIEW: approved fp=[0-9a-z]+ close=([0-9a-f]{16}|none)$'
+      if [[ "$approved_entry" =~ $approved_re ]]; then approved_close="${BASH_REMATCH[1]}"; fi
+      current_close="$(prepared_close_hash "$sid")"
+      if [ -z "$approved_close" ] || [ "$approved_close" = none ]; then
+        fail "log-out --prepared refused: the reviewer approved session $sid before anything was prepared (its approval has no close=<hash>) — the implementer runs 'prepare-close', then the reviewer reads it in 'status' and records its verdict again"
+        exit 1
+      fi
+      if [ "$approved_close" != "$current_close" ]; then
+        fail "log-out --prepared refused: the prepared close no longer matches the approval on session $sid (approved close=$approved_close, now close=$current_close: prepared or changed after the approval) — a fresh implementer re-runs 'prepare-close', then a fresh reviewer records its verdict again"
+        exit 1
+      fi
+    fi
+    # Read back exactly what was stored: the text as its stored bytes (hex,
+    # not JSON, which would re-encode invalid UTF-8), so the close writes the
+    # same bytes an explicit log-out with that text would; a sentinel keeps
+    # trailing newlines, and prepare-close admits no empty or multi-line
+    # change item.
+    local row; row=$(sqlite3 -json "$DB_PATH" "SELECT changes FROM session_log WHERE id=$sid;")
+    verification=$(session_log_text "$sid" verification; printf x); verification="${verification%x}"
+    closure=$(session_log_text "$sid" closure; printf x); closure="${closure%x}"
+    local item
+    while IFS= read -r item; do
+      changes+=("$item")
+    done < <(jq -r '.[0].changes // "[]" | fromjson | .[]' <<<"$row")
+    prepared_by=$(db "SELECT entry FROM session_log_entries WHERE id=$prepared_id;")
+    prepared_by="${prepared_by#\[harness\] CLOSE PREPARED by }"
+    prepared_by="${prepared_by%%: *}"
+  fi
 
   # Friendly precheck for an actionable error message — the real enforcement
   # is the WHERE clause on the UPDATE below (same "precheck for the message,
@@ -2493,6 +2730,23 @@ cmd_log_out() {
     fail "log-out --lean refused: a reviewer already requested changes on session $sid — it needs their approval"
     exit 1
   fi
+  # Lean flow: what the sessions left for the leader (the plan's **Leader actions**, and the
+  # risk review report's; lean/lib.sh lean_leader_actions) must be done or decided before the
+  # close, never lost behind a passing gate. Checked first: no gate run is spent on a refusal.
+  if [ "$lean" = 1 ] && declare -F lean_leader_actions >/dev/null; then
+    local open_actions
+    # "<text>" for an item of the plan, "<text>  (in <file>)" for one of the review report.
+    open_actions=$(lean_leader_actions "docs/features/$lname.md" "docs/features/$lname.review.md" \
+      | awk -F'\t' -v doc="docs/features/$lname.md" '$1 == "open" { print $3 ($2 == doc ? "" : "  (in " $2 ")") }')
+    if [ -n "$open_actions" ]; then
+      db_exec "UPDATE session_log SET review_status=NULL, reviewed_by=NULL, reviewed_at=NULL WHERE id=$sid AND review_status='lean';
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] LEAN: refused — leader actions open: $(printf '%s' "$open_actions" | paste -sd ';' - | sed 's/;/; /g')")', '$(now_iso)');"
+      fail "log-out --lean refused — open **Leader actions** in docs/features/$lname.md (an item marked '(in <file>)' is in that file instead), things a session needed and only you or the user can do:"
+      printf '%s\n' "$open_actions" | sed 's/^/  - [ ] /' >&2
+      echo "  Do each one (or relay it to the user and decide with them, or decide it is not needed), then mark it '- [x]' with a short note of what was done, and log out again." >&2
+      exit 1
+    fi
+  fi
   if [ "$lean" = 0 ] && [ "$review_status" = "lean" ]; then
     fail "cannot log out session $sid: its 'lean' pass doesn't apply to feature $lname, which has no lean mode — use the reviewer path"
     exit 1
@@ -2503,7 +2757,12 @@ cmd_log_out() {
   if [ "$lean" = 1 ]; then
     lean_gate "$sid" "$lname" "$lmode"
     if [ "${#LEAN_REASONS[@]}" -gt 0 ]; then
-      local joined; joined=$(printf '%s; ' "${LEAN_REASONS[@]}"); joined="${joined%; }"
+      # The record: the harness-owned-files reason without its content diff (LEAN_TRUSTED_DB).
+      local joined="" i
+      for i in "${!LEAN_REASONS[@]}"; do
+        if [ "$i" = "$LEAN_TRUSTED_IDX" ]; then joined="$joined$LEAN_TRUSTED_DB; "; else joined="$joined${LEAN_REASONS[$i]}; "; fi
+      done
+      joined="${joined%; }"
       # A pass from an earlier --lean run no longer describes this tree.
       db_exec "UPDATE session_log SET review_status=NULL, reviewed_by=NULL, reviewed_at=NULL WHERE id=$sid AND review_status='lean';
 INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] LEAN: refused — $joined${LEAN_REPORT:+
@@ -2559,7 +2818,7 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[
   fi
 
   if [ "$review_status" != "approved" ] && [ "$review_status" != "quick" ] && [ "$review_status" != "lean" ]; then
-    fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved' first (do NOT pass --by; the harness auto-attributes from \$ANTHROPIC_MODEL); only the implementer runs log-out, and only after that approval is recorded"
+    fail "cannot log out session $sid: no recorded reviewer approval (review_status=${review_status:-none}) — the reviewer must run 'scripts/harness.sh record-review approved' first (do NOT pass --by; the harness auto-attributes from \$ANTHROPIC_MODEL); log-out (the leader's 'log-out --prepared' or the implementer's) runs only after that approval is recorded"
     exit 1
   fi
 
@@ -2600,12 +2859,15 @@ INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '[
     fi
   fi
   local now; now="$(now_iso)"
+  # verification/closure escaped in place: $(sql_escape) would drop trailing
+  # newlines (log-out --prepared must store exactly what prepare-close did).
+  local sq="'"
 
   sqlite3 "$DB_PATH" <<SQL
 .bail on
 BEGIN;
-UPDATE session_log SET changes='$(sql_escape "$changes_json")', verification='$(sql_escape "$verification")',
-  closure='$(sql_escape "$closure")', closed_at='$now' WHERE id=$sid AND review_status IN ('approved','quick','lean') AND held_at IS NULL
+UPDATE session_log SET changes='$(sql_escape "$changes_json")', verification='${verification//$sq/$sq$sq}',
+  closure='${closure//$sq/$sq$sq}', closed_at='$now' WHERE id=$sid AND review_status IN ('approved','quick','lean') AND held_at IS NULL
   AND (review_status='lean') = EXISTS (SELECT 1 FROM features f WHERE f.id=session_log.feature_id AND f.mode IS NOT NULL)
   AND NOT (review_status='lean' AND EXISTS (SELECT 1 FROM features f WHERE f.id=session_log.feature_id
     AND (f.mode='risk' OR f.plan_approval=1) AND f.plan_approved_at IS NULL));
@@ -2619,7 +2881,10 @@ SQL
     fail "log out failed for session $sid — review approval was revoked or changed between the check and the close; re-run 'status' and try again"
     exit 1
   fi
-  ok "session $sid logged out"
+  if [ "$prepared" = 1 ]; then
+    db_exec "INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "[harness] CLOSE: log-out --prepared, arguments prepared by $prepared_by")', '$now');"
+  fi
+  ok "session $sid logged out${prepared_by:+ (arguments prepared by $prepared_by)}"
   local closed_name; closed_name=$(db "SELECT name FROM features WHERE id = (SELECT feature_id FROM session_log WHERE id=$sid);")
   clean_feature_dir "$closed_name"
   lean_forget_baseline "$closed_name"
@@ -2670,7 +2935,7 @@ RETURNING id, feature_number, name, title;" 2>&1)
   sid=$(db "SELECT id FROM session_log WHERE feature_id=$fid AND closed_at IS NULL AND deleted_at IS NULL AND paused_at IS NULL LIMIT 1;")
   if [ -n "$sid" ]; then
     db_exec "UPDATE session_log SET paused_at='$now', held_at=NULL WHERE id=$sid;
-INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$reason")', '$now');"
+INSERT INTO session_log_entries (session_id, entry, created_at) VALUES ($sid, '$(sql_escape "$(log_safe_text "$reason")")', '$now');"
     ok "blocked: $(jq -r '.[0] | "\(.feature_number) \(.name) — \(.title)"' <<<"$updated") (session $sid paused)"
   else
     db_exec "INSERT INTO feature_notes (feature_id, entry, created_at) VALUES ($fid, '$(sql_escape "$reason")', '$now');"
@@ -3144,7 +3409,7 @@ cmd_session_base() {
   db "SELECT substr(e.entry, 17) FROM session_log_entries e
   JOIN session_log s ON s.id = e.session_id JOIN features f ON f.id = s.feature_id
   WHERE s.project_id='$(sql_escape "$pid")' AND s.closed_at IS NULL AND s.deleted_at IS NULL
-    AND s.paused_at IS NULL AND f.name='$(sql_escape "$name")' AND f.deleted_at IS NULL AND e.entry LIKE '[harness] BASE: %'
+    AND s.paused_at IS NULL AND f.name='$(sql_escape "$name")' AND f.deleted_at IS NULL AND e.entry GLOB '[[]harness] BASE: *'
   ORDER BY e.id LIMIT 1;"
 }
 
@@ -3178,6 +3443,7 @@ FROM features WHERE project_id='$(sql_escape "$pid")' AND deleted_at IS NULL AND
     elif [ "$(db "SELECT surfaces_required FROM session_log WHERE id=$open_sid;")" = 1 ] && [ -z "$(db "SELECT mode FROM features WHERE id=${open_fid:-0};")" ]; then
       echo "surfaces: none declared yet (set-surfaces)"
     fi
+    show_prepared_close "$open_sid"
   fi
   local paused
   paused=$(db -header -column "SELECT sl.id, f.feature_number, f.name AS feature, sl.paused_at, sl.review_status FROM session_log sl LEFT JOIN features f ON f.id = sl.feature_id WHERE sl.project_id='$(sql_escape "$pid")' AND sl.closed_at IS NULL AND sl.deleted_at IS NULL AND sl.paused_at IS NOT NULL;")
@@ -3650,6 +3916,7 @@ main() {
     tick-tasks) cmd_tick_tasks "$@" ;;
     hide-check) cmd_hide_check "$@" ;;
     set-next-step) cmd_set_array_field next_step "$@" ;;
+    prepare-close) cmd_prepare_close "$@" ;;
     log-out) cmd_log_out "$@" ;;
     delete-feature) cmd_delete_feature "$@" ;;
     status) cmd_status ;;

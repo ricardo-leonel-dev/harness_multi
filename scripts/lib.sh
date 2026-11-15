@@ -478,6 +478,49 @@ harness_agent_attribution() {
   fi
 }
 
+# log_safe_attribution <attribution> — the attribution as an agent-written log
+# entry may carry it: "[<attribution>] <text>". Entries that start with
+# "[harness] " are the harness's own records, and gates trust them (REVIEW:
+# approved fp=…, INIT:, BASE:, CLOSE PREPARED …), so a caller-supplied value
+# never produces one. Line breaks become spaces. A value that starts with
+# "harness" in any letter case (leading whitespace ignored) is the only one
+# that can frame a forged "[harness] " record, so only then do its brackets
+# become parentheses, and a bare "harness" becomes "agent:<value>?". Other
+# values keep their brackets, so model ids like "opus[1m]" read unchanged.
+# The readers also match the prefix case-sensitively (GLOB); this covers
+# SQLite's case-insensitive LIKE in any other consumer. The harness writes its
+# own entries directly, never through this.
+log_safe_attribution() {
+  local a="$1" lc
+  a="${a//$'\n'/ }"
+  a="${a//$'\r'/ }"
+  lc=$(printf '%s' "$a" | LC_ALL=C tr 'A-Z' 'a-z')
+  lc="${lc#"${lc%%[![:space:]]*}"}"
+  case "$lc" in
+    harness*)
+      a="${a//\[/(}"
+      a="${a//\]/)}"
+      [ "$lc" != harness ] || a="agent:${a#"${a%%[![:space:]]*}"}?"
+      ;;
+  esac
+  printf '%s' "$a"
+}
+
+# log_safe_text <text> — free text an agent writes as a whole log entry (e.g. a
+# block reason): one that starts with "[harness]" in any letter case (leading
+# whitespace ignored) is marked "[harness?]" (original case kept), so it can't
+# pass for one of the harness's own records (see log_safe_attribution).
+log_safe_text() {
+  local t="$1" lc
+  t="${t#"${t%%[![:space:]]*}"}"
+  lc=$(printf '%.9s' "$t" | LC_ALL=C tr 'A-Z' 'a-z')
+  if [ "$lc" = "[harness]" ]; then
+    printf '%s?]%s' "${t:0:8}" "${t:9}"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 warn() { printf '[WARN]  %s\n' "$1" >&2; }
 ok()   { printf '[OK]    %s\n' "$1"; }
 fail() { printf '[FAIL]  %s\n' "$1" >&2; }

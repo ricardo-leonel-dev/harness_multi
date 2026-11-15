@@ -134,20 +134,29 @@ For each received task:
    leader"). The implementer never spawns its own reviewer — it doesn't have that ability, and it isn't supposed
    to try; if you see it attempt to, that's a bug in its instructions, not something to imitate. Point the reviewer
    at `progress/<name>/impl.md`.
-6. **Route the reviewer's verdict back to a fresh `implementer` call** (same feature, referencing both
-   `progress/<name>/impl.md` and `progress/<name>/review.md` — the implementer does not need to be "resumed",
-   just told to read those two files). **Fresh means a new agent** (Claude Code: a new `Agent` call; Codex CLI:
-   a new `spawn_agent`), never a follow-up message (`SendMessage`/`send_input`) to an agent that already
-   answered: it would re-read everything it accumulated (100-200k tokens) on every step. The same goes for
-   any small follow-up — ticking `tasks.md`, a log-out, a commit (`record-usage` warns when it happens). Then:
-   - Approved → instruct it to run `scripts/harness.sh log-out` per its own protocol step 9.
-   - Changes requested → instruct it to address `progress/<name>/review.md`'s required changes and re-report
-     readiness; repeat from step 5 above.
-   - Never run `log-out` yourself, and never have the reviewer run it — only the implementer does, per
-     `AGENTS.md`'s hard rule.
+6. **Act on the reviewer's verdict:**
+   - Approved → run `scripts/harness.sh log-out --prepared` yourself, with nothing else on the line: it closes
+     with the arguments the implementer stored (`prepare-close`) when it reported ready, and runs every
+     `log-out` check. This is the only log-out you run on a reviewed feature, and only after an approval;
+     never `prepare-close` yourself (the approval covers the stored text; any other is refused). On a refusal:
+     - "no prepared close" → a fresh implementer runs the full `log-out` per its protocol step 9.
+     - "the prepared close no longer matches the approval" or "approved ... before anything was prepared" →
+       nothing to fix in the code: a fresh implementer re-runs `prepare-close`, then a fresh reviewer reads it
+       and records its verdict again; then `log-out --prepared`.
+     - `./init.sh` stale (files changed after it passed) → run `./init.sh` once yourself and retry; if it
+       fails, or the retry refuses again, route it like requested changes.
+     - any other refusal (files changed after the approval, surfaces) → route it like requested changes.
+   - Changes requested → **route it back to a fresh `implementer` call** (same feature, referencing both
+     `progress/<name>/impl.md` and `progress/<name>/review.md` — the implementer does not need to be
+     "resumed", just told to read those two files) to address the required changes and re-report readiness;
+     repeat from step 5 above.
+   **Fresh means a new agent** (Claude Code: a new `Agent` call; Codex CLI: a new `spawn_agent`), never a
+   follow-up message (`SendMessage`/`send_input`) to an agent that already answered: it would re-read
+   everything it accumulated (100-200k tokens) on every step. The same goes for any small follow-up — ticking
+   `tasks.md`, a commit (`record-usage` warns when it happens). Never have the reviewer run `log-out`.
 
-   **Hard rule: never instruct an implementer to run `log-out` except in the Approved branch above, after a
-   `reviewer` subagent has actually run and reported `APPROVED`.** Do not tell it to log out "at the end" of
+   **Hard rule: never run `log-out --prepared`, nor instruct an implementer to run `log-out`, except in the
+   Approved branch above, after a `reviewer` subagent has actually run and reported `APPROVED`.** Do not tell it to log out "at the end" of
    its own turn, before review, or as a shortcut for a task you consider trivial — every feature goes through
    the reviewer first, except a `size=small` feature that the `quick_implementer` closes with
    `log-out --quick`, whose gate checks the change mechanically (see "Small Tasks" below). `log-out` itself now mechanically refuses to close a session
@@ -205,8 +214,11 @@ security/auth and dependencies still escalate. Its reply:
 
 - `done -> ...` — the quick gate closed it. Report to the user.
 - `review-needed -> ...` — the gate refused or the agent declared a risk. Launch 1 `reviewer` pointing at
-  `progress/<name>/quick.md`, then route the verdict back to a fresh `quick_implementer` (approved → plain
-  `log-out`; changes requested → fix and re-report), exactly like the normal flow below.
+  `progress/<name>/quick.md`, then act on the verdict exactly like the normal flow: approved → run
+  `scripts/harness.sh log-out --prepared` yourself (a fresh `quick_implementer` runs the plain `log-out` only
+  when it refuses with "no prepared close"; any other refusal as in step 6 above, with a `quick_implementer`
+  as the fresh agent); changes requested → a fresh `quick_implementer` fixes and
+  re-reports.
 - `escalate -> ...` — the task is bigger than it looked. Show the user the reason from
   `progress/<name>/escalate.md` and ask (Claude Code: `AskUserQuestion`) whether to continue as a normal
   feature. **Approve:** `set-size <feature> normal`, then launch 1 `implementer` telling it the session is already
@@ -246,9 +258,26 @@ gate closes it.
    `log-out --lean --changes … --verification "<gate result>" --closure "<summary>"` — after a chain PASS,
    its `next:` line is that command with only `--closure` to fill in. No `./init.sh` first: the gate it runs
    is the suite run on the code being closed.
-   This is the one log-out you run: the gate is a script, not your judgment. A refusal means another `fix`
+   **Leader actions** first: when the chain (or a step) printed a `leader actions` block — what a session
+   needed and only you or the user can do (a `.harness.json` change, a dependency, a file outside **Files**)
+   — do each item, or relay it to the user and decide with them, and mark it `- [x]` with a short note in
+   the plan (or the review report, for an item marked `(in <file>)`); `log-out --lean` refuses while one is
+   open, and its gate then runs with your change. After editing `.harness.json` (or any harness-owned file)
+   for an item, run `lean/run.sh accept-config <name>`: it shows the change (a diff of `.harness.json`)
+   and pins it (without it every step and `log-out --lean` stop at `harness-owned files changed`); the
+   gate's **Files** check leaves those files out, so no `replan`. An approved plan needs `--by "<name>"`
+   after the user approves the change, as `replan`. Never undo your own accepted change. A chain that
+   fails with `a session changed harness-owned files during this chain` is not your change: restore the
+   file (its diff is printed), never accept it. Re-check an item a session checked off itself.
+   Never report the feature done while one is open.
+   This is the one full log-out you run (it takes your --closure): the gate is a script, not your judgment. A refusal means another `fix`
    round, never a workaround; to send the feature down the reviewer path instead, the user decides and
    `set-mode <name> none` must run before any verdict is recorded.
+   `PLAN LISTS CHANGED SINCE PINNED`: a session edited the plan's **Files** / **Changed tests** (pinned before
+   the first session). Show the user the paths; only if they accept the wider scope run `lean/run.sh replan
+   <name>` (an approved plan: with an explicit `--by <name>`), else a `fix` round undoes it.
+   `NO PINNED PLAN LISTS` (sessions ran, nothing pinned: an older feature, a `set-mode` round trip, a reused
+   name): check those lists with the user the same way, then `lean/run.sh replan <name>`.
 
 ## Learnings
 
@@ -341,12 +370,14 @@ Example of a correct instruction for a subagent:
 
 - Do not edit files in `src/` or `tests/`.
 - Docs and config you may edit (outside `src/` and `tests/`) still count as the open session's changes: edit
-  them before the claim or after `log-out`, or the implementer's `log-out` will refuse until it runs
+  them before the claim or after `log-out`, or `log-out` will refuse until the implementer runs
   `add-surface <path> --reason "<why>"` for each of them.
-- Do not run `scripts/harness.sh log-out` yourself (the implementer does this after review).
-- Do not instruct an implementer to run `log-out` before a `reviewer` subagent has approved its work —
-  not even for a one-line change; `log-out` will mechanically refuse without a recorded approval anyway.
-  The only exception is `log-out --quick` by the `quick_implementer` on a `size=small` feature.
+- Do not run `scripts/harness.sh log-out` yourself except `log-out --prepared` (no other argument) after a
+  reviewer approved, and `log-out --lean` on a feature with a mode. Never run `prepare-close`.
+- Do not run `log-out --prepared`, nor instruct an implementer to run `log-out`, before a `reviewer`
+  subagent has approved its work — not even for a one-line change; `log-out` will mechanically refuse
+  without a recorded approval anyway. The only exception is `log-out --quick` by the `quick_implementer`
+  on a `size=small` feature.
 - Do not `unhold` a held session yourself — that is the user's decision.
 - Do not accept results from subagents that come back inline without a file reference (an untracked-mode
   `quick_implementer` is the exception: its short diff summary is its result).

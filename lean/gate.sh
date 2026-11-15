@@ -10,7 +10,15 @@
 #   2. no assertion line was removed from a test file that existed at <rev>, unless the
 #      file is listed under **Changed tests** in docs/features/<name>.md;
 #   3. every changed file is listed under **Files** (the plan files, frozen acceptance files
-#      — this feature's and other features' — and the harness's progress/ and state/ excepted);
+#      — this feature's and other features' — and the harness's progress/ and state/ excepted;
+#      so are the harness-owned files, lean/lib.sh LEAN_TRUSTED_PATHS, once their hashes are pinned
+#      for the feature: they must match that pin instead, which lean/run.sh accept-config renews
+#      after the leader's own edit, else the gate fails naming them);
+#      Checks 2 and 3 read **Files** / **Changed tests** as pinned in <lean state>/lean/<name>/plan.lists
+#      (lean/lib.sh lean_plan_pin) once a session of the feature ran, and fail naming any path
+#      the document's lists gained or lost since (sessions can't widen the plan; the leader
+#      accepts a change with lean/run.sh replan). A session ran but no plan.lists: fails
+#      (NO PINNED PLAN LISTS) until the leader runs lean/run.sh replan.
 #      A file already changed when the feature was first pinned (<lean state>/lean/<name>/dirty.sha,
 #      recorded once, lean/lib.sh lean_pin: the user's own uncommitted edits, never the feature's
 #      plan, review report or acceptance tests) and still with that content and mode is not the
@@ -110,7 +118,7 @@ to_project_relative() {
   done
 }
 # manifest_paths <manifest> — the paths of a shasum manifest, relative to the project.
-manifest_raw() { awk 'NF { sub(/^[^ ]+ [ *]/, ""); print }' "$@"; }
+manifest_raw() { lean_manifest_paths "$@"; }
 manifest_paths() { manifest_raw "$@" | to_project_relative; }
 doc="docs/features/$name.md"
 verify=$(jq -r '.verify_command // empty' .harness.json 2>/dev/null)
@@ -197,14 +205,44 @@ if [ -n "$frozen" ]; then
   fi
 fi
 
-# section_paths <title> — paths named under that section of the doc (bullets and backticks stripped).
+# The plan's lists as pinned (<lean state>/lean/<name>/plan.lists, lean/lib.sh lean_plan_pin), once
+# a session of the feature ran: sessions write the document, so what they add to **Files** or
+# **Changed tests** there doesn't count. No session yet: the live document. A session ran but
+# no plan.lists (pinned by an older version, the lean lifecycle restarted with set-mode or a
+# reused name, the file lost): the gate fails (checks 2 and 3 still read the document, to report
+# the rest) until the leader pins the lists with lean/run.sh replan.
+plan_pin=$(lean_plan_file "$project" "$name")
+pinned=0
+if lean_sessions_ran "$project" "$name"; then
+  if [ -f "$plan_pin" ]; then
+    pinned=1
+  else
+    fail=1
+    echo "NO PINNED PLAN LISTS ($plan_pin): a session of $name ran, so the gate can't trust **Files** / **Changed tests** in $doc as they are now."
+    echo "The leader checks them (sessions can't widen the plan) and pins them, outside any session, with lean/run.sh replan $name (an approved plan: after the user approves them, with --by <name>)."
+  fi
+fi
+# section_paths <title> — paths named under that section of the plan (bullets and backticks stripped).
 section_paths() {
-  [ -f "$doc" ] || return 0
-  awk -v t="$1" '/^#+ |^- \*\*|^\*\*/ { in_sec = (index($0, t) > 0) } in_sec' "$doc" \
-    | grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+' | to_project_relative | sort -u
+  if [ "$pinned" = 1 ]; then lean_plan_pinned "$plan_pin" "$1"; else lean_plan_section "$doc" "$1"; fi \
+    | to_project_relative | sort -u
 }
+# What the reports tell a session to do with a file the plan doesn't list.
+if [ "$pinned" = 1 ]; then
+  widen="undo the change; the plan's lists are pinned: only the leader, outside any session, can add a file (in $doc, then lean/run.sh replan $name)"
+  retest="restore them; the plan's lists are pinned: only the leader, outside any session, can add the file there (then lean/run.sh replan $name)"
+else
+  widen="undo the change, or list the file with a reason"
+  retest="restore them, or, if the feature changes what they pin, list the file there with the reason"
+fi
 collect_changes   # again: the suite may have left files behind
 changed_tests=$(section_paths "Changed tests")
+if [ "$pinned" = 1 ] && drift=$(lean_plan_drift "$project" "$name") && [ -n "$drift" ]; then
+  fail=1
+  echo "PLAN LISTS CHANGED SINCE PINNED ($plan_pin): the gate checks the pinned **Files** / **Changed tests**, not these edits to $doc:"
+  printf '%s\n' "$drift"
+  echo "Sessions can't widen the plan: undo these edits in the document. The leader accepts them, outside any session, with lean/run.sh replan $name (an approved plan: after the user approves the change, with --by <name>)."
+fi
 
 # Test files that existed at the base revision (any common test naming).
 existing_tests=$(git ls-tree -z -r --name-only "$base" | z_lines | grep -E '(\.test|\.spec|_test)\.[A-Za-z]+$|(^|/)test_[^/]+\.py$' || true)
@@ -218,7 +256,7 @@ while IFS= read -r t; do
   else
     fail=1
     echo "ASSERTION LINES REMOVED FROM $t, which is not listed under **Changed tests** in $doc"
-    echo "(restore them, or, if the feature changes what they pin, list the file there with the reason):"
+    echo "($retest):"
     head -10 <<<"$removed"
   fi
 done <<<"$existing_tests"
@@ -232,10 +270,30 @@ else
   frozen_files=$(printf '%s\n' "${frozen_paths:-}" "$other_frozen")
   changed=$(printf '%s\n' "$changed_rel" \
     | grep -vE "^docs/features/|^progress/|^state/" | { grep -vxF -f <(printf '%s\n' "$frozen_files" | sed '/^$/d') || true; } | sort -u)
+  # Harness-owned files (lean/lib.sh LEAN_TRUSTED_PATHS: .harness.json, lean/, scripts/ ...) are
+  # not the feature's: sessions can't write them and their hashes are pinned (trusted.sha). With
+  # that pin they are left out of this check: a change matching it (pinned at claim, or accepted
+  # by the leader with lean/run.sh accept-config) passes, any other fails just below, never with
+  # "undo the change". Without a pin they count like any other file.
+  if [ -f "$(lean_state_dir "$project")/lean/$name/trusted.sha" ]; then
+    trusted_changed=""
+    while IFS= read -r c; do
+      [ -n "$c" ] && lean_trusted_path "$c" && trusted_changed="$trusted_changed$c"$'\n'
+    done <<<"$changed"
+    if [ -n "$trusted_changed" ]; then
+      changed=$(comm -23 <(printf '%s\n' "$changed" | sed '/^$/d') <(printf '%s' "$trusted_changed" | sort -u))
+    fi
+    if ! trusted_msg=$(lean_check_trusted "$project" "$name" 2>&1); then
+      fail=1
+      echo "HARNESS-OWNED FILES CHANGED SINCE PINNED (sessions can't write them):"
+      printf '%s\n' "$trusted_msg" | sed -n 's/^  /  /p'
+      echo "If you or the user changed them on purpose (a Leader action), accept them, outside any session, with lean/run.sh accept-config $name."
+    fi
+  fi
   outside=$(comm -23 <(printf '%s\n' "$changed" | sed '/^$/d') <(printf '%s\n' "$listed" | sed '/^$/d'))
   if [ -n "$outside" ]; then
     fail=1
-    echo "CHANGED BUT NOT LISTED UNDER **Files** IN $doc (undo the change, or list the file with a reason):"
+    echo "CHANGED BUT NOT LISTED UNDER **Files** IN $doc ($widen):"
     echo "$outside"
   fi
 fi

@@ -122,14 +122,22 @@ or PR descriptions; use conventional commits only.
    in `tasks.md`: tick it (`tick-tasks`) or justify it first. Write your handoff to `progress/<name>/impl.md`
    (outcome, scope, verification — see the Anti-Telephone convention in `AGENTS.md`; for `sdd=1` features,
    include the `R<n> → test` traceability table from step 5; for `sdd=0` features, an `## Assumptions` list
-   of what you decided where the request was not explicit, or "none") and end your turn reporting
-   readiness to the leader. The leader — never you — delegates to the `reviewer` subagent; you do not have (and
+   of what you decided where the request was not explicit, or "none"). Then store the close arguments, so the
+   leader can close the feature after the approval without launching another agent:
+   ```
+   scripts/harness.sh prepare-close --changes <file1> <file2> ... --verification "<summary>" --closure "<summary>"
+   ```
+   The same arguments `log-out` takes (step 9), written now because you still have the change in context; the
+   reviewer reads them in `scripts/harness.sh status` and its approval covers exactly that text. End
+   your turn reporting readiness to the leader. The leader — never you — delegates to the `reviewer` subagent; you do not have (and
    should not attempt to use) the ability to spawn one. Spawning your own reviewer duplicates the review the leader
    already performs and wastes tokens on a second, redundant pass.
-9. After the review the leader launches a fresh implementer (you, starting clean) with the verdict,
-   referencing `progress/<name>/impl.md` and `progress/<name>/review.md` — read those two files instead of
-   re-reading the code you no longer have in context:
-   - **Approved** — read both files, then run:
+9. After an approval the leader closes the feature itself with `scripts/harness.sh log-out --prepared`, which
+   uses the arguments you stored with `prepare-close` and runs every `log-out` check. It launches a fresh
+   implementer (you, starting clean) with the verdict, referencing `progress/<name>/impl.md` and
+   `progress/<name>/review.md` — read those two files instead of re-reading the code you no longer have in
+   context — when changes were requested, or when the prepared close was missing or refused:
+   - **Approved** (the prepared close was missing or refused) — read both files, then run:
      ```
      scripts/harness.sh log-out --changes <file1> <file2> ... --verification "<summary>" --closure "<summary>"
      ```
@@ -144,8 +152,11 @@ or PR descriptions; use conventional commits only.
      It also refuses when the last `./init.sh` of the session failed or files changed after it passed: run
      `./init.sh` once. And it refuses when files changed after the reviewer approved: never edit after the
      approval; report the change to the leader so it goes back to the reviewer.
-   - **Changes requested** — address the required changes from `progress/<name>/review.md`, return to step 4,
-     then re-verify (step 7) and re-report readiness (step 8). State exactly what changed since
+   - **Changes requested, or any other fix round** (files changed after the approval, a refused close) —
+     address the required changes from `progress/<name>/review.md`, return to step 4, then re-verify (step 7)
+     and re-report readiness (step 8). Always run `prepare-close` again on a fix round, even when the
+     earlier arguments still look right: they must describe the fixed change, and the next approval covers
+     the text stored then. State exactly what changed since
      the reviewed version and run checks affected by that change. Keep the mandatory init gate;
      do not additionally repeat separate behavioral suites for a prose or Git-exclusion-only
      revision when executable code, tests, dependencies, verification config and environment

@@ -15,10 +15,13 @@ You **decompose and coordinate**; you never implement directly.
   With `.harness.json::hide_harness: true`, git must not show the harness: persona.md "Hidden harness".
   Voice and tone: `harness/instructions/persona.md` — read it at startup.
 - ❌ **Do not edit** files in `src/` or `tests/` directly (no edit tool, write tool, or shell command).
-- ❌ **Do not run** `scripts/harness.sh log-out` yourself — only the `implementer` does, after the `reviewer`
-  approves, or the `quick_implementer` through `log-out --quick` on a `size=small` feature. Never bypass the
-  reviewer gate. Exception: a feature with a mode closes only through `log-out --lean`, which you run (its
-  gate is a script; leader.md "Lean Features").
+- ❌ **Do not run** the reviewer-path `log-out --changes ... --verification ... --closure ...` yourself, nor
+  `prepare-close`. Two closes are yours: `log-out --prepared` after the `reviewer` approves (nothing else on
+  the line: it closes with the text the implementer stored with `prepare-close` and the reviewer approved),
+  and `log-out --lean` below. Only when `--prepared` refuses with "no prepared close" does a fresh
+  `implementer` run the full `log-out`. The `quick_implementer`
+  closes through `log-out --quick` on a `size=small` feature. Never bypass the reviewer gate. A feature with a
+  mode closes only through `log-out --lean`, which you run (its gate is a script; leader.md "Lean Features").
 - ✅ Delegate every coding task. Claude Code: `Agent` tool with `subagent_type` `implementer` (code and tests for
   **one** feature), then `reviewer`; for an `sdd=1` feature still `pending`, `spec_author` first (§6); for a
   small `sdd=0` feature, `quick_implementer` (leader.md "Small Tasks"); for a task the user wants **without the
@@ -60,7 +63,7 @@ If the task names a feature (number or name), pass it to the `implementer` so it
 | `docs/{architecture,conventions,verification}.md` | Project's definition of good work, style, verification | Before implementing / verifying |
 | `docs/specs.md` | SDD guide: lifecycle, EARS, scope limit, traceability | Any `sdd=1` feature |
 | `specs/<name>/{requirements,design,tasks}.md` | Spec content (git-tracked, authored) | Implementing/reviewing `sdd=1` |
-| `lean/run.sh brief <name> <keyword...>`, `docs/features/<name>.md` | Lean flow: `brief` prints the planning rules and the feature's context in one call (run it, don't read `lean/README.md` or `planning.md` first); a lean feature's plan. Once it is ready (and approved, when approval applies) tell the user to implement it from a fresh session (`/clear`). Then `claim` before any step; when the user asks to implement it, ONE `lean/run.sh chain <name>` in the background (never the steps one by one; leader.md "Lean Features"); on its notification, if `CHAIN: PASS`, run the `next:` log-out line it printed with your `--closure`, and nothing else (no diff, no `help`). `lean/README.md` is reference only | A feature with a mode |
+| `lean/run.sh brief <name> <keyword...>`, `docs/features/<name>.md` | Lean flow: `brief` prints the planning rules and the feature's context in one call (run it, don't read `lean/README.md` or `planning.md` first); a lean feature's plan. Once it is ready (and approved, when approval applies) tell the user to implement it from a fresh session (`/clear`). Then `claim` before any step; when the user asks to implement it, ONE `lean/run.sh chain <name>` in the background (never the steps one by one; leader.md "Lean Features"); on its notification, if `CHAIN: PASS`, run the `next:` log-out line it printed with your `--closure`, and nothing else (no diff, no `help`) — unless it printed `leader actions`: do those (or relay them to the user) and check them off first (after a `.harness.json` edit, `lean/run.sh accept-config <name>`), and never report done while one is open. `lean/README.md` is reference only | A feature with a mode |
 | `CHECKPOINTS.md` | Objective end-state criteria | Self-assessment, review |
 | `.claude/agents/`, `.codex/agents/` | leader, implementer, reviewer, spec_author definitions | Orchestrating |
 | `src/`, `tests/` | Application code and tests | Implementing |
@@ -108,9 +111,12 @@ that request and the assumptions made to fill its gaps (`docs/specs.md` "Request
 
 ## 4. Closing
 
-`./init.sh` must pass, the `reviewer` records `record-review approved`, then the `implementer` runs
-`scripts/harness.sh log-out --changes <files...> --verification "<summary>" --closure "<summary>"`, which also
-deletes the feature's `progress/<name>/` (anything worth keeping goes in `--verification`/`--closure`). A
+When it reports ready the `implementer` stores its close with `scripts/harness.sh prepare-close --changes
+<files...> --verification "<summary>" --closure "<summary>"`. `./init.sh` must pass and the `reviewer` records
+`record-review approved`; then you run `scripts/harness.sh log-out --prepared`, which runs every `log-out` check
+on exactly the text the approval covered (refused if it changed after) and deletes the feature's
+`progress/<name>/` (anything worth keeping goes in `--verification`/`--closure`). Every fix round prepares
+again (`changes-requested` clears them). A
 feature with a mode closes instead with `log-out --lean`, whose script gate replaces the reviewer. Work shipped
 without a session, absorbed features, notes outside a session and blockers: `lifecycle.md`.
 

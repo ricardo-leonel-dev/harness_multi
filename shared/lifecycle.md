@@ -31,6 +31,19 @@ open session can get stuck on a feature that can never finish. This is separate 
    and everything git shows changed since the claim, untracked included (`progress/`, git-excluded files and
    files untouched since the claim are skipped). Widen with `add-surface "<glob>" --reason "<why>"` or revert
    the file. A session opened before the toolkit had surfaces closes with a warning instead.
+
+   On the reviewer path the implementer stores these arguments when it reports ready, with the same flags:
+   `scripts/harness.sh prepare-close --changes ... --verification "..." --closure "..."` (logged as `CLOSE
+   PREPARED by <the session's agent> ... close=<hash>`; a different `--agent` is logged next to it; running it
+   again replaces them; `status` shows them). Change items can't be empty or contain a newline; zero items is
+   allowed, as in `log-out`. The reviewer reads them before approving, and `record-review approved` records
+   their hash. After the approval the leader runs `scripts/harness.sh log-out --prepared`, which takes no other
+   argument, closes with that text byte for byte and makes every check above. It refuses when nothing is
+   prepared, and unless the prepared text is the one stored at the approval (an approval given before anything
+   was prepared, or text changed after it): prepare again, then a new verdict. Who ran `prepare-close` is not
+   authenticated; what the code guarantees is that the text that closes is the text the reviewer approved.
+   `record-review changes-requested` clears them, and every fix round prepares again. The explicit `log-out`
+   above still works and is the fallback when nothing was prepared.
 3. Leave no temporary files, debug prints, or TODOs without context.
 
 ## Reconciling work implemented outside the harness

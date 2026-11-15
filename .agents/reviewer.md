@@ -117,7 +117,10 @@ and a script gate closes it (`lean/README.md`). Don't record a verdict on it; re
    action, not something to only describe in your response. Do this before composing anything else, and write
    it once with the final verdict (don't draft it and rewrite it).
 8. **Record your verdict mechanically**, so it isn't just prose another agent could talk its way past (an
-   approval covers the files exactly as they are when you record it; `log-out` refuses it if they change after):
+   approval covers the files exactly as they are when you record it; `log-out` refuses it if they change after).
+   Before approving, read the prepared close in `scripts/harness.sh status` ("prepared close": files,
+   verification, closure) and check it matches the work and the implementer's notes; if it is missing or
+   wrong, request changes. Your approval also covers that text: the leader closes with it, unchanged.
    ```
    scripts/harness.sh record-review approved
    ```

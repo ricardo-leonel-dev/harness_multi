@@ -2,7 +2,11 @@
 # sandbox.sh — Claude Code --settings JSON for one lean session in a project (or, with
 # --seatbelt, the same rules as a macOS sandbox-exec profile, which the gate runs the suite in).
 #
-#   lean/sandbox.sh <project_dir> [--seatbelt]
+#   lean/sandbox.sh <project_dir> [--seatbelt | --cache <session_cache_dir>]
+#
+# --cache (the Claude adapter): the session's toolchain cache folder, opened for reading and
+# writing inside the denied cache root (see "--cache <dir>" below for why no Read/Edit deny rule
+# may hold it).
 #
 # What it protects against, and what it doesn't: lean/SECURITY.md. In short:
 #
@@ -20,7 +24,9 @@
 # /Volumes, /Users/Shared, the per-user cache dir and Claude Code's temp folder
 # (/private/tmp/claude-<uid>; LEAN_CLAUDE_TMP replaces it, for tests) are denied; the session
 # settings re-open that folder's entry named after this project (the session's own outputs,
-# its Bash commands' stdout among them; created when missing).
+# its Bash commands' stdout among them; created when missing). The toolchain cache root
+# (lean/lib.sh lean_cache_root) is denied, reads and writes, whatever its base: each sandbox
+# re-opens only its own folder in it (the adapters, lean/lib.sh lean_sandboxed).
 #
 # Writes: the project and the temp dir. Inside the project the harness-owned paths
 # (LEAN_DENY_WRITE) and the git state (.git, the git dir, the common dir) are write-denied by
@@ -33,7 +39,8 @@
 #
 # --seatbelt adds what Claude Code's settings can't say: writes only in the project, /dev
 # (but the terminals: no write or ioctl on /dev/tty*) and /private/tmp (lean/lib.sh
-# lean_sandboxed adds the run's own TMPDIR); never $SSH_AUTH_SOCK; mach services only from an
+# lean_sandboxed adds the run's own TMPDIR and the gate's toolchain cache folder); never
+# $SSH_AUTH_SOCK; mach services only from an
 # allowlist (LEAN_MACH_ALLOW and lean.allowed_mach, never LEAN_MACH_NEVER: no LaunchServices
 # `open`, Apple Events `osascript`, pasteboard or cfprefsd agent); no /bin/launchctl; signals
 # only within the sandbox. With lean.allowed_domains seatbelt can't filter by host name: the
@@ -56,24 +63,29 @@ real_path() {
 # under <path> <dir> — <path> is <dir> or inside it.
 under() { case "$1/" in "$2"/*) return 0 ;; *) return 1 ;; esac; }
 
-usage="usage: lean/sandbox.sh <project_dir> [--seatbelt]"
+usage="usage: lean/sandbox.sh <project_dir> [--seatbelt | --cache <session_cache_dir>]"
 project="$(cd "${1:?$usage}" && pwd)"; shift
-seatbelt=0
+seatbelt=0 cache=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --seatbelt) seatbelt=1; shift ;;
+    --cache) [ $# -ge 2 ] && [ -n "$2" ] || { echo "$usage" >&2; exit 2; }; cache="$2"; shift 2 ;;
     *) echo "$usage" >&2; exit 2 ;;
   esac
 done
+[ "$seatbelt" = 0 ] || [ -z "$cache" ] || { echo "lean/sandbox.sh: --cache is for the session settings, not --seatbelt (the gate opens its own folder: lean/lib.sh lean_cache_rules)" >&2; exit 2; }
 domains=$(jq -c '.lean.allowed_domains // []' "$project/.harness.json" 2>/dev/null || echo '[]')
 project_real=$(real_path "$project")
 
-# Toolchains and package caches, readable under $HOME (relative to it).
+# Toolchains and package caches, readable under $HOME (relative to it). Not Go's build cache
+# (~/Library/Caches/go-build, ~/.cache/go-build): it holds every project's objects and cached
+# `go test` output; the sessions and the gate build in the project's own cache instead
+# (lean/lib.sh lean_toolchain_env: GOCACHE).
 LEAN_HOME_READ=".cargo .rustup .npm .nvm .pyenv .rbenv .gem .bun .deno .volta .asdf .sdkman
   .local/share/mise .local/share/pnpm .local/share/nvm .local/share/fnm .local/share/uv
   .local/share/pipx .local/share/virtualenv .local/share/rtx .local/bin .local/lib
   go/pkg go/bin .gradle .m2 .yarn .pnpm-store Library/pnpm
-  .cache/pip .cache/uv .cache/go-build .cache/yarn .cache/node Library/Caches/go-build
+  .cache/pip .cache/uv .cache/yarn .cache/node
   Library/Caches/pip Library/Caches/Yarn"
 # Harness-owned paths in the project that sessions must not write.
 db_path=$(jq -r '.db_path // "harness.db"' "$project/.harness.json" 2>/dev/null || echo harness.db)
@@ -142,7 +154,8 @@ tmp_real=$(real_path "$tmp"); tmp_real="${tmp_real:-$tmp}"
 for d in /Volumes /Users/Shared; do [ ! -d "$d" ] || private+=("$d"); done
 # The per-user cache dir (DARWIN_USER_CACHE_DIR, /var/folders/.../C: other apps' caches;
 # clang's module cache, unwritable anyway), unless it holds the project, $HOME or the temp dir.
-user_cache=$(getconf DARWIN_USER_CACHE_DIR 2>/dev/null || true); user_cache="${user_cache%/}"
+# LEAN_USER_CACHE replaces it, for tests.
+user_cache="${LEAN_USER_CACHE:-$(getconf DARWIN_USER_CACHE_DIR 2>/dev/null || true)}"; user_cache="${user_cache%/}"
 if [ -n "$user_cache" ] && [ -d "$user_cache" ]; then
   for x in "$project" "$project_real" "$HOME" "$tmp" "$tmp_real"; do
     [ -n "$x" ] || continue
@@ -341,6 +354,15 @@ done
 allow_read=("$project" ${targets[@]+"${targets[@]}"})
 for a in ${allow_home[@]+"${allow_home[@]}"}; do holds_redeny "$a" || allow_read+=("$a"); done
 private+=(${claude_tmps[@]+"${claude_tmps[@]}"}); allow_read+=(${claude_open[@]+"${claude_open[@]}"})
+# The toolchain cache root (lean/lib.sh lean_cache_root: every project's cache folder, each
+# holding the gate's and the sessions' folders) is denied whole, reads and (--seatbelt) writes;
+# the session adapters re-open this project's session folder (allowRead and allowWrite, a Codex
+# `write` entry) and lean_sandboxed the gate's (lean_cache_rules). It lies in the per-user cache
+# dir, which no allowWrite entry holds, so a session can't plant a folder there either.
+cache_roots=() cache_root_real=""
+r=$(lean_cache_root 2>/dev/null || true); [ -z "$r" ] || cache_roots=("$r")
+[ -z "$r" ] || { cache_root_real=$(real_path "$r"); cache_root_real="${cache_root_real:-$r}"; }
+private+=(${cache_roots[@]+"${cache_roots[@]}"})
 # A denied path whose resolved form holds the project (a /Volumes entry linking to /) would
 # deny the project: dropped.
 kept=()
@@ -350,6 +372,80 @@ for p in ${private[@]+"${private[@]}"}; do
   kept+=("$p")
 done
 private=(${kept[@]+"${kept[@]}"})
+# --cache <dir>: the session's toolchain cache folder (lean/lib.sh lean_toolchain_setup), opened
+# for reading and writing (allowRead, allowWrite; as given and resolved, and the other spelling of
+# a /private/var or /private/tmp path, so no form is left out whatever Claude Code compares).
+# Claude Code turns each Edit deny rule into a sandbox denyWrite entry, and denyWrite wins over
+# allowWrite (its settings schema says so): the `Edit(/<entry>/**)` rule of a denied
+# entry holding the folder (the per-user cache dir, the cache root) would deny writing it
+# (Claude Code 2.1.x: `touch "$LEAN_CACHE/x"` "Operation not permitted"). So no Read or Edit
+# rule names such an entry: it gets one per piece around the folder instead (the entry's other
+# entries, level by level down to the folder: other projects' folders, the gate's; carve),
+# resolved (one spelling keeps the settings smaller: the per-user cache dir holds hundreds of
+# entries); the pieces inside the cache root also in their /var/... spelling, and as the path
+# itself besides <path>/**. Bash stays confined without the entry's rules (writes only in the
+# project and allowWrite; reads: the entry stays whole in denyRead, which allowRead overrides for
+# the folder only); the pieces keep Claude Code's own Read/Edit tools out. Rules that don't depend
+# on what exists: this project's gate/ (the adapter creates it before rendering; the rule holds
+# even when it is missing) and every project's gate/ (`<root>/*/gate`, a glob that never holds
+# a session folder). Any other entry created in the per-user cache dir or the cache root after
+# the session started has no rule for those tools (the sandbox still denies it to Bash; in
+# headless, bypassPermissions, Claude Code's Write tool could create one: lean_cache_prepare
+# refuses a level that isn't mode 700, so the gate or a session there fails closed:
+# lean/SECURITY.md).
+cache_open=() perm_private=() lean_pieces=() lean_globs=()
+if [ -n "$cache" ]; then
+  cache_real=$(real_path "$cache")
+  [ -n "$cache_real" ] && [ -d "$cache_real" ] || { echo "lean/sandbox.sh: --cache $cache is not a folder" >&2; exit 1; }
+  if holds_project "$cache_real" || under "$cache_real" "$HOME"; then
+    echo "lean/sandbox.sh: --cache $cache holds the project or lies under \$HOME" >&2; exit 1
+  fi
+  for c in "$cache" "$cache_real" "${cache_real#/private}"; do
+    [ -n "$c" ] && [ "$(real_path "$c")" = "$cache_real" ] || continue
+    case " ${cache_open[*]-} " in *" $c "*) ;; *) cache_open+=("$c") ;; esac
+  done
+fi
+# pieces <resolved entry> — the paths around the cache folder inside <entry> (holding it).
+pieces() {
+  local d="$cache_real" parent s
+  while [ "$d" != "$1" ]; do
+    parent="$(dirname "$d")"
+    while IFS= read -r s; do [ "$s" = "$d" ] || printf '%s\n' "$s"; done \
+      < <(find "$parent" -mindepth 1 -maxdepth 1 2>/dev/null | LC_ALL=C sort)
+    d="$parent"
+  done
+}
+for p in ${private[@]+"${private[@]}"}; do
+  case " ${claude_tmps[*]-} " in *" $p "*) continue ;; esac   # re-opened entry (allowRead)
+  # (An entry of $HOME can't hold the cache folder: refused above.)
+  if [ -n "$cache" ] && ! under "$p" "$HOME"; then
+    r=$(real_path "$p"); r="${r:-$p}"
+    if under "$cache_real" "$r"; then
+      while IFS= read -r s; do
+        if [ "$s" != "$cache_real" ] && under "$s" "$cache_root_real"; then lean_pieces+=("$s"); else perm_private+=("$s"); fi
+      done < <(pieces "$r")
+      continue
+    fi
+  fi
+  perm_private+=("$p")
+done
+# This project's gate/ (named whether it exists or not) and every project's (a glob), when the
+# folder is a project's session/ in the cache root; each in both spellings of the root.
+if [ -n "$cache" ] && [ -n "$cache_root_real" ] && [ "$(basename "$cache_real")" = session ] \
+   && [ "$(dirname "$(dirname "$cache_real")")" = "$cache_root_real" ]; then
+  lean_pieces+=("$(dirname "$cache_real")/gate")
+  lean_globs+=("$cache_root_real/*/gate")
+fi
+if [ -n "$cache_root_real" ]; then
+  case "$cache_root_real" in
+    /private/var/*|/private/tmp/*)
+      if [ "$(real_path "${cache_root_real#/private}")" = "$cache_root_real" ]; then
+        for s in ${lean_pieces[@]+"${lean_pieces[@]}"}; do lean_pieces+=("${s#/private}"); done
+        for s in ${lean_globs[@]+"${lean_globs[@]}"}; do lean_globs+=("${s#/private}"); done
+      fi ;;
+  esac
+fi
+allow_read+=(${cache_open[@]+"${cache_open[@]}"})
 # Unix sockets: the project, and the local database sockets directly in /private/tmp
 # (PostgreSQL, MySQL, Redis, memcached by their usual names; other apps' sockets there, such
 # as a file-sync client's IPC, stay unreachable).
@@ -369,8 +465,10 @@ settings=$(to_json ${private[@]+"${private[@]}"} | jq -c \
   --argjson edit_deny "$(to_json ${edit_deny[@]+"${edit_deny[@]}"})" \
   --argjson targets "$(to_json ${targets[@]+"${targets[@]}"})" \
   --argjson deny_write "$(to_json "${write_deny[@]}")" \
-  --argjson socks "$(to_json "${socks[@]}")" --argjson claude_tmps "$(to_json ${claude_tmps[@]+"${claude_tmps[@]}"})" \
-  --arg tmp "$tmp" '
+  --argjson socks "$(to_json "${socks[@]}")" --argjson perm_private "$(to_json ${perm_private[@]+"${perm_private[@]}"})" \
+  --argjson cache_open "$(to_json ${cache_open[@]+"${cache_open[@]}"})" --arg tmp "$tmp" \
+  --argjson lean_pieces "$(to_json ${lean_pieces[@]+"${lean_pieces[@]}"})" \
+  --argjson lean_globs "$(to_json ${lean_globs[@]+"${lean_globs[@]}"})" '
   unique as $private
   | {
       sandbox: {
@@ -379,7 +477,7 @@ settings=$(to_json ${private[@]+"${private[@]}"} | jq -c \
         allowUnsandboxedCommands: false,
         autoAllowBashIfSandboxed: true,
         filesystem: { denyRead: $private, allowRead: $allow_read,
-                      allowWrite: [$tmp], denyWrite: $deny_write },
+                      allowWrite: ([$tmp] + $cache_open), denyWrite: $deny_write },
         network: { allowLocalBinding: true, allowedDomains: $domains, strictAllowlist: true,
                    allowAllUnixSockets: false, allowUnixSockets: $socks }
       },
@@ -388,7 +486,10 @@ settings=$(to_json ${private[@]+"${private[@]}"} | jq -c \
       # The read-through targets lie outside the working directory: without an allow rule an
       # interactive session asks before its Read tool follows a link there, at every link.
       permissions: { allow: [ $targets[] | "Read(/\(.))", "Read(/\(.)/**)" ],
-                     deny: ([ $private[] | select(. as $p | ($claude_tmps | any(.[]; . == $p)) | not) | "Read(/\(.)/**)", "Edit(/\(.)/**)" ] + $edit_deny) }
+                     deny: ([ $perm_private | unique[] | "Read(/\(.)/**)", "Edit(/\(.)/**)" ]
+                            + [ $lean_pieces | unique[] | "Read(/\(.))", "Read(/\(.)/**)", "Edit(/\(.))", "Edit(/\(.)/**)" ]
+                            + [ $lean_globs | unique[] | "Read(/\(.))", "Read(/\(.)/**)", "Edit(/\(.))", "Edit(/\(.)/**)" ]
+                            + $edit_deny) }
     }')
 if [ "$seatbelt" = 0 ]; then
   # Secret files (lean/lib.sh LEAN_SECRET_NAMES: .env, .env.*, keys, *secret*, *credential*; not
@@ -461,8 +562,11 @@ paths() { jq -r ".sandbox.filesystem.$1[]" <<<"$settings" | list ${2:-}; }
 # (DARWIN_USER_TEMP_DIR, other apps' files): lean/lib.sh lean_sandboxed gives each run a fresh
 # TMPDIR of its own there and allows writing in that one only.
 writable=$(resolved "$project" /dev /private/tmp | jq -R . | jq -sc 'unique')
-# rx <path> — the path as a seatbelt regex literal.
-rx() { printf '%s' "$1" | sed 's/[][\\.*^$+?(){}|]/\\&/g'; }
+# rx <path> — the path as a seatbelt regex literal. A `#"..."` regex can't hold a double quote,
+# so one becomes `.` (any character): a deny rule then covers a little more, never less; the one
+# allow rule using it (db_dir's sockets) may match one more folder name, harmless there: the
+# folder is /private/tmp unless the test-only LEAN_DB_SOCK_DIR is set, and the names stay listed.
+rx() { printf '%s' "$1" | sed 's/[][\\.*^$+?(){}|]/\\&/g; s/"/./g'; }
 # Names write-denied anywhere in the project, any case: CLAUDE.md / CLAUDE.local.md and .claude/
 # folders (and all they hold).
 claude_md=()
@@ -517,6 +621,7 @@ jq -nr --argjson deny_read "$(paths denyRead --deny)" --argjson allow_read "$(pa
   --argjson socks "$(resolved "$project" ${project_real:+"$project_real"} | sed '/^$/d' | jq -R . | jq -sc unique)" \
   --argjson agent "$(to_json ${agent[@]+"${agent[@]}"})" --arg db "$db_sockets" --arg db_dir "$(rx "$db_dir")" \
   --argjson claude_tmp "$(printf '%s\n' ${claude_tmps[@]+"${claude_tmps[@]}"} | list)" \
+  --argjson cache_root "$(printf '%s\n' ${cache_roots[@]+"${cache_roots[@]}"} | list)" \
   --argjson claude_open "$(printf '%s\n' ${claude_open[@]+"${claude_open[@]}"} | list)" \
   --argjson mach "$(to_json "${mach[@]}")" \
   --argjson deny_ports "$deny_ports" \
@@ -529,6 +634,7 @@ jq -nr --argjson deny_read "$(paths denyRead --deny)" --argjson allow_read "$(pa
   "(deny file-write*)",
   ($writable[] | "(allow file-write* (subpath \(tojson)))"),
   ($claude_tmp[] | "(deny file-write* (subpath \(tojson)))"),
+  ($cache_root[] | "(deny file-write* (subpath \(tojson)))"),
   ($deny_write[] | "(deny file-write* (subpath \(tojson)))"),
   ($claude_md[] | "(deny file-write* (regex #\"\(.)\"))"),
   "(deny file-write* (regex #\"^/dev/tty\"))", "(deny file-ioctl (regex #\"^/dev/tty\"))",

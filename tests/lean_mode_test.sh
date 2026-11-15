@@ -37,6 +37,7 @@ set -u
 TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+export LEAN_CACHE_BASE="$WORK/cache-base"   # the toolchain cache folders (lean/lib.sh lean_cache_dir)
 
 PASS=0
 pass() { PASS=$((PASS + 1)); echo "  ok   $1"; }

@@ -31,7 +31,7 @@ g() { git -c user.email=t@t -c user.name=t -c commit.gpgsign=false "$@"; }
 slug() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
 
 mkdir -p "$WORK/home" "$WORK/bin" "$WORK/dev/proj/src"
-export HOME="$WORK/home" GIT_CONFIG_GLOBAL=/dev/null LEAN_DB_SOCK_DIR="$WORK/socks"
+export HOME="$WORK/home" LEAN_CACHE_BASE="$WORK/cache-base" GIT_CONFIG_GLOBAL=/dev/null LEAN_DB_SOCK_DIR="$WORK/socks"
 CT="$WORK/claude-tmp"; mkdir -p "$CT/other-project/s"; printf 'other\n' > "$CT/other-project/s/x.txt"
 export LEAN_CLAUDE_TMP="$CT"
 P="$WORK/dev/proj"; printf 'a\n' > "$P/src/a.txt"; echo '{}' > "$P/.harness.json"
