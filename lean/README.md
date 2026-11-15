@@ -248,20 +248,48 @@ enforcement of the toolchain cache (Claude Code letting `allowRead` / `allowWrit
 session folder inside the denied cache root; Codex letting a `write` entry re-open it inside a
 `deny` one). Run this once, in a throwaway project, after installing or upgrading a CLI:
 
-- **Claude session.** First run one gate for the project (`lean/run.sh gate <name>`), so the
-  gate's folder exists. Then ask the session to run each command below, with
-  `C=$(getconf DARWIN_USER_CACHE_DIR)`. Only the first should succeed; each other one must fail
-  with "Operation not permitted" (any other error, such as "No such file or directory", proves
-  nothing: check the path and run it again):
-  - `touch "$LEAN_CACHE/x" && cat "$LEAN_CACHE/x"`
+- **Claude session.** The adapter creates the gate's folder before the session (as the gate
+  would), so `ls` of it below has something to deny. Then ask the session to run each command below, with
+  `C=$(getconf DARWIN_USER_CACHE_DIR)`. Only the first three should succeed; each other one must
+  fail with "Operation not permitted" (any other error, such as "No such file or directory",
+  proves nothing: check the path and run it again):
+  - `echo "$LEAN_CACHE ${LEAN_CACHE_FALLBACK:-0}"`: `.../C/lean-cache/<folder>-<hash>/session 0`
+    (`/private/var/folders/...`). `<session TMPDIR>/lean-cache 1` means the session could not
+    write its cache folder and fell back (below): the caches still work, cold every session and
+    unseeded (a Gradle-wrapper project may need the network to download its distribution), but
+    report it: it is the bug this check looks for
+  - `realpath "$LEAN_CACHE"`: prints the folder (resolved), not "Operation not permitted"
+  - `echo ok > "$LEAN_CACHE/x" && cat "$LEAN_CACHE/x"`: prints `ok`
   - `ls "$C"`
   - `ls "$(dirname "$(dirname "$LEAN_CACHE")")"` (the cache root)
   - `ls "$(dirname "$LEAN_CACHE")/gate"` (the gate's folder)
   - `cat` of a file in another project's `.../lean-cache/<folder>-<hash>/session/` (one that
     exists: list it from your own shell first)
+
+  How the session reaches its folder: `lean/sandbox.sh --cache` puts it in `allowRead` and
+  `allowWrite` (resolved and as `/var/...`) and gives no `Read(...)` / `Edit(...)` deny rule that
+  holds it: Claude Code turns each `Edit` deny rule into a sandbox `denyWrite` entry, which wins
+  over `allowWrite`, so the per-user cache dir and the cache root get rules for their other
+  entries instead (other apps' caches, other projects' folders; the cache root's pieces in both
+  `/var/...` and `/private/var/...` spellings), plus rules that hold whether the folder exists
+  or not: this project's `gate/` and every project's (`<root>/*/gate`), while `denyRead` still
+  names them whole. Fail-safe: the environment file the SessionStart hook writes is sourced
+  before every Bash command, inside the sandbox; when writing and reading back
+  `$LEAN_CACHE/.lean-write-probe` fails there, every cache variable (`LEAN_CACHE`, `GOCACHE`,
+  `UV_CACHE_DIR`, `XDG_CACHE_HOME`, `BUNDLE_USER_HOME`, `PIP_CACHE_DIR`, Gradle's, Maven's, a
+  redirected `CARGO_TARGET_DIR`, `lean.toolchain_env`'s `$LEAN_CACHE` values) points at
+  `<session TMPDIR>/lean-cache` instead and `LEAN_CACHE_FALLBACK=1` is set. `TMPDIR`,
+  `TMPPREFIX` (zsh's here-documents) and the JVM's temp dir are in the session `TMPDIR` either
+  way. `realpath`, `pwd -P` and BSD `mkdir -p "$LEAN_CACHE/a/b"` work in Claude sessions:
+  Claude Code's own profile (2.1.x) lets every folder's metadata be read whenever reads are
+  denied, so the folders above the cache can be `stat`-ed but not listed. In a Codex session
+  they may fail ("Operation not permitted" on a folder above the cache: lean gives Codex no
+  metadata-only entry, `lean/SECURITY.md`); create subfolders there with `mkdir` or a tool's own
+  code (Go, Python and Node create only the missing levels).
 - **Codex.** `LEAN_TEST_REAL_CODEX=1 bash tests/lean_toolchain_cache_test.sh` (item 7: the real
-  `codex sandbox`, no model). Then the same commands in a `codex-m3` session, after a gate run, expecting the same
-  "Operation not permitted" for all but the first. Every Codex
+  `codex sandbox`, no model). Then the same commands in a `codex-m3` session, after a gate run:
+  the first and the third (write and read back) succeed, `realpath` may fail (Codex gets no
+  metadata-only entry, above), and every other one must fail with "Operation not permitted". Every Codex
   session start already runs a self-check that writes the session folder and fails closed when
   the cache root or the project's cache folder can be listed.
 
