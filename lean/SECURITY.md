@@ -86,12 +86,33 @@ Not sandboxed: a `claude-mini` or `codex-m3` started by hand, and a suite you st
   variables at one cache folder per checkout in the per-user cache dir
   (`<DARWIN_USER_CACHE_DIR>/lean-cache/<folder>-<hash of the resolved path>`, mode 700, `<folder>`
   with every character but letters, digits, `.`, `_` and `-` made `_`, `lean/lib.sh`
-  `lean_toolchain_env`), split in two: `session/`, which the Claude sessions (`allowRead` and
-  `allowWrite`) and the Codex sessions (a `write` entry) may use, and `gate/`, which only the
-  gate's profile may. Each sandbox denies the whole `lean-cache/` root, reads and writes, and
-  re-opens only its own folder (the gate also the metadata of the folders above it, for
-  `realpath`): a project's session or gate can't read or write another project's cache, and the
-  gate never reads what a session wrote. The root lies in the per-user cache dir, which no session
+  `lean_toolchain_env`), split in two: `session/`, which the Claude and Codex sessions may use,
+  and `gate/`, which only the gate's profile may. Each sandbox denies the whole `lean-cache/`
+  root, reads and writes, and re-opens only its own folder: a project's session or gate can't
+  read or write another project's cache, and the gate never reads what a session wrote. Codex
+  re-opens `session/` with a `write` entry. Claude re-opens it with `allowRead` and `allowWrite`
+  (resolved and as `/var/...`), and no `Read`/`Edit` deny rule holds it: Claude Code makes `Edit`
+  deny rules `denyWrite` entries, which win over `allowWrite`. The per-user cache dir and the
+  cache root stay whole in `denyRead` and get a rule for each of their other entries instead
+  (the cache root's in both spellings), plus rules that don't depend on what exists: this
+  project's `gate/` (also created by the adapter before the session) and every project's
+  (`<root>/*/gate`, a glob). When the session still can't write the folder, its cache variables
+  fall back to its own `TMPDIR`, `LEAN_CACHE_FALLBACK=1` (`lean/README.md` "Verify the sandbox on
+  your machine"). Residual: any other entry created in the per-user cache dir or the cache root
+  after the session started (a future project's folder, a new app cache) has no rule for Claude
+  Code's own Read/Edit/Write tools. Bash still can't read or write it, but in `headless`
+  (`--permission-mode bypassPermissions`) those tools can read or write such an entry, including
+  another project's cache folder lean created after this session started (mode 700 and genuine:
+  its `session/` could be read or planted, nothing fails closed; the gates' folders stay covered
+  by the `<root>/*/gate` glob). A level the Write tool creates itself is refused by
+  `lean_cache_prepare` (not mode 700) unless the umask makes it 700, and that project's gate or
+  session then fails closed until `lean/run.sh cache-clear`. Folder names carry a hash, so this
+  takes intent rather than a mistake. Folder metadata above
+  the cache: the gate's profile allows it for each folder above (`realpath`, Java's canonical
+  paths); Claude Code's own profile allows every folder's metadata whenever reads are denied, so
+  `realpath` and `mkdir -p` of `$LEAN_CACHE` work there without listing those folders; lean gives
+  Codex no metadata-only entry (not verified that its permission profile has one), so a tool
+  that canonicalizes the cache path may fail with "Operation not permitted" in a Codex session. The root lies in the per-user cache dir, which no session
   can write, so a session can't plant a folder there for another project or for the gate. The
   folders are created outside the sandbox one level at a time (`mkdir` under umask 077, never
   through a link) and the run or session doesn't start when a level (the root, the project's

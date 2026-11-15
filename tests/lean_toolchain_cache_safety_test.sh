@@ -29,6 +29,17 @@
 #      pytest cache_dir option with `no:cacheprovider` (N-L2); a bad root names
 #      `cache-clear --all` (N-L3); a session folder chmod-ed by a session is set back to 700,
 #      a link still refused (N-L4).
+#   7. Claude sessions (Claude Code makes Edit deny rules denyWrite, which wins over allowWrite):
+#      no Read/Edit rule holds the session folder (the per-user cache dir and the cache root are
+#      carved into rules for their other entries), the folder allowed as given and resolved; in
+#      a seatbelt emulation of those semantics the session writes and reads $LEAN_CACHE while the
+#      gate's folder, other projects', the root, the per-user cache dir and $HOME stay denied; with
+#      the old rendering the env file's probe falls back to the session TMPDIR (LEAN_CACHE_FALLBACK);
+#      TMPPREFIX stays in the session TMPDIR (a zsh here-document works). Fix round: the gate's
+#      folder gets Read/Edit rules (path and /**) whether it exists or not, every project's gate/
+#      a glob rule, the adapter creates the gate's folder; the cache root's pieces in both
+#      spellings (/var and /private/var); realpath and BSD mkdir -p of $LEAN_CACHE work (Claude
+#      Code allows folder metadata) while listing the folders above it stays denied.
 #
 # Usage: bash tests/lean_toolchain_cache_safety_test.sh   (exits non-zero on the first failure;
 # KEEP_GOING=1 reports them all)
@@ -361,6 +372,172 @@ chmod 755 "$pdir/gate"
 out=$(setup "$C" "$(mkt)" gate 2>&1) && die "the gate's folder is never repaired (no session can write it): $out"
 chmod 700 "$pdir/gate"
 pass "Gradle init script in the gate only, never through a link; odd folder names; member sessions not seeded from the workspace; no:cacheprovider; cache-clear --all named; session folder mode repaired"
+
+echo "7. Claude sessions write and read their own cache folder; the rest stays closed"
+# Claude Code turns every Edit deny rule into a sandbox denyWrite entry, and denyWrite wins over
+# allowWrite: an `Edit(/<per-user cache dir>/**)` rule made `touch "$LEAN_CACHE/x"` fail in a
+# real session. The per-user cache dir is emulated by a folder named through a link (as
+# /var/folders/... names /private/var/folders/...), holding another app's cache and the cache
+# root. claude_profile turns the session settings into a seatbelt profile with Claude Code's
+# documented precedence (allowRead over denyRead and Read rules; writes only in the working
+# directory, /dev and allowWrite; denyWrite and Edit rules over allowWrite), so the old rendering
+# fails here the way the real session did. Like Claude Code's own macOS profile builder (2.1.325:
+# `(allow file-read-metadata (vnode-type DIRECTORY))` after the read rules whenever a read is
+# denied), folders' metadata stays readable: realpath works, listing a denied folder doesn't.
+mkdir -p "$WORK/ucache-real/C/com.other.app"; ln -s "$WORK/ucache-real" "$WORK/ucache"
+echo FAKE-APP-CACHE > "$WORK/ucache-real/C/com.other.app/data"
+UC="$WORK/ucache/C" UCR="$WORK/ucache-real/C"
+CROOT="$UCR/lean-cache"
+# rforms <path> — the path, then its resolved form (a missing one through its parent) when it differs.
+rforms() {
+  local r
+  r=$(/bin/realpath "$1" 2>/dev/null) || { r=$(/bin/realpath "$(dirname "$1")" 2>/dev/null) && r="$r/$(basename "$1")"; } || r=""
+  printf '%s\n' "$1"; [ -z "$r" ] || [ "$r" = "$1" ] || printf '%s\n' "$r"
+}
+# rule_paths <settings> <Read|Edit> — the absolute paths of the permission deny rules of that
+# kind, without a trailing /** (rules with another glob are left out).
+rule_paths() {
+  jq -r --arg k "$2" '.permissions.deny[] | select(startswith($k + "(/"))
+    | ltrimstr($k + "(/") | rtrimstr(")") | rtrimstr("/**") | select(test("[*?\\[]") | not)' <<<"$1"
+}
+# sb_rule <action> — one seatbelt rule per path on stdin, as written and resolved.
+sb_rule() { local p f; while IFS= read -r p; do [ -z "$p" ] || rforms "$p" | while IFS= read -r f; do printf '(%s (subpath "%s"))\n' "$1" "$f"; done; done; }
+# claude_profile <settings> <cwd> — the user temp dir's allowWrite entry stands for the session
+# TMPDIR only ($stmp): this test's folders (the emulated per-user cache dir among them) live in
+# the user temp dir, while the real per-user cache dir lies beside it.
+claude_profile() {
+  echo '(version 1)(allow default)'
+  { jq -r '.sandbox.filesystem.denyRead[]' <<<"$1"; rule_paths "$1" Read; } | sb_rule 'deny file-read*'
+  jq -r '.sandbox.filesystem.allowRead[]' <<<"$1" | sb_rule 'allow file-read*'
+  echo '(allow file-read-metadata (vnode-type DIRECTORY))'
+  echo '(deny file-write*)'
+  { printf '%s\n' "$2" /dev; jq -r --arg u "${UTMP%/}" --arg s "$stmp" '.sandbox.filesystem.allowWrite[] | if . == $u then $s else . end' <<<"$1"; } | sb_rule 'allow file-write*'
+  { jq -r '.sandbox.filesystem.denyWrite[]' <<<"$1"; rule_paths "$1" Edit; } | sb_rule 'deny file-write*'
+}
+D="$WORK/dev/d"; E="$WORK/dev/e"; project "$D"; project "$E"
+sess() { LEAN_CACHE_BASE="$UC" LEAN_USER_CACHE="$UC" setup "$@"; }
+sd=$(sess "$D" "$(mkt)" session | head -1) && gd=$(sess "$D" "$(mkt)" gate | head -1) \
+  && se=$(sess "$E" "$(mkt)" session | head -1) || die "setup in the emulated per-user cache dir"
+case "$sd" in "$CROOT"/*) ;; *) die "the session folder should be resolved, in $CROOT: $sd" ;; esac
+for f in "$gd" "$se"; do echo FAKE-OTHER > "$f/probe"; done
+# The interactive mode execs the stub, so the session TMPDIR (the fallback's home) outlives claude.sh.
+out=$(cd "$D" && LEAN_CACHE_BASE="$UC" LEAN_USER_CACHE="$UC" PATH="$WORK/bin:$PATH" \
+  bash "$TOOLKIT_DIR/lean/adapters/claude.sh" "$D" interactive - /dev/null hi < /dev/null 2>&1) || die "claude.sh: $out"
+settings=$(tr '\0' '\n' < "$STUB_ARGV" | grep -A1 -x -- --settings | tail -1)
+hook=$(jq -r '.hooks.SessionStart[-1].hooks[0].command' <<<"$settings")
+envf="$WORK/claude-env"; : > "$envf"
+CLAUDE_ENV_FILE="$envf" /bin/sh -c "$hook" || die "the SessionStart hook: $hook"
+stmp=$(sed -n 's/^export TMPDIR=//p' "$envf" | head -1); stmp="${stmp%/}"
+case "$stmp" in */lean-session.*) ;; *) die "the hook should export the session TMPDIR: $(head -3 "$envf")" ;; esac
+cleanup_stmp() { [ -z "${stmp:-}" ] || { chmod -R u+w "$stmp" 2>/dev/null; rm -rf "$stmp"; }; cleanup; }
+trap cleanup_stmp EXIT
+# The rendering: the folder in allowRead and allowWrite, resolved (/private/var/...) and in its
+# /var/... spelling; no Read/Edit rule over it in any spelling, the link's included (the root and
+# the per-user cache dir are carved: the gate's folder, the other project's, the other app's
+# cache, each its own rule); the root and the per-user cache dir stay whole in denyRead.
+sd_link="$UC/lean-cache/${sd#"$CROOT"/}"
+for k in allowRead allowWrite; do
+  jq -e --arg s "$sd" --arg v "${sd#/private}" --arg k "$k" '.sandbox.filesystem[$k] | index($s) and index($v)' <<<"$settings" >/dev/null \
+    || die "claude: $k should hold the session folder resolved and as /var/...: $(jq -c --arg k "$k" '.sandbox.filesystem[$k]' <<<"$settings")"
+done
+# holds <path> <dir...> — prints <path> when it is one of the dirs or holds one.
+holds() { local p="$1" d; shift; for d in "$@"; do case "$d/" in "$p"/*) echo "$p"; return ;; esac; done; }
+for k in Read Edit; do
+  held=$(rule_paths "$settings" "$k" | while IFS= read -r p; do holds "$p" "$sd" "${sd#/private}" "$sd_link"; done)
+  [ -z "$held" ] || die "claude: a $k deny rule holds the session folder (Claude Code makes Edit rules denyWrite, which wins over allowWrite): $held"
+  for p in "$gd" "$(dirname "$se")" "$UCR/com.other.app"; do
+    rule_paths "$settings" "$k" | grep -qxF "$p" || die "claude: $p should keep a $k deny rule"
+  done
+done
+for p in "$CROOT" "$UC"; do
+  jq -e --arg p "$p" '.sandbox.filesystem.denyRead | index($p)' <<<"$settings" >/dev/null || die "claude: denyRead should hold $p whole"
+done
+# L1: the cache root's pieces (the gate's folder, the other project's) also in the /var spelling.
+case "$CROOT" in /private/*) ;; *) die "the emulated cache root should resolve under /private: $CROOT" ;; esac
+for k in Read Edit; do
+  for p in "${gd#/private}" "$(dirname "${se#/private}")" "$gd"; do
+    jq -e --arg r "$k(/$p/**)" --arg b "$k(/$p)" '.permissions.deny | index($r) and index($b)' <<<"$settings" >/dev/null \
+      || die "claude: $k deny rules for $p and $p/** expected"
+  done
+done
+# M1: every project's gate/ as a glob in both spellings, which never matches a session folder.
+for r in "$CROOT" "${CROOT#/private}"; do
+  for k in Read Edit; do
+    jq -e --arg r "$k(/$r/*/gate/**)" '.permissions.deny | index($r)' <<<"$settings" >/dev/null || die "claude: the glob rule $k(/$r/*/gate/**) expected"
+  done
+done
+globs=$(jq -r '.permissions.deny[] | select(test("^(Read|Edit)\\(/")) | sub("^(Read|Edit)\\(/"; "") | rtrimstr(")") | select(test("[*?\\[]"))
+  | gsub("\\."; "\\.") | gsub("\\*\\*"; "\u0001") | gsub("\\*"; "[^/]*") | gsub("\u0001"; ".*")' <<<"$settings")
+for f in "$sd" "${sd#/private}" "$sd/x" "${sd#/private}/x"; do
+  while IFS= read -r g; do [ -z "$g" ] || ! printf '%s\n' "$f" | grep -qE "^$g\$" || die "claude: the glob rule $g holds the session folder ($f)"; done <<<"$globs"
+done
+jq -e --arg r "$UCR" --arg l "$UC" '.sandbox.filesystem.allowWrite | any(. == $r or . == $l or . == ($r + "/lean-cache") or . == ($l + "/lean-cache"))' <<<"$settings" >/dev/null \
+  && die "claude: neither the per-user cache dir nor the cache root may be writable"
+# M1: with the gate's folder missing (a session before the first gate run), sandbox.sh still
+# names it (path and /**, both spellings); claude.sh creates it (mode 700) before rendering.
+mv "$gd" "$WORK/gate.away"
+ms=$(LEAN_CACHE_BASE="$UC" LEAN_USER_CACHE="$UC" bash "$TOOLKIT_DIR/lean/sandbox.sh" "$D" --cache "$sd" 2>&1) || die "sandbox.sh --cache with no gate folder: $ms"
+for p in "$gd" "${gd#/private}"; do
+  for k in Read Edit; do
+    jq -e --arg r "$k(/$p/**)" --arg b "$k(/$p)" '.permissions.deny | index($r) and index($b)' <<<"$ms" >/dev/null \
+      || die "claude: a missing gate folder still needs $k rules for $p and $p/**"
+  done
+done
+out=$(cd "$D" && LEAN_CACHE_BASE="$UC" LEAN_USER_CACHE="$UC" PATH="$WORK/bin:$PATH" \
+  bash "$TOOLKIT_DIR/lean/adapters/claude.sh" "$D" headless - /dev/null hi "$WORK/res-gate.json" < /dev/null 2>&1) || die "claude.sh with no gate folder: $out"
+[ -d "$gd" ] && [ ! -L "$gd" ] && [ "$(stat -f %Lp "$gd" 2>/dev/null || stat -c %a "$gd")" = 700 ] || die "claude.sh should create the gate's folder (mode 700) before the session"
+rmdir "$gd" && mv "$WORK/gate.away" "$gd" || die "restoring the gate's folder"
+# The fallback lines: the probe, the session TMPDIR's lean-cache otherwise.
+grep -qF ".lean-write-probe" "$envf" && grep -qx 'export LEAN_CACHE_FALLBACK=1' "$envf" \
+  || die "the env file should hold the probe and the fallback: $(cat "$envf")"
+if [ "$SBX" = 1 ]; then
+  prof=$(claude_profile "$settings" "$D")
+  inbox() { sandbox-exec -p "$prof" /bin/bash -c ". '$envf'; $1" 2>&1; }
+  # (`mkdir`, not BSD `mkdir -p`: that one mkdir()s every level from /, and the per-user cache
+  # dir above the folder is denied; Go's MkdirAll, Python's makedirs and Node start from the
+  # folder and work.)
+  out=$(cd "$D" && inbox 'printf "%s\n" "$LEAN_CACHE" "${LEAN_CACHE_FALLBACK:-0}"; touch "$LEAN_CACHE/x" && echo hi > "$LEAN_CACHE/x" && cat "$LEAN_CACHE/x"; mkdir "$GOCACHE" && echo go > "$GOCACHE/f" && cat "$GOCACHE/f" && rm -r "$GOCACHE"')
+  [ "$out" = "$(printf '%s\n' "$sd" 0 hi go)" ] || die "in the emulated Claude sandbox, the session should write and read its own cache folder (no fallback): $out"
+  # I2: realpath(3) and BSD mkdir -p of $LEAN_CACHE (folder metadata above it readable).
+  out=$(cd "$D" && inbox '/bin/realpath "$LEAN_CACHE" && mkdir -p "$LEAN_CACHE/a/b" && cd "$LEAN_CACHE" && /bin/pwd -P && rm -r "$LEAN_CACHE/a"')
+  [ "$out" = "$(printf '%s\n' "$sd" "$sd")" ] || die "in the emulated Claude sandbox, realpath, mkdir -p and pwd -P of \$LEAN_CACHE should work: $out"
+  for c in "ls '$UC'" "ls '$UCR'" "ls '$CROOT'" "ls '$gd'" "cat '$gd/probe'" "cat '$se/probe'" "cat '$UCR/com.other.app/data'" \
+           "echo x > '$gd/w'" "echo x > '$se/w'" "mkdir '$CROOT/planted'" "echo x > '$UCR/planted'" "echo x > '$UCR/com.other.app/w'" \
+           "echo x > '$(dirname "$sd")/w'" "ls '$(dirname "$sd")'" "mkdir \"\$HOME/planted\""; do
+    out=$(cd "$D" && inbox "$c") && die "the emulated Claude sandbox should deny: $c ($out)"
+  done
+  [ ! -e "$CROOT/planted" ] && [ ! -e "$UCR/planted" ] && [ ! -e "$HOME/planted" ] || die "something was planted"
+  # TMPPREFIX (zsh's here-documents) is in the session TMPDIR, writable: a here-document works.
+  if [ -x /bin/zsh ]; then
+    out=$(cd "$D" && sandbox-exec -p "$prof" /bin/zsh -fc ". '$envf'; case \"\$TMPPREFIX\" in \"\$TMPDIR\"*) ;; *) echo bad-prefix ;; esac; cat <<EOF
+heredoc
+EOF
+touch \"\$LEAN_CACHE/z\" && echo \"\${LEAN_CACHE_FALLBACK:-0}\"" 2>&1)
+    [ "$out" = "$(printf 'heredoc\n0')" ] || die "zsh in the emulated sandbox: TMPPREFIX in TMPDIR, a here-document, the cache writable: $out"
+  fi
+  # The old rendering (an Edit rule over the cache root) is refused by the same emulation: the
+  # write fails...
+  old=$(jq -c --arg r "$CROOT" '.permissions.deny += ["Edit(/" + $r + "/**)"]' <<<"$settings")
+  oprof=$(claude_profile "$old" "$D")
+  out=$(cd "$D" && sandbox-exec -p "$oprof" /bin/bash -c "touch '$sd/y'" 2>&1) && die "the emulation should deny a write under an Edit rule (else it proves nothing): $out"
+  # ...and the fail-safe moves every cache variable to the session TMPDIR's lean-cache, which
+  # the session can write, and says so.
+  out=$(cd "$D" && sandbox-exec -p "$oprof" /bin/bash -c ". '$envf'; printf '%s\n' \"\$LEAN_CACHE\" \"\$GOCACHE\" \"\$XDG_CACHE_HOME\" \"\${LEAN_CACHE_FALLBACK:-0}\"; echo f > \"\$LEAN_CACHE/x\" && cat \"\$LEAN_CACHE/x\"" 2>&1)
+  [ "$out" = "$(printf '%s\n' "$stmp/lean-cache" "$stmp/lean-cache/go-build" "$stmp/lean-cache/xdg" 1 f)" ] \
+    || die "the fallback should point the caches at the session TMPDIR when the cache folder can't be written: $out"
+  [ "$(/bin/ls -A "$stmp/lean-cache")" = x ] || die "the fallback folder should hold only what the session wrote: $(/bin/ls -A "$stmp/lean-cache")"
+fi
+# lean.cache "run": the folder is already the session TMPDIR's: no probe.
+R="$WORK/dev/r"; project "$R" '{"verify_command":"true","lean":{"cache":"run"}}'
+out=$(cd "$R" && LEAN_CACHE_BASE="$UC" LEAN_USER_CACHE="$UC" PATH="$WORK/bin:$PATH" bash "$TOOLKIT_DIR/lean/adapters/claude.sh" "$R" headless - /dev/null hi "$WORK/res.json" 2>&1) || die "claude.sh (run): $out"
+rs=$(tr '\0' '\n' < "$STUB_ARGV" | grep -A1 -x -- --settings | tail -1)
+jq -r '.hooks.SessionStart[-1].hooks[0].command' <<<"$rs" | grep -q 'lean-write-probe' && die "lean.cache run: no probe expected"
+# sandbox.sh refuses --cache with --seatbelt, a missing folder and one under $HOME.
+bash "$TOOLKIT_DIR/lean/sandbox.sh" "$D" --seatbelt --cache "$sd" >/dev/null 2>&1 && die "sandbox.sh: --cache with --seatbelt must be refused"
+bash "$TOOLKIT_DIR/lean/sandbox.sh" "$D" --cache "$WORK/nope" >/dev/null 2>&1 && die "sandbox.sh: a missing --cache folder must be refused"
+mkdir -p "$HOME/c"; bash "$TOOLKIT_DIR/lean/sandbox.sh" "$D" --cache "$HOME/c" >/dev/null 2>&1 && die "sandbox.sh: a --cache folder under \$HOME must be refused"
+no_key "claude sessions"
+pass "Claude: the session folder written and read (no Read/Edit rule over it, both spellings allowed); the gate's, other projects', the root and the per-user cache dir denied; fail-safe to the session TMPDIR; TMPPREFIX in TMPDIR"
 
 if [ "$FAILED" = 0 ]; then echo "lean_toolchain_cache_safety_test: $PASS passed"; else echo "lean_toolchain_cache_safety_test: $PASS passed, $FAILED failure(s)"; fi
 [ "$FAILED" = 0 ]
